@@ -1,0 +1,61 @@
+parser_config_id: bronze_customer_load
+parser_config_name: Bronze Customer Load
+version: 1.0.0
+owner: Data Engineering
+owner_department: Enterprise Data
+description: Demonstrates every parser available in the first release.
+
+globals:
+  null_markers: [NA, "Null"]
+  null_marker_case_sensitive: false
+
+columns:
+  - column_name: customer_name
+    data_type: string
+    parser:
+      type: string
+      format: pascal
+      replace_null_markers: true
+      audit: true
+
+  - column_name: household_size
+    data_type: integer
+    parser:
+      type: integer
+
+  - column_name: customer_number
+    data_type: long
+    parser: long
+
+  - column_name: account_balance
+    data_type: decimal(18,2)
+    parser:
+      type: decimal
+      zero_is_valid: false
+      on_parse_error: null
+      audit: true
+
+  - column_name: interest_rate
+    data_type: double
+    parser: double
+
+  - column_name: is_active
+    data_type: boolean
+    parser:
+      type: boolean
+      true_values: ["true", Y, "1"]
+      false_values: ["false", N, "0"]
+
+  - column_name: opened_date
+    data_type: date
+    parser:
+      type: date
+      formats: [yyyy-MM-dd, MM/dd/yyyy]
+
+  - column_name: loaded_at
+    data_type: timestamp
+    parser:
+      type: timestamp
+      formats:
+        - yyyy-MM-dd HH:mm:ss
+        - yyyy-MM-dd'T'HH:mm:ss

@@ -1,0 +1,47 @@
+parser_config_id: bronze_positions_to_silver
+parser_config_name: Bronze Positions Parser
+version: 1.0.0
+owner: Data Engineering
+owner_department: Enterprise Data
+description: Example load-specific parsing configuration.
+
+globals:
+  null_markers: [NA, "Null"]
+  null_marker_case_sensitive: true
+
+columns:
+  - column_name: column_name1
+    data_type: string
+    parser:
+      type: string
+      format: pascal
+      replace_null_markers: true
+      null_markers: [N/A]
+      null_markers_mode: extend
+      audit: true
+
+  - column_name: column_name2
+    data_type: integer
+    parser:
+      type: integer
+      replace_null_markers: true
+      is_nullable: false
+      default_on_null: -1
+      zero_is_valid: false
+      audit: true
+
+  - column_name: column_name3
+    data_type: decimal(38,32)
+    parser:
+      type: decimal
+      replace_null_markers: true
+      zero_is_valid: true
+      audit: true
+
+  - column_name: column_name5
+    data_type: date
+    parser:
+      type: date
+      formats: [yyyy-MM-dd]
+      replace_null_markers: true
+      is_nullable: true

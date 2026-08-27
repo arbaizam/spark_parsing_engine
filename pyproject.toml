@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools==84.0.0", "wheel==0.47.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spark-parser"
+dynamic = ["version"]
+description = "Strict, YAML-configured parsing of bronze string columns in Spark."
+requires-python = ">=3.10"
+dependencies = [
+    "pyspark>=3.5",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["spark_parser*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "spark_parser.version.__version__"}
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B", "BLE", "C90", "DTZ", "FURB"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 20
