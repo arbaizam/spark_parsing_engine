@@ -12,6 +12,24 @@ from typing import Any
 
 import yaml
 
+from spark_parser.defaults import (
+    DEFAULT_AUDIT,
+    DEFAULT_BOOLEAN_CASE_SENSITIVE,
+    DEFAULT_BOOLEAN_FALSE_VALUES,
+    DEFAULT_BOOLEAN_TRUE_VALUES,
+    DEFAULT_COLLAPSE_WHITESPACE,
+    DEFAULT_DATE_FORMATS,
+    DEFAULT_EMPTY_IS_NULL,
+    DEFAULT_IS_NULLABLE,
+    DEFAULT_NULL_MARKER_CASE_SENSITIVE,
+    DEFAULT_NULL_MARKERS,
+    DEFAULT_NULL_MARKERS_MODE,
+    DEFAULT_ON_PARSE_ERROR,
+    DEFAULT_REPLACE_NULL_MARKERS,
+    DEFAULT_TIMESTAMP_FORMATS,
+    DEFAULT_TRIM_WHITESPACE,
+    DEFAULT_ZERO_IS_VALID,
+)
 from spark_parser.enums import (
     NUMERIC_PARSER_TYPES,
     NullMarkersMode,
@@ -123,11 +141,14 @@ class YamlParserConfigCompiler:
             "globals",
         )
         return ParserGlobals(
-            null_markers=self._string_sequence(payload.get("null_markers", []), "null_markers"),
+            null_markers=self._string_sequence(
+                payload.get("null_markers", list(DEFAULT_NULL_MARKERS)),
+                "null_markers",
+            ),
             null_marker_case_sensitive=self._bool(
                 payload,
                 "null_marker_case_sensitive",
-                True,
+                DEFAULT_NULL_MARKER_CASE_SENSITIVE,
             ),
         )
 
@@ -208,7 +229,7 @@ class YamlParserConfigCompiler:
 
         markers_mode = self._enum_value(
             NullMarkersMode,
-            payload.get("null_markers_mode", NullMarkersMode.REPLACE.value),
+            payload.get("null_markers_mode", DEFAULT_NULL_MARKERS_MODE.value),
             "null_markers_mode",
         )
         if "null_markers_mode" in payload and "null_markers" not in payload:
@@ -224,13 +245,17 @@ class YamlParserConfigCompiler:
             )
         else:
             markers = globals_config.null_markers
-        replace_null_markers = self._bool(payload, "replace_null_markers", False)
+        replace_null_markers = self._bool(
+            payload,
+            "replace_null_markers",
+            DEFAULT_REPLACE_NULL_MARKERS,
+        )
         if replace_null_markers and not markers:
             raise CompilationError(
                 f"replace_null_markers is true for {column_name!r}, but no null markers exist."
             )
 
-        is_nullable = self._bool(payload, "is_nullable", True)
+        is_nullable = self._bool(payload, "is_nullable", DEFAULT_IS_NULLABLE)
         raw_default_on_null = payload.get("default_on_null", _MISSING)
         if not is_nullable and raw_default_on_null is _MISSING:
             raise CompilationError(
@@ -246,7 +271,7 @@ class YamlParserConfigCompiler:
             else None
         )
 
-        raw_on_parse_error = payload.get("on_parse_error", ParseErrorMode.FAIL.value)
+        raw_on_parse_error = payload.get("on_parse_error", DEFAULT_ON_PARSE_ERROR.value)
         # YAML resolves an unquoted ``null`` scalar to ``None``. In this one
         # enum position it unambiguously names the canonical ``null`` mode.
         if "on_parse_error" in payload and raw_on_parse_error is None:
@@ -271,7 +296,7 @@ class YamlParserConfigCompiler:
             else None
         )
 
-        zero_is_valid = self._bool(payload, "zero_is_valid", True)
+        zero_is_valid = self._bool(payload, "zero_is_valid", DEFAULT_ZERO_IS_VALID)
         if (
             parser_type in NUMERIC_PARSER_TYPES
             and not zero_is_valid
@@ -291,9 +316,17 @@ class YamlParserConfigCompiler:
         )
         return ParserOptions(
             parser_type=parser_type,
-            trim_whitespace=self._bool(payload, "trim_whitespace", True),
-            collapse_whitespace=self._bool(payload, "collapse_whitespace", True),
-            empty_is_null=self._bool(payload, "empty_is_null", True),
+            trim_whitespace=self._bool(
+                payload,
+                "trim_whitespace",
+                DEFAULT_TRIM_WHITESPACE,
+            ),
+            collapse_whitespace=self._bool(
+                payload,
+                "collapse_whitespace",
+                DEFAULT_COLLAPSE_WHITESPACE,
+            ),
+            empty_is_null=self._bool(payload, "empty_is_null", DEFAULT_EMPTY_IS_NULL),
             replace_null_markers=replace_null_markers,
             null_markers=markers,
             null_markers_mode=markers_mode,
@@ -306,7 +339,7 @@ class YamlParserConfigCompiler:
             default_on_null=default_on_null,
             on_parse_error=on_parse_error,
             default_on_error=default_on_error,
-            audit=self._bool(payload, "audit", False),
+            audit=self._bool(payload, "audit", DEFAULT_AUDIT),
             zero_is_valid=zero_is_valid,
             string_format=string_format,
             formats=formats,
@@ -333,9 +366,9 @@ class YamlParserConfigCompiler:
         parser_type: ParserType,
     ) -> tuple[str, ...]:
         if parser_type is ParserType.DATE:
-            default = ("yyyy-MM-dd",)
+            default = DEFAULT_DATE_FORMATS
         elif parser_type is ParserType.TIMESTAMP:
-            default = ("yyyy-MM-dd HH:mm:ss",)
+            default = DEFAULT_TIMESTAMP_FORMATS
         else:
             return ()
         if "formats" not in payload:
@@ -352,20 +385,28 @@ class YamlParserConfigCompiler:
         column_name: str,
     ) -> tuple[tuple[str, ...], tuple[str, ...], bool]:
         if parser_type is not ParserType.BOOLEAN:
-            return ("true",), ("false",), False
+            return (
+                DEFAULT_BOOLEAN_TRUE_VALUES,
+                DEFAULT_BOOLEAN_FALSE_VALUES,
+                DEFAULT_BOOLEAN_CASE_SENSITIVE,
+            )
         true_values = self._string_sequence(
-            payload.get("true_values", ["true"]),
+            payload.get("true_values", list(DEFAULT_BOOLEAN_TRUE_VALUES)),
             "true_values",
             allow_empty_values=False,
         )
         false_values = self._string_sequence(
-            payload.get("false_values", ["false"]),
+            payload.get("false_values", list(DEFAULT_BOOLEAN_FALSE_VALUES)),
             "false_values",
             allow_empty_values=False,
         )
         if not true_values or not false_values:
             raise CompilationError("true_values and false_values must be non-empty.")
-        case_sensitive = self._bool(payload, "boolean_case_sensitive", False)
+        case_sensitive = self._bool(
+            payload,
+            "boolean_case_sensitive",
+            DEFAULT_BOOLEAN_CASE_SENSITIVE,
+        )
         normalize = (lambda item: item) if case_sensitive else (lambda item: item.casefold())
         overlap = {normalize(item) for item in true_values} & {
             normalize(item) for item in false_values

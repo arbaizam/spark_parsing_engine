@@ -1,61 +1,176 @@
-parser_config_id: bronze_customer_load
-parser_config_name: Bronze Customer Load
-version: 1.0.0
-owner: Data Engineering
-owner_department: Enterprise Data
-description: Demonstrates every parser available in the first release.
+# Spark Parser complete YAML argument reference.
+#
+# Indicators:
+#   [required]               must be supplied
+#   [optional; default: X]   may be omitted; X is materialized by the compiler
+#   [conditionally required] required only under the condition stated
+# In every column block, column_name, data_type, parser, and mapping-form type
+# are [required]. Every other uncommented parser option is [optional] and is
+# set to its displayed compiler default. Commented default_on_* lines are
+# [conditionally required], have no default, and show an example typed value.
 
-globals:
-  null_markers: [NA, "Null"]
-  null_marker_case_sensitive: false
+parser_config_id: bronze_all_parsers       # [required] Stable configuration ID.
+parser_config_name: All Parser Arguments   # [required] Human-readable name.
+version: 1.0.0                             # [required] Non-empty string version.
+description: Every parser argument and default.  # [optional; default: null]
+owner: Data Engineering                    # [optional; default: null]
+owner_department: Enterprise Data          # [optional; default: null]
 
-columns:
-  - column_name: customer_name
-    data_type: string
-    parser:
-      type: string
-      format: pascal
-      replace_null_markers: true
-      audit: true
+globals:                                   # [optional; default: {}]
+  null_markers: []                         # [optional; default: []]
+  null_marker_case_sensitive: true         # [optional; default: true]
 
-  - column_name: household_size
+columns:                                   # [required] Non-empty ordered list.
+  # String parser
+  - column_name: string_value              # [required] Exact bronze/silver name.
+    data_type: string                      # [required] Target Spark datatype.
+    parser:                                # [required] Mapping or scalar `string`.
+      type: string                         # [required in mapping form]
+      collapse_whitespace: true            # [optional; default: true]
+      trim_whitespace: true                # [optional; default: true]
+      empty_is_null: true                  # [optional; default: true]
+      replace_null_markers: false          # [optional; default: false]
+      null_markers: []                     # [optional; default: inherited globals]
+      null_markers_mode: replace           # [optional; default: replace; replace|extend]
+      null_marker_case_sensitive: true     # [optional; default: inherited global]
+      is_nullable: true                    # [optional; default: true]
+      # default_on_null: UNKNOWN           # [conditionally required if is_nullable: false]
+      on_parse_error: fail                 # [optional; default: fail; fail|null|default]
+      # default_on_error: UNKNOWN          # [conditionally required for on_parse_error: default]
+      audit: false                         # [optional; default: false]
+      format: null                         # [optional; default: null; lower|upper|pascal]
+
+  # Integer parser (`data_type: int` and `type: int` are accepted aliases).
+  - column_name: integer_value
     data_type: integer
     parser:
       type: integer
+      collapse_whitespace: true
+      trim_whitespace: true
+      empty_is_null: true
+      replace_null_markers: false
+      null_markers: []
+      null_markers_mode: replace
+      null_marker_case_sensitive: true
+      is_nullable: true
+      # default_on_null: 0                 # [conditionally required if is_nullable: false]
+      on_parse_error: fail
+      # default_on_error: 0                # [conditionally required for on_parse_error: default]
+      audit: false
+      zero_is_valid: true                  # [optional; default: true]
 
-  - column_name: customer_number
+  # Long parser (`data_type: bigint` and `type: bigint` are accepted aliases).
+  - column_name: long_value
     data_type: long
-    parser: long
+    parser:
+      type: long
+      collapse_whitespace: true
+      trim_whitespace: true
+      empty_is_null: true
+      replace_null_markers: false
+      null_markers: []
+      null_markers_mode: replace
+      null_marker_case_sensitive: true
+      is_nullable: true
+      # default_on_null: 0
+      on_parse_error: fail
+      # default_on_error: 0
+      audit: false
+      zero_is_valid: true
 
-  - column_name: account_balance
+  # Decimal parser. Precision and scale are required in data_type; there is no default.
+  - column_name: decimal_value
     data_type: decimal(18,2)
     parser:
       type: decimal
-      zero_is_valid: false
-      on_parse_error: null
-      audit: true
+      collapse_whitespace: true
+      trim_whitespace: true
+      empty_is_null: true
+      replace_null_markers: false
+      null_markers: []
+      null_markers_mode: replace
+      null_marker_case_sensitive: true
+      is_nullable: true
+      # default_on_null: "0.00"
+      on_parse_error: fail
+      # default_on_error: "0.00"
+      audit: false
+      zero_is_valid: true
 
-  - column_name: interest_rate
+  # Double parser
+  - column_name: double_value
     data_type: double
-    parser: double
+    parser:
+      type: double
+      collapse_whitespace: true
+      trim_whitespace: true
+      empty_is_null: true
+      replace_null_markers: false
+      null_markers: []
+      null_markers_mode: replace
+      null_marker_case_sensitive: true
+      is_nullable: true
+      # default_on_null: 0.0
+      on_parse_error: fail
+      # default_on_error: 0.0
+      audit: false
+      zero_is_valid: true
 
-  - column_name: is_active
+  # Boolean parser
+  - column_name: boolean_value
     data_type: boolean
     parser:
       type: boolean
-      true_values: ["true", Y, "1"]
-      false_values: ["false", N, "0"]
+      collapse_whitespace: true
+      trim_whitespace: true
+      empty_is_null: true
+      replace_null_markers: false
+      null_markers: []
+      null_markers_mode: replace
+      null_marker_case_sensitive: true
+      is_nullable: true
+      # default_on_null: false
+      on_parse_error: fail
+      # default_on_error: false
+      audit: false
+      true_values: ["true"]                 # [optional; default: ["true"]]
+      false_values: ["false"]               # [optional; default: ["false"]]
+      boolean_case_sensitive: false         # [optional; default: false]
 
-  - column_name: opened_date
+  # Date parser. Formats cascade in list order; the first successful parse wins.
+  - column_name: date_value
     data_type: date
     parser:
       type: date
-      formats: [yyyy-MM-dd, MM/dd/yyyy]
+      collapse_whitespace: true
+      trim_whitespace: true
+      empty_is_null: true
+      replace_null_markers: false
+      null_markers: []
+      null_markers_mode: replace
+      null_marker_case_sensitive: true
+      is_nullable: true
+      # default_on_null: 1970-01-01
+      on_parse_error: fail
+      # default_on_error: 1970-01-01
+      audit: false
+      formats: [yyyy-MM-dd]                 # [optional; default: [yyyy-MM-dd]]
 
-  - column_name: loaded_at
+  # Timestamp parser. Formats cascade in list order; the first successful parse wins.
+  - column_name: timestamp_value
     data_type: timestamp
     parser:
       type: timestamp
-      formats:
-        - yyyy-MM-dd HH:mm:ss
-        - yyyy-MM-dd'T'HH:mm:ss
+      collapse_whitespace: true
+      trim_whitespace: true
+      empty_is_null: true
+      replace_null_markers: false
+      null_markers: []
+      null_markers_mode: replace
+      null_marker_case_sensitive: true
+      is_nullable: true
+      # default_on_null: 1970-01-01T00:00:00
+      on_parse_error: fail
+      # default_on_error: 1970-01-01T00:00:00
+      audit: false
+      formats: [yyyy-MM-dd HH:mm:ss]        # [optional; default: [yyyy-MM-dd HH:mm:ss]]

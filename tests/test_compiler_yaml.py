@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from spark_parser import (
+    PARSER_DEFAULTS,
     CompilationError,
     NullMarkersMode,
     ParseErrorMode,
@@ -41,8 +42,8 @@ def test_all_supported_parsers_compile() -> None:
     config = YamlParserConfigCompiler().compile_path(ROOT / "examples" / "all_parsers.yaml")
 
     assert [column.parser.parser_type for column in config.columns] == list(ParserType)
-    assert config.columns[3].parser.on_parse_error is ParseErrorMode.NULL
-    assert config.columns[3].parser.audit is True
+    assert config.columns[3].parser.on_parse_error is ParseErrorMode.FAIL
+    assert config.columns[3].parser.audit is False
 
 
 def test_safe_defaults_are_explicit() -> None:
@@ -67,6 +68,8 @@ columns:
     assert options.is_nullable is True
     assert options.on_parse_error is ParseErrorMode.FAIL
     assert options.audit is False
+    assert PARSER_DEFAULTS["common"]["collapse_whitespace"] is True
+    assert PARSER_DEFAULTS["date"]["formats"] == ["yyyy-MM-dd"]
 
 
 @pytest.mark.parametrize(

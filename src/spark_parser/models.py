@@ -5,6 +5,23 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from spark_parser.defaults import (
+    DEFAULT_AUDIT,
+    DEFAULT_BOOLEAN_CASE_SENSITIVE,
+    DEFAULT_BOOLEAN_FALSE_VALUES,
+    DEFAULT_BOOLEAN_TRUE_VALUES,
+    DEFAULT_COLLAPSE_WHITESPACE,
+    DEFAULT_EMPTY_IS_NULL,
+    DEFAULT_IS_NULLABLE,
+    DEFAULT_NULL_MARKER_CASE_SENSITIVE,
+    DEFAULT_NULL_MARKERS,
+    DEFAULT_NULL_MARKERS_MODE,
+    DEFAULT_ON_PARSE_ERROR,
+    DEFAULT_REPLACE_NULL_MARKERS,
+    DEFAULT_STRING_FORMAT,
+    DEFAULT_TRIM_WHITESPACE,
+    DEFAULT_ZERO_IS_VALID,
+)
 from spark_parser.enums import NullMarkersMode, ParseErrorMode, ParserType, StringFormat
 
 
@@ -12,8 +29,8 @@ from spark_parser.enums import NullMarkersMode, ParseErrorMode, ParserType, Stri
 class ParserGlobals:
     """Options inherited by every configured column."""
 
-    null_markers: tuple[str, ...] = ()
-    null_marker_case_sensitive: bool = True
+    null_markers: tuple[str, ...] = DEFAULT_NULL_MARKERS
+    null_marker_case_sensitive: bool = DEFAULT_NULL_MARKER_CASE_SENSITIVE
 
 
 @dataclass(frozen=True)
@@ -21,24 +38,24 @@ class ParserOptions:
     """Fully resolved options for one parser implementation."""
 
     parser_type: ParserType
-    trim_whitespace: bool = True
-    collapse_whitespace: bool = True
-    empty_is_null: bool = True
-    replace_null_markers: bool = False
-    null_markers: tuple[str, ...] = ()
-    null_markers_mode: NullMarkersMode = NullMarkersMode.REPLACE
-    null_marker_case_sensitive: bool = True
-    is_nullable: bool = True
+    trim_whitespace: bool = DEFAULT_TRIM_WHITESPACE
+    collapse_whitespace: bool = DEFAULT_COLLAPSE_WHITESPACE
+    empty_is_null: bool = DEFAULT_EMPTY_IS_NULL
+    replace_null_markers: bool = DEFAULT_REPLACE_NULL_MARKERS
+    null_markers: tuple[str, ...] = DEFAULT_NULL_MARKERS
+    null_markers_mode: NullMarkersMode = DEFAULT_NULL_MARKERS_MODE
+    null_marker_case_sensitive: bool = DEFAULT_NULL_MARKER_CASE_SENSITIVE
+    is_nullable: bool = DEFAULT_IS_NULLABLE
     default_on_null: Any = None
-    on_parse_error: ParseErrorMode = ParseErrorMode.FAIL
+    on_parse_error: ParseErrorMode = DEFAULT_ON_PARSE_ERROR
     default_on_error: Any = None
-    audit: bool = False
-    zero_is_valid: bool = True
-    string_format: StringFormat | None = None
+    audit: bool = DEFAULT_AUDIT
+    zero_is_valid: bool = DEFAULT_ZERO_IS_VALID
+    string_format: StringFormat | None = DEFAULT_STRING_FORMAT
     formats: tuple[str, ...] = ()
-    true_values: tuple[str, ...] = ("true",)
-    false_values: tuple[str, ...] = ("false",)
-    boolean_case_sensitive: bool = False
+    true_values: tuple[str, ...] = DEFAULT_BOOLEAN_TRUE_VALUES
+    false_values: tuple[str, ...] = DEFAULT_BOOLEAN_FALSE_VALUES
+    boolean_case_sensitive: bool = DEFAULT_BOOLEAN_CASE_SENSITIVE
 
 
 @dataclass(frozen=True)

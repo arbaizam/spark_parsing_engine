@@ -1,6 +1,7 @@
 """Public package surface for Spark Parser."""
 
 from spark_parser.compiler_yaml import YamlParserConfigCompiler
+from spark_parser.defaults import PARSER_DEFAULTS
 from spark_parser.enums import NullMarkersMode, ParseErrorMode, ParserType, StringFormat
 from spark_parser.exceptions import CompilationError, SchemaValidationError, SparkParserError
 from spark_parser.models import ColumnParser, ParserConfig, ParserGlobals, ParserOptions
@@ -11,6 +12,7 @@ __all__ = [
     "ColumnParser",
     "CompilationError",
     "NullMarkersMode",
+    "PARSER_DEFAULTS",
     "ParseErrorMode",
     "ParserConfig",
     "ParserConfigSerializer",
