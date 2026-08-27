@@ -23,6 +23,8 @@ class ParserConfigSerializer:
             parser_payload: dict[str, Any] = {
                 "type": options.parser_type.value,
                 "trim_whitespace": options.trim_whitespace,
+                "collapse_whitespace": options.collapse_whitespace,
+                "empty_is_null": options.empty_is_null,
                 "replace_null_markers": options.replace_null_markers,
                 "null_markers": list(options.null_markers),
                 "null_markers_mode": options.null_markers_mode.value,

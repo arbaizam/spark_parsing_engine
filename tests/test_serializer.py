@@ -18,4 +18,6 @@ def test_hash_and_mapping_are_deterministic() -> None:
     assert len(serializer.content_hash(first)) == 64
     payload = serializer.to_mapping(first)
     assert payload["columns"][0]["parser"]["trim_whitespace"] is True
+    assert payload["columns"][0]["parser"]["collapse_whitespace"] is True
+    assert payload["columns"][0]["parser"]["empty_is_null"] is True
     assert payload["columns"][0]["parser"]["audit"] is True

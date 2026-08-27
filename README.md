@@ -52,7 +52,9 @@ Decimal precision is limited to 38 and scale cannot exceed precision.
 
 | Option | Default | Behavior |
 |---|---|---|
-| `trim_whitespace` | `true` | Trims source text before marker matching and parsing. |
+| `collapse_whitespace` | `true` | Converts every internal whitespace run to one ordinary space. |
+| `trim_whitespace` | `true` | Removes whitespace from both ends after collapsing. |
+| `empty_is_null` | `true` | Converts an empty normalized string to null. |
 | `format` | `null` | Performs no string case formatting. |
 | `replace_null_markers` | `false` | Does not reinterpret business values as null. |
 | `is_nullable` | `true` | Allows a final null. |
@@ -66,18 +68,25 @@ validated against the target type during YAML compilation.
 
 Column `null_markers` use the global list when omitted. When supplied,
 `null_markers_mode: replace` replaces the globals and `extend` appends to
-them. Marker matching happens after trimming. It is case-sensitive unless the
-global or column setting explicitly disables case sensitivity.
+them. Marker matching happens after whitespace normalization and empty-string
+handling. It is case-sensitive unless the global or column setting explicitly
+disables case sensitivity.
 
 Parsing occurs in this order:
 
-1. Trim source text when enabled.
-2. Replace configured null markers.
-3. Parse and resolve parsing failures.
-4. Convert numeric zero to null when zero is invalid.
-5. Apply an explicit non-null default when required.
+1. Collapse internal whitespace and trim both ends when enabled.
+2. Convert an empty normalized string to null when enabled.
+3. Replace configured null markers.
+4. Parse and resolve parsing failures.
+5. Convert numeric zero to null when zero is invalid.
+6. Apply an explicit non-null default when required.
 
 A zero default is rejected when `zero_is_valid: false`.
+
+The first release supports `on_parse_error: fail`, `null`, and `default`.
+There is no `ignore` mode because an invalid raw string cannot be preserved in
+a typed target column. Row quarantine is intentionally deferred until the
+package has an explicit `quarantine_df` routing contract.
 
 ## Spark API
 
@@ -111,9 +120,10 @@ before a Spark action.
 Each parse-result struct uses column name, parser type, and target datatype as
 its identity. It includes original and parsed values, material-change state, applied
 actions, every effective option, and a handled parsing error when applicable.
-Routine whitespace trimming, case formatting, and datatype conversion do not
-set `changed`; null-marker replacement, handled parse errors, zero
-invalidation, and explicit default substitution do.
+Routine whitespace collapsing/trimming, case formatting, and datatype
+conversion do not set `changed`. Empty-to-null conversion, null-marker
+replacement, handled parse errors, zero invalidation, and explicit default
+substitution do.
 
 Both projections share one lazy Spark plan. Call `parsing.persist()` before
 materializing both when reuse justifies caching, then `parsing.unpersist()`.

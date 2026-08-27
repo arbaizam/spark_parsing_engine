@@ -22,6 +22,8 @@ class ParserOptions:
 
     parser_type: ParserType
     trim_whitespace: bool = True
+    collapse_whitespace: bool = True
+    empty_is_null: bool = True
     replace_null_markers: bool = False
     null_markers: tuple[str, ...] = ()
     null_markers_mode: NullMarkersMode = NullMarkersMode.REPLACE

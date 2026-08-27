@@ -189,12 +189,24 @@ class SparkDataFrameParser:
         final_name = f"__spark_parser_final_{token}"
 
         source = _column(column_config.column_name)
-        trimmed = F.trim(source) if options.trim_whitespace else source
-        marker_match = self._null_marker_match(trimmed, options)
+        whitespace_normalized = (
+            F.regexp_replace(source, r"\s+", " ") if options.collapse_whitespace else source
+        )
+        whitespace_normalized = (
+            F.trim(whitespace_normalized) if options.trim_whitespace else whitespace_normalized
+        )
+        empty_to_null = F.coalesce(
+            (whitespace_normalized == "") & F.lit(options.empty_is_null),
+            F.lit(False),
+        )
+        marker_match = self._null_marker_match(whitespace_normalized, options)
         normalized = (
-            F.when(marker_match, F.lit(None).cast("string")).otherwise(trimmed)
-            if options.replace_null_markers
-            else trimmed
+            F.when(empty_to_null, F.lit(None).cast("string"))
+            .when(
+                marker_match & F.lit(options.replace_null_markers),
+                F.lit(None).cast("string"),
+            )
+            .otherwise(whitespace_normalized)
         )
         working = df.withColumn(normalized_name, normalized)
         working = working.withColumn(
@@ -246,7 +258,8 @@ class SparkDataFrameParser:
             column_config,
             source=source,
             parsed=_column(final_name),
-            marker_replaced=marker_match & F.lit(options.replace_null_markers),
+            empty_to_null=empty_to_null,
+            marker_replaced=(marker_match & F.lit(options.replace_null_markers) & ~empty_to_null),
             parse_failed=parse_failed,
             zero_invalidated=zero_invalidated,
             default_on_null_applied=default_on_null_applied,
@@ -346,6 +359,7 @@ class SparkDataFrameParser:
         *,
         source: Column,
         parsed: Column,
+        empty_to_null: Column,
         marker_replaced: Column,
         parse_failed: Column,
         zero_invalidated: Column,
@@ -356,6 +370,7 @@ class SparkDataFrameParser:
         parse_default = parse_failed & F.lit(options.on_parse_error is ParseErrorMode.DEFAULT)
         actions = F.filter(
             F.array(
+                F.when(empty_to_null, F.lit("empty_string_to_null")),
                 F.when(marker_replaced, F.lit("null_marker_replaced")),
                 F.when(parse_to_null, F.lit("parse_error_to_null")),
                 F.when(parse_default, F.lit("parse_error_default_applied")),
@@ -366,7 +381,8 @@ class SparkDataFrameParser:
         )
         changed = F.coalesce(
             (
-                marker_replaced
+                empty_to_null
+                | marker_replaced
                 | parse_to_null
                 | parse_default
                 | zero_invalidated
@@ -394,6 +410,8 @@ class SparkDataFrameParser:
     def _options_map(self, options: ParserOptions) -> Column:
         payload: dict[str, Any] = {
             "trim_whitespace": options.trim_whitespace,
+            "collapse_whitespace": options.collapse_whitespace,
+            "empty_is_null": options.empty_is_null,
             "replace_null_markers": options.replace_null_markers,
             "null_markers": list(options.null_markers),
             "null_markers_mode": options.null_markers_mode.value,

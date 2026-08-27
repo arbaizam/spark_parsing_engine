@@ -184,6 +184,8 @@ class YamlParserConfigCompiler:
         allowed_keys = {
             "type",
             "trim_whitespace",
+            "collapse_whitespace",
+            "empty_is_null",
             "replace_null_markers",
             "null_markers",
             "null_markers_mode",
@@ -290,6 +292,8 @@ class YamlParserConfigCompiler:
         return ParserOptions(
             parser_type=parser_type,
             trim_whitespace=self._bool(payload, "trim_whitespace", True),
+            collapse_whitespace=self._bool(payload, "collapse_whitespace", True),
+            empty_is_null=self._bool(payload, "empty_is_null", True),
             replace_null_markers=replace_null_markers,
             null_markers=markers,
             null_markers_mode=markers_mode,

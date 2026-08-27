@@ -40,7 +40,12 @@ columns:
     data_type: string
     parser:
       type: string
-      format: pascal
+      format: upper
+      audit: true
+  - column_name: nickname
+    data_type: string
+    parser:
+      type: string
       audit: true
   - column_name: item_count
     data_type: integer
@@ -68,8 +73,16 @@ columns:
 """
     )
     bronze_df = spark.createDataFrame(
-        [("row-1", " alice smith ", "0", "NA", "2026-08-27", "Y")],
-        ["row_id", "customer_name", "item_count", "amount", "opened_date", "is_active"],
+        [("row-1", " alice \t  smith ", " \t ", "0", "NA", "2026-08-27", "Y")],
+        [
+            "row_id",
+            "customer_name",
+            "nickname",
+            "item_count",
+            "amount",
+            "opened_date",
+            "is_active",
+        ],
     )
 
     parsing = SparkDataFrameParser().parse_dataframe(
@@ -79,16 +92,24 @@ columns:
     )
 
     parsed = parsing.parsed_df.first()
-    assert parsed.customer_name == "AliceSmith"
+    assert parsed.customer_name == "ALICE SMITH"
+    assert parsed.nickname is None
     assert parsed.item_count == -1
     assert parsed.amount is None
     assert parsed.opened_date.isoformat() == "2026-08-27"
     assert parsed.is_active is True
 
     audit = parsing.results_df.first().spark_parser_parse_results
-    assert [item.column_name for item in audit] == ["customer_name", "item_count", "amount"]
+    assert [item.column_name for item in audit] == [
+        "customer_name",
+        "nickname",
+        "item_count",
+        "amount",
+    ]
     assert audit[0].changed is False
-    assert audit[1].parsed_value == "-1"
-    assert audit[1].actions_applied == ["zero_invalidated", "default_on_null_applied"]
-    assert audit[2].parsed_value is None
-    assert audit[2].actions_applied == ["null_marker_replaced"]
+    assert audit[1].parsed_value is None
+    assert audit[1].actions_applied == ["empty_string_to_null"]
+    assert audit[2].parsed_value == "-1"
+    assert audit[2].actions_applied == ["zero_invalidated", "default_on_null_applied"]
+    assert audit[3].parsed_value is None
+    assert audit[3].actions_applied == ["null_marker_replaced"]

@@ -60,6 +60,8 @@ columns:
 
     options = config.columns[0].parser
     assert options.trim_whitespace is True
+    assert options.collapse_whitespace is True
+    assert options.empty_is_null is True
     assert options.string_format is None
     assert options.replace_null_markers is False
     assert options.is_nullable is True
