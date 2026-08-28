@@ -1,4 +1,9 @@
-"""Discoverable authoring metadata used by the public service API."""
+"""Machine-readable authoring guidance exposed by the public service API.
+
+This metadata is built from the same enum vocabulary and defaults used by compilation. Notebook
+help, documentation generators, and configuration UIs can therefore explain actual behavior
+without maintaining an independent, drift-prone argument catalog.
+"""
 
 from __future__ import annotations
 
@@ -26,6 +31,7 @@ def _argument(
     description: str,
     condition: str | None = None,
 ) -> dict[str, Any]:
+    """Create one detached argument-description record with a consistent public shape."""
     return {
         "name": name,
         "required": required,
@@ -37,6 +43,8 @@ def _argument(
     }
 
 
+# Arguments shared by every parser node. Parser-specific lists below are appended to a deep copy so
+# callers can safely modify returned metadata without mutating these module constants.
 _COMMON_ARGUMENTS = [
     _argument(
         "type",
@@ -114,6 +122,7 @@ _COMMON_ARGUMENTS = [
 
 
 def _zero_is_valid_argument() -> dict[str, Any]:
+    """Return a fresh shared numeric-argument description."""
     return _argument(
         "zero_is_valid",
         default=PARSER_DEFAULTS["numeric"]["zero_is_valid"],
@@ -121,6 +130,8 @@ def _zero_is_valid_argument() -> dict[str, Any]:
     )
 
 
+# Parser-specific authoring arguments. Keeping this table declarative makes omissions visible in
+# code review whenever a new ParserType is introduced.
 _SPECIFIC_ARGUMENTS: dict[ParserType, list[dict[str, Any]]] = {
     **{parser_type: [_zero_is_valid_argument()] for parser_type in NUMERIC_PARSER_TYPES},
     ParserType.STRING: [
@@ -266,6 +277,7 @@ _SPECIFIC_ARGUMENTS: dict[ParserType, list[dict[str, Any]]] = {
 }
 
 
+# Human-facing summaries and guidance remain data rather than branching prose in service.py.
 _SUMMARIES = {
     ParserType.STRING: "Normalize a string and optionally apply a deterministic display profile.",
     ParserType.BYTE: "Parse a bronze string as an 8-bit Spark byte.",
@@ -355,7 +367,11 @@ _SPECIFIC_GOTCHAS = {
 
 
 def parser_description(parser_type: ParserType) -> dict[str, Any]:
-    """Return a fresh machine-readable description for one parser type."""
+    """Return a fresh machine-readable description for one parser type.
+
+    Complex containers override the common whitespace-collapse default because rewriting raw JSON
+    could alter quoted child values. Recursive leaf parsers still advertise their own defaults.
+    """
     expected = {
         ParserType.DECIMAL: ["decimal(p,s)"],
         ParserType.ARRAY: ["array<T>"],
@@ -370,6 +386,8 @@ def parser_description(parser_type: ParserType) -> dict[str, Any]:
         if is_complex
         else "Whitespace collapse, trim, and empty-to-null run before parser-specific conversion."
     )
+    # Deep copy is part of the public contract: consumers may annotate or reorder metadata locally
+    # without changing later calls.
     arguments = deepcopy([*_COMMON_ARGUMENTS, *_SPECIFIC_ARGUMENTS[parser_type]])
     if is_complex:
         for argument in arguments:
@@ -405,7 +423,7 @@ def parser_description(parser_type: ParserType) -> dict[str, Any]:
 
 
 def config_description() -> dict[str, Any]:
-    """Return the top-level, global, and column authoring contract."""
+    """Return a fresh description of top-level, global, and column authoring contracts."""
     return {
         "top_level_arguments": [
             _argument("parser_config_id", required=True, description="Stable configuration ID."),

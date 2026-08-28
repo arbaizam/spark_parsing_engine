@@ -1,4 +1,9 @@
-"""Immutable canonical models for parser configuration metadata."""
+"""Immutable canonical models shared by compilation, execution, and reporting.
+
+These dataclasses contain fully resolved values, not raw YAML. That distinction is important: code
+after compilation never needs to guess whether an option was omitted, inherited, or defaulted.
+Frozen instances also make configuration hashing and lazy Spark-plan construction predictable.
+"""
 
 from __future__ import annotations
 
@@ -44,7 +49,11 @@ from spark_parser.enums import (
 
 @dataclass(frozen=True)
 class ParserGlobals:
-    """Options inherited by every configured column."""
+    """Code-owned defaults and author overrides inherited by configured columns.
+
+    Tuples are used instead of lists so the compiled global vocabulary cannot be mutated after
+    individual parser options have inherited it.
+    """
 
     null_markers: tuple[str, ...] = DEFAULT_NULL_MARKERS
     null_marker_case_sensitive: bool = DEFAULT_NULL_MARKER_CASE_SENSITIVE
@@ -55,7 +64,12 @@ class ParserGlobals:
 
 @dataclass(frozen=True)
 class ParserOptions:
-    """Fully resolved options for one parser implementation."""
+    """Fully resolved options for one parser node.
+
+    One model represents scalar and complex parsers. Fields that do not apply to a parser type stay
+    at harmless defaults; the compiler strictly rejects misplaced authoring keys before this model
+    is created. Nested parser references form the same recursive tree as ``expected_data_type``.
+    """
 
     parser_type: ParserType
     trim_whitespace: bool = DEFAULT_TRIM_WHITESPACE
@@ -92,7 +106,11 @@ class ParserOptions:
 
 @dataclass(frozen=True)
 class NestedValueParser:
-    """Parser bound to an array element or map value datatype."""
+    """Parser bound to an array element or map value datatype.
+
+    The canonical DDL string is stored alongside the parsed datatype to avoid reparsing it while
+    Spark expressions are generated recursively.
+    """
 
     expected_data_type: str
     data_type: SparkDataType
@@ -101,7 +119,11 @@ class NestedValueParser:
 
 @dataclass(frozen=True)
 class StructFieldParser:
-    """Source-to-silver parser for one configured struct field."""
+    """Source-to-silver parser for one configured struct field.
+
+    Source and silver names may differ. Runtime JSON decoding uses the source name, while emitted
+    struct order and field aliases follow the silver schema.
+    """
 
     source_field_name: str
     silver_field_name: str
@@ -112,7 +134,7 @@ class StructFieldParser:
 
 @dataclass(frozen=True)
 class ColumnParser:
-    """One source column, target Spark datatype, and parser."""
+    """Top-level binding between one bronze source and one typed silver output."""
 
     source_column_name: str
     silver_column_name: str
@@ -123,7 +145,12 @@ class ColumnParser:
 
 @dataclass(frozen=True)
 class ParserConfig:
-    """One immutable, load-specific parsing configuration version."""
+    """One immutable, load-specific parsing contract.
+
+    Column order is meaningful: ``parsed_df`` preserves it, report tables display it, and audit
+    entries follow it. Consumers should use ``parser_config_id``, ``version``, and the serializer's
+    content hash together when recording lineage.
+    """
 
     parser_config_id: str
     parser_config_name: str

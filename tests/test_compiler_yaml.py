@@ -438,13 +438,13 @@ columns:
     assert config.columns[2].parser.true_values == ("ß",)
 
 
-def test_legacy_keys_and_invalid_mapping_inputs_have_targeted_errors() -> None:
+def test_unknown_column_keys_and_invalid_mapping_inputs_have_targeted_errors() -> None:
     compiler = YamlParserConfigCompiler()
-    with pytest.raises(CompilationError, match="0.2.x keys"):
+    with pytest.raises(CompilationError, match="unsupported keys"):
         compiler.compile_text(
             """
-parser_config_id: legacy
-parser_config_name: Legacy
+parser_config_id: unknown_keys
+parser_config_name: Unknown Keys
 version: "1"
 columns:
   - column_name: value

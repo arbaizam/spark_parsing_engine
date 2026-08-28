@@ -1,4 +1,9 @@
-"""Strict YAML compiler for parser configuration metadata."""
+"""Compile strict YAML authoring metadata into an executable parser contract.
+
+This module is the package's trust boundary. It rejects ambiguity early, resolves every inherited
+or omitted option, validates typed defaults recursively, and returns immutable models that runtime
+code can use without defensive revalidation. Compilation never requires a Spark session.
+"""
 
 from __future__ import annotations
 
@@ -62,7 +67,12 @@ from spark_parser.models import (
     StructFieldParser,
 )
 
+# ``None`` is a legitimate YAML value, so a private sentinel is required to distinguish an omitted
+# key from an explicitly authored null.
 _MISSING = object()
+
+# Spark integer types have fixed signed ranges. Python integers do not overflow, which means these
+# boundaries must be enforced here before defaults become Spark literals.
 _BYTE_MIN = -(2**7)
 _BYTE_MAX = 2**7 - 1
 _SHORT_MIN = -(2**15)
@@ -74,7 +84,11 @@ _LONG_MAX = 2**63 - 1
 
 
 class _UniqueKeyLoader(yaml.SafeLoader):
-    """Safe YAML loader that rejects duplicate mapping keys."""
+    """Safe YAML loader that rejects duplicate mapping keys.
+
+    Standard YAML loaders silently keep one duplicate value. That is dangerous for parsing rules:
+    a reviewer may approve one value while the loader executes another.
+    """
 
 
 def _construct_unique_mapping(
@@ -82,6 +96,7 @@ def _construct_unique_mapping(
     node: yaml.MappingNode,
     deep: bool = False,
 ) -> dict[Any, Any]:
+    """Construct one YAML mapping while detecting duplicate keys at its current depth."""
     mapping: dict[Any, Any] = {}
     for key_node, value_node in node.value:
         key = loader.construct_object(key_node, deep=deep)
@@ -91,6 +106,7 @@ def _construct_unique_mapping(
     return mapping
 
 
+# Register the strict constructor for every ordinary YAML mapping, including nested parser maps.
 _UniqueKeyLoader.add_constructor(
     yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
     _construct_unique_mapping,
@@ -98,10 +114,14 @@ _UniqueKeyLoader.add_constructor(
 
 
 class YamlParserConfigCompiler:
-    """Compile strict YAML into a fully resolved :class:`ParserConfig`."""
+    """Compile strict authoring input into a fully resolved :class:`ParserConfig`.
+
+    Public methods accept a file, text, or already-loaded mapping. All routes converge on
+    :meth:`compile_mapping`, so validation behavior cannot diverge by input format.
+    """
 
     def compile_path(self, path: str | Path) -> ParserConfig:
-        """Compile a UTF-8 YAML file."""
+        """Read and compile one UTF-8 YAML file, preserving the operating-system error cause."""
         try:
             text = Path(path).read_text(encoding="utf-8")
         except OSError as exc:
@@ -109,7 +129,7 @@ class YamlParserConfigCompiler:
         return self.compile_text(text)
 
     def compile_text(self, text: str) -> ParserConfig:
-        """Compile one YAML document from text."""
+        """Load one YAML document with duplicate-key protection, then compile its mapping."""
         try:
             payload = yaml.load(text, Loader=_UniqueKeyLoader)
         except CompilationError:
@@ -119,7 +139,12 @@ class YamlParserConfigCompiler:
         return self.compile_mapping(self._ensure_mapping(payload, "parser config"))
 
     def compile_mapping(self, payload: Mapping[str, Any]) -> ParserConfig:
-        """Compile a parsed YAML mapping."""
+        """Validate and fully resolve an already-loaded YAML-compatible mapping.
+
+        Validation proceeds from the outside inward: top-level keys, inherited globals, each
+        column/parser tree, and finally cross-column uniqueness. The returned object therefore
+        represents a complete runtime contract rather than partially validated authoring data.
+        """
         payload = self._ensure_mapping(payload, "parser config")
         self._reject_keys(
             payload,
@@ -135,6 +160,8 @@ class YamlParserConfigCompiler:
             },
             "Parser config",
         )
+        # Globals must be compiled before columns because column vocabularies can inherit or extend
+        # them. No column receives the mutable raw mapping.
         globals_config = self._compile_globals(payload.get("globals", {}))
         raw_columns = payload.get("columns")
         if not isinstance(raw_columns, list) or not raw_columns:
@@ -156,6 +183,7 @@ class YamlParserConfigCompiler:
         )
 
     def _compile_globals(self, raw_globals: Any) -> ParserGlobals:
+        """Validate global null/Boolean vocabularies and return immutable inherited options."""
         payload = self._ensure_mapping(raw_globals, "globals")
         self._reject_keys(
             payload,
@@ -187,6 +215,8 @@ class YamlParserConfigCompiler:
             "boolean_case_sensitive",
             DEFAULT_BOOLEAN_CASE_SENSITIVE,
         )
+        # Overlap would make the same bronze token both true and false. Validate using exactly the
+        # case-folding behavior that Spark expressions use later.
         self._validate_boolean_overlap(
             true_values,
             false_values,
@@ -214,14 +244,8 @@ class YamlParserConfigCompiler:
         globals_config: ParserGlobals,
         index: int,
     ) -> ColumnParser:
+        """Compile one top-level source-to-silver mapping and its recursive parser tree."""
         payload = self._ensure_mapping(raw_column, f"column at index {index}")
-        legacy_keys = sorted({"column_name", "data_type"} & set(payload))
-        if legacy_keys:
-            raise CompilationError(
-                f"Column at index {index} uses 0.2.x keys {legacy_keys}. In 0.3.0, "
-                "replace column_name with both source_column_name and silver_column_name, "
-                "and replace data_type with expected_data_type."
-            )
         self._reject_keys(
             payload,
             {
@@ -234,6 +258,8 @@ class YamlParserConfigCompiler:
         )
         source_column_name = self._required_string(payload, "source_column_name")
         silver_column_name = self._required_string(payload, "silver_column_name")
+        # Parse DDL once and carry both the recursive model and its canonical text. Re-parsing in
+        # nested validation or runtime code would create opportunities for inconsistent behavior.
         data_type = parse_spark_data_type(self._required_string(payload, "expected_data_type"))
         expected_data_type = data_type.canonical
         options = self._compile_parser(
@@ -261,8 +287,16 @@ class YamlParserConfigCompiler:
         allow_audit: bool,
         child_error_owned_by_parent: bool = False,
     ) -> ParserOptions:
+        """Resolve one scalar or complex parser node against its expected datatype.
+
+        ``allow_audit`` is true only for top-level columns. ``child_error_owned_by_parent`` marks
+        array elements and map values, whose immediate failure outcome belongs to their container's
+        child-error policy. Struct fields instead own normal parse-error settings.
+        """
         if raw_parser is _MISSING:
             raise CompilationError(f"parser is required for column {silver_column_name!r}.")
+        # Scalar shorthand such as ``parser: date`` is normalized into the same mapping path as
+        # long-form options. From this point onward there is only one validation implementation.
         if isinstance(raw_parser, str):
             payload: Mapping[str, Any] = {"type": raw_parser}
         else:
@@ -285,6 +319,8 @@ class YamlParserConfigCompiler:
         allowed_keys = self._parser_allowed_keys(parser_type, allow_audit=allow_audit)
         self._reject_keys(payload, allowed_keys, f"Parser for {silver_column_name!r}")
 
+        # Resolve marker inheritance before validating ``replace_null_markers``. A column can use
+        # global markers, replace them, or append its own markers while preserving first-seen order.
         markers_mode = self._enum_value(
             NullMarkersMode,
             payload.get("null_markers_mode", DEFAULT_NULL_MARKERS_MODE.value),
@@ -314,6 +350,8 @@ class YamlParserConfigCompiler:
                 "but no null markers exist."
             )
 
+        # Null defaults describe the final contract, not parse failure alone. They are permitted
+        # only for non-nullable outputs and run after parsing and zero invalidation.
         is_nullable = self._bool(payload, "is_nullable", DEFAULT_IS_NULLABLE)
         raw_default_on_null = payload.get("default_on_null", _MISSING)
         if not is_nullable and raw_default_on_null is _MISSING:
@@ -334,6 +372,8 @@ class YamlParserConfigCompiler:
             else None
         )
 
+        # Parse-error defaults are independent of null defaults: one handles invalid non-null
+        # input; the other guarantees a final non-null value.
         raw_on_parse_error = payload.get("on_parse_error", DEFAULT_ON_PARSE_ERROR.value)
         # YAML resolves an unquoted ``null`` scalar to ``None``. In this one
         # enum position it unambiguously names the canonical ``null`` mode.
@@ -364,6 +404,8 @@ class YamlParserConfigCompiler:
         )
 
         zero_is_valid = self._bool(payload, "zero_is_valid", DEFAULT_ZERO_IS_VALID)
+        # Reject contradictory defaults at compile time. Otherwise the runtime would assign zero
+        # and immediately invalidate it, producing a surprising null despite an authored default.
         if (
             parser_type in NUMERIC_PARSER_TYPES
             and not zero_is_valid
@@ -389,6 +431,9 @@ class YamlParserConfigCompiler:
             DEFAULT_COLLAPSE_WHITESPACE,
         )
         if parser_type in COMPLEX_PARSER_TYPES:
+            # Collapsing internal whitespace in raw JSON would mutate quoted string values before
+            # decoding. Outer containers therefore always disable collapse; recursive leaf parsers
+            # still use their independently resolved normalization settings.
             collapse_whitespace = False
 
         string_format = self._compile_string_format(payload, parser_type)
@@ -410,6 +455,8 @@ class YamlParserConfigCompiler:
             globals_config,
             silver_column_name,
         )
+        # Construct one fully resolved immutable node only after every conditional relationship has
+        # passed. Runtime code may safely branch on parser_type without looking back at raw YAML.
         compiled_options = ParserOptions(
             parser_type=parser_type,
             trim_whitespace=self._bool(
@@ -454,6 +501,7 @@ class YamlParserConfigCompiler:
         options: ParserOptions,
         data_type: SparkDataType,
     ) -> None:
+        """Validate encoded binary defaults anywhere in the recursive default value tree."""
         if options.default_on_null is not None:
             self._validate_binary_value(
                 options.default_on_null,
@@ -476,7 +524,10 @@ class YamlParserConfigCompiler:
         options: ParserOptions,
         label: str,
     ) -> None:
+        """Walk a typed default and verify each binary leaf uses its configured encoding."""
         if value is None:
+            # Child nulls are allowed inside complex defaults; container/nullability rules are
+            # validated separately.
             return
         if data_type.parser_type is ParserType.BINARY:
             try:
@@ -528,6 +579,7 @@ class YamlParserConfigCompiler:
         allow_audit: bool,
         child_error_owned_by_parent: bool,
     ) -> None:
+        """Enforce ownership rules that keep nested audit and error behavior unambiguous."""
         if not allow_audit and "audit" in payload:
             raise CompilationError(
                 f"Nested parser {label!r} cannot enable audit; audit belongs to its "
@@ -543,6 +595,7 @@ class YamlParserConfigCompiler:
 
     @staticmethod
     def _parser_allowed_keys(parser_type: ParserType, *, allow_audit: bool) -> set[str]:
+        """Return the exact common and parser-specific keys accepted for one node."""
         common = {
             "type",
             "trim_whitespace",
@@ -601,6 +654,7 @@ class YamlParserConfigCompiler:
         payload: Mapping[str, Any],
         parser_type: ParserType,
     ) -> StringFormat | None:
+        """Resolve string formatting while leaving non-string parsers untouched."""
         if parser_type is not ParserType.STRING:
             return None
         value = payload.get("format")
@@ -613,6 +667,7 @@ class YamlParserConfigCompiler:
         payload: Mapping[str, Any],
         parser_type: ParserType,
     ) -> tuple[str, ...]:
+        """Resolve ordered datetime patterns for date and timestamp parser families."""
         if parser_type is ParserType.DATE:
             default = DEFAULT_DATE_FORMATS
         elif parser_type is ParserType.TIMESTAMP:
@@ -635,6 +690,12 @@ class YamlParserConfigCompiler:
         globals_config: ParserGlobals,
         label: str,
     ) -> dict[str, Any]:
+        """Compile recursive array, struct, or map options into ``ParserOptions`` fields.
+
+        A complete defaults dictionary is also returned for scalar parsers. This keeps the single
+        ``ParserOptions`` constructor simple and guarantees inapplicable complex fields remain at
+        known inert values.
+        """
         defaults: dict[str, Any] = {
             "input_format": DEFAULT_COMPLEX_INPUT_FORMAT,
             "delimiter": None,
@@ -670,6 +731,8 @@ class YamlParserConfigCompiler:
             if raw_element_parser is _MISSING:
                 raise CompilationError(f"Array parser {label!r} requires element_parser.")
             if input_format is ComplexInputFormat.DELIMITED:
+                # Delimited input intentionally means a literal split, not CSV. Complex children
+                # require JSON so nested structure cannot be misread around delimiter characters.
                 if data_type.element_type.is_complex:
                     raise CompilationError(
                         f"Delimited array parser {label!r} requires a scalar element type."
@@ -694,6 +757,8 @@ class YamlParserConfigCompiler:
             )
             distinct = self._bool(payload, "distinct", DEFAULT_ARRAY_DISTINCT)
             if distinct and not data_type.element_type.supports_equality:
+                # Spark cannot compare maps (including maps nested inside arrays/structs), so
+                # array_distinct would fail only after a job starts. Reject it during authoring.
                 raise CompilationError(
                     f"Array parser {label!r} cannot use distinct with non-comparable element "
                     f"type {data_type.element_type.canonical!r}."
@@ -770,11 +835,15 @@ class YamlParserConfigCompiler:
                 raise CompilationError(
                     f"Struct parser {label!r} has duplicate source fields {duplicate_sources}."
                 )
+            # Emit fields in expected_data_type order, regardless of the order used in YAML. Spark
+            # struct position is part of the schema contract and must remain deterministic.
             defaults["field_parsers"] = tuple(
                 compiled_by_name[field.name] for field in data_type.fields
             )
             return defaults
 
+        # Maps are represented by JSON objects, so keys are text by definition. Only values need a
+        # recursive parser and a container-owned child-error policy.
         assert parser_type is ParserType.MAP
         assert data_type.key_type is not None and data_type.value_type is not None
         if data_type.key_type.parser_type is not ParserType.STRING:
@@ -813,6 +882,7 @@ class YamlParserConfigCompiler:
         payload: Mapping[str, Any],
         key: str,
     ) -> ChildErrorMode:
+        """Resolve an array/map child-error policy, including YAML's unquoted null token."""
         raw_value = payload.get(key, DEFAULT_CHILD_ERROR_MODE.value)
         if key in payload and raw_value is None:
             raw_value = ChildErrorMode.NULL.value
@@ -825,6 +895,7 @@ class YamlParserConfigCompiler:
         silver_column_name: str,
         globals_config: ParserGlobals,
     ) -> tuple[tuple[str, ...], tuple[str, ...], bool, BooleanValuesMode]:
+        """Resolve inherited or extended Boolean tokens for one Boolean parser."""
         if parser_type is not ParserType.BOOLEAN:
             return (
                 DEFAULT_BOOLEAN_TRUE_VALUES,
@@ -863,6 +934,8 @@ class YamlParserConfigCompiler:
             else ()
         )
         if mode is BooleanValuesMode.EXTEND:
+            # Ordered de-duplication keeps serialized output stable and gives author-supplied tokens
+            # predictable precedence in reports without changing membership behavior.
             true_values = self._deduplicate((*globals_config.true_values, *column_true))
             false_values = self._deduplicate((*globals_config.false_values, *column_false))
         else:
@@ -890,6 +963,7 @@ class YamlParserConfigCompiler:
         case_sensitive: bool,
         label: str,
     ) -> None:
+        """Reject tokens that would map to both Boolean outcomes at runtime."""
         normalize = (lambda item: item) if case_sensitive else (lambda item: item.lower())
         overlap = {normalize(item) for item in true_values} & {
             normalize(item) for item in false_values
@@ -900,6 +974,7 @@ class YamlParserConfigCompiler:
             )
 
     def _parser_type(self, value: str) -> ParserType:
+        """Canonicalize aliases and convert a parser name into the closed enum vocabulary."""
         normalized = canonical_type_name(value)
         try:
             return ParserType(normalized)
@@ -913,6 +988,11 @@ class YamlParserConfigCompiler:
         data_type: SparkDataType,
         label: str,
     ) -> Any:
+        """Validate and normalize one scalar or recursively complex default value.
+
+        Returned values use precise Python types such as ``Decimal``, ``date``, and ``datetime``.
+        The runtime later turns this already-validated tree into native Spark literals.
+        """
         if value is None:
             raise CompilationError(f"{label} must be non-null.")
         parser_type = data_type.parser_type
@@ -947,6 +1027,8 @@ class YamlParserConfigCompiler:
             if not isinstance(value, list):
                 raise CompilationError(f"{label} for array must be a YAML list.")
             assert data_type.element_type is not None
+            # Null child items are retained intentionally. Child nullability/default behavior is
+            # represented by the nested parser and applied when Spark literals are constructed.
             return [
                 None if item is None else self._typed_default(item, data_type.element_type, label)
                 for item in value
@@ -954,6 +1036,8 @@ class YamlParserConfigCompiler:
         if parser_type is ParserType.STRUCT:
             mapping = self._ensure_mapping(value, f"{label} for struct")
             expected = {field.name: field.data_type for field in data_type.fields}
+            # Exact field coverage prevents a default struct from silently diverging from the
+            # configured silver schema.
             unknown = sorted(set(mapping) - set(expected))
             missing = sorted(set(expected) - set(mapping))
             if unknown or missing:
@@ -985,6 +1069,8 @@ class YamlParserConfigCompiler:
 
     @staticmethod
     def _integer_default(value: Any, parser_type: ParserType, label: str) -> int:
+        """Validate an exact Python integer against the selected Spark signed range."""
+        # ``bool`` subclasses ``int`` in Python, so it must be excluded explicitly.
         if isinstance(value, bool) or not isinstance(value, int):
             raise CompilationError(f"{label} for {parser_type.value} must be an integer.")
         ranges = {
@@ -1000,6 +1086,7 @@ class YamlParserConfigCompiler:
 
     @staticmethod
     def _double_default(value: Any, label: str) -> float:
+        """Validate a finite floating-point default and normalize it to Python ``float``."""
         if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
             raise CompilationError(f"{label} for double must be numeric.")
         converted = float(value)
@@ -1009,6 +1096,7 @@ class YamlParserConfigCompiler:
 
     @staticmethod
     def _decimal_default(value: Any, data_type: SparkDataType, label: str) -> Decimal:
+        """Validate exact precision and scale without passing through binary floating point."""
         try:
             converted = Decimal(str(value))
         except (InvalidOperation, ValueError) as exc:
@@ -1019,6 +1107,8 @@ class YamlParserConfigCompiler:
         scale = data_type.scale
         assert precision is not None and scale is not None
         _, digits, exponent = converted.as_tuple()
+        # Decimal's tuple representation lets us count integral/fractional digits exactly. Source
+        # values may be rounded by Spark, but authored defaults are required to fit without loss.
         integral_digits = max(len(digits) + exponent, 0)
         fractional_digits = max(-exponent, 0)
         if integral_digits > precision - scale or fractional_digits > scale:
@@ -1027,6 +1117,7 @@ class YamlParserConfigCompiler:
 
     @staticmethod
     def _date_default(value: Any, label: str) -> date:
+        """Accept a date object or strict ISO date string, never a datetime."""
         if isinstance(value, datetime):
             raise CompilationError(f"{label} for date must not contain a time component.")
         if isinstance(value, date):
@@ -1040,6 +1131,7 @@ class YamlParserConfigCompiler:
 
     @staticmethod
     def _timestamp_default(value: Any, label: str) -> datetime:
+        """Accept a datetime object or an ISO timestamp string."""
         if isinstance(value, datetime):
             return value
         if isinstance(value, str):
@@ -1050,6 +1142,7 @@ class YamlParserConfigCompiler:
         raise CompilationError(f"{label} for timestamp must be a datetime or ISO string.")
 
     def _validate_unique_columns(self, columns: tuple[ColumnParser, ...]) -> None:
+        """Reject duplicate silver names while intentionally allowing repeated sources."""
         column_names = [column.silver_column_name for column in columns]
         duplicate_columns = sorted({name for name in column_names if column_names.count(name) > 1})
         if duplicate_columns:
@@ -1062,6 +1155,7 @@ class YamlParserConfigCompiler:
         *,
         allow_empty_values: bool = True,
     ) -> tuple[str, ...]:
+        """Validate a YAML string list and remove duplicates without reordering it."""
         if not isinstance(value, list):
             raise CompilationError(f"{label} must be a YAML list of strings.")
         invalid = [
@@ -1075,9 +1169,11 @@ class YamlParserConfigCompiler:
 
     @staticmethod
     def _deduplicate(values: tuple[str, ...]) -> tuple[str, ...]:
+        """Return first-occurrence-preserving unique strings."""
         return tuple(dict.fromkeys(values))
 
     def _enum_value(self, enum_type: type, value: Any, label: str):
+        """Parse one case-insensitive enum value with an actionable allowed-values error."""
         if not isinstance(value, str):
             raise CompilationError(f"{label} must be a string.")
         try:
@@ -1088,6 +1184,7 @@ class YamlParserConfigCompiler:
 
     @staticmethod
     def _bool(payload: Mapping[str, Any], key: str, default: bool) -> bool:
+        """Read a strict YAML Boolean; strings such as ``"true"`` are not accepted."""
         if key not in payload:
             return default
         value = payload[key]
@@ -1097,6 +1194,7 @@ class YamlParserConfigCompiler:
 
     @staticmethod
     def _required_string(payload: Mapping[str, Any], key: str) -> str:
+        """Read and trim a required non-empty string."""
         value = payload.get(key)
         if not isinstance(value, str) or not value.strip():
             raise CompilationError(f"{key} must be a non-empty string.")
@@ -1104,6 +1202,7 @@ class YamlParserConfigCompiler:
 
     @staticmethod
     def _optional_string(payload: Mapping[str, Any], key: str) -> str | None:
+        """Read an optional string while preserving intentional surrounding text."""
         value = payload.get(key)
         if value is None:
             return None
@@ -1113,6 +1212,7 @@ class YamlParserConfigCompiler:
 
     @staticmethod
     def _ensure_mapping(value: Any, label: str) -> Mapping[str, Any]:
+        """Require a mapping with string keys before key-set validation begins."""
         if not isinstance(value, Mapping):
             raise CompilationError(f"{label} must be a mapping.")
         invalid_keys = [key for key in value if not isinstance(key, str)]
@@ -1122,6 +1222,7 @@ class YamlParserConfigCompiler:
 
     @staticmethod
     def _reject_keys(payload: Mapping[str, Any], allowed: set[str], label: str) -> None:
+        """Fail closed on misspelled or unsupported authoring keys."""
         unsupported = sorted(set(payload) - allowed)
         if unsupported:
             raise CompilationError(f"{label} contains unsupported keys: {unsupported}.")

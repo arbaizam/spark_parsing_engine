@@ -1,4 +1,9 @@
-"""Deterministic parser configuration serialization and hashing."""
+"""Deterministic serialization and hashing for compiled parser configurations.
+
+Serialization deliberately emits effective values, including inherited globals and defaults.
+That makes reports self-contained and ensures a content hash identifies runtime behavior rather
+than the incidental shorthand used in the source YAML.
+"""
 
 from __future__ import annotations
 
@@ -14,10 +19,19 @@ from spark_parser.models import ParserConfig, ParserOptions
 
 
 class ParserConfigSerializer:
-    """Produce explicit, JSON-compatible canonical parser metadata."""
+    """Produce explicit, JSON-compatible canonical parser metadata.
+
+    Returned structures are newly allocated and safe for a caller to modify. Enum members,
+    decimals, dates, timestamps, tuples, and nested parser nodes are converted into stable public
+    representations before JSON encoding.
+    """
 
     def to_mapping(self, config: ParserConfig) -> dict[str, Any]:
-        """Return a fully resolved mapping suitable for reporting and hashing."""
+        """Return a fully resolved mapping suitable for reporting and hashing.
+
+        The original column order is retained for human review even though canonical JSON later
+        sorts mapping keys. Reordering configured columns remains a meaningful behavior change.
+        """
         columns = [
             {
                 "source_column_name": column.source_column_name,
@@ -55,6 +69,12 @@ class ParserConfigSerializer:
         include_audit: bool,
         include_error_mode: bool,
     ) -> dict[str, Any]:
+        """Serialize one parser node, recursively including applicable child parsers.
+
+        Nested array/map children delegate immediate failures to the parent container policy, so
+        callers can omit child ``on_parse_error`` fields. Struct fields own their error policy and
+        therefore include it. ``include_audit`` follows the same top-level-only ownership rule.
+        """
         payload: dict[str, Any] = {
             "type": options.parser_type.value,
             "trim_whitespace": options.trim_whitespace,
@@ -97,6 +117,8 @@ class ParserConfigSerializer:
             )
         if options.parser_type is ParserType.ARRAY:
             assert options.element_parser is not None
+            # Audit and direct parse-error policy belong to the array container. The element node
+            # still carries normalization, nullability, formatting, and typed-default behavior.
             payload.update(
                 input_format=options.input_format.value,
                 element_parser=self.parser_mapping(
@@ -111,6 +133,8 @@ class ParserConfigSerializer:
             if options.delimiter is not None:
                 payload["delimiter"] = options.delimiter
         if options.parser_type is ParserType.STRUCT:
+            # Preserve compiled schema order rather than authoring-list order. The compiler has
+            # already aligned every configured field to its expected Spark struct field.
             payload.update(
                 input_format=options.input_format.value,
                 fields=[
@@ -141,7 +165,7 @@ class ParserConfigSerializer:
         return payload
 
     def canonical_json(self, config: ParserConfig) -> str:
-        """Return stable canonical JSON for one config version."""
+        """Return whitespace-free, key-sorted JSON for deterministic identity checks."""
         return json.dumps(
             self.to_mapping(config),
             sort_keys=True,
@@ -150,16 +174,21 @@ class ParserConfigSerializer:
         )
 
     def content_hash(self, config: ParserConfig) -> str:
-        """Return the SHA-256 hash of canonical config content."""
+        """Return the SHA-256 identity of the configuration's resolved behavior."""
         return hashlib.sha256(self.canonical_json(config).encode("utf-8")).hexdigest()
 
     @staticmethod
     def _json_value(value: Any) -> Any:
+        """Recursively convert typed defaults into lossless JSON-compatible values."""
+        # Decimal is rendered as text so binary floating-point conversion cannot change an exact
+        # default before it contributes to a content hash.
         if isinstance(value, Decimal):
             return str(value)
         if isinstance(value, (date, datetime)):
             return value.isoformat()
         if isinstance(value, Mapping):
+            # Mapping order is retained here for readable reports; canonical_json sorts keys when
+            # byte-for-byte stability matters.
             return {key: ParserConfigSerializer._json_value(item) for key, item in value.items()}
         if isinstance(value, (list, tuple)):
             return [ParserConfigSerializer._json_value(item) for item in value]

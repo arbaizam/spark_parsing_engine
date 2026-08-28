@@ -165,6 +165,12 @@ formats. `write_json(path)` and `write_markdown(path)` save UTF-8 artifacts and 
 `Path` objects. An invalid report contains its compiler errors and renders a `FAIL`
 status without raising the compilation exception.
 
+For release validation on Databricks, use the checked-in
+[Databricks UAT workflow](databricks/uat/README.md). It installs an exact wheel, runs representative
+ANSI-mode parsing and audit assertions, round-trips both outputs through Delta, and produces an
+explicit handoff contract for a downstream rules engine. The workflow does not automate package
+publishing or workspace deployment, and its UAT writes never overwrite or remove tables.
+
 ## Configuration metadata
 
 ### Top-level arguments
@@ -646,7 +652,7 @@ Each parse-result struct contains:
 | `actions_applied` | Array of strings | Ordered material actions applied to this row and column. |
 | `options` | Map of string to string | Every fully resolved effective option for this parser. |
 | `error` | Nullable string | Handled parse or missing-source description; fail mode raises for bad values. |
-| `nested_error_paths` | Array of strings | JSONPath-like locations of handled child failures; empty for none. Appended after all 0.3 fields for positional schema compatibility. |
+| `nested_error_paths` | Array of strings | JSONPath-like locations of handled child failures; empty for none. |
 
 Possible actions are `source_column_missing`, `empty_string_to_null`, `null_marker_replaced`,
 `parse_error_to_null`, `parse_error_default_applied`, `zero_invalidated`,
@@ -656,34 +662,6 @@ Possible actions are `source_column_missing`, `empty_string_to_null`, `null_mark
 Routine whitespace normalization, normal successful datatype conversion, and routine case/address/
 county formatting are visible through `original_value`, `parsed_value`, and the resolved `options`
 map but do not add noisy action entries or independently set `changed`.
-
-## Migrating from 0.2.x
-
-Version 0.3.0 introduced an intentional breaking column-metadata change:
-
-| 0.2.x | 0.3.x |
-| --- | --- |
-| `column_name` | `source_column_name` plus `silver_column_name` |
-| `data_type` | `expected_data_type` |
-
-The compiler detects legacy column keys and returns a targeted migration error. Canonical payload
-shape also changed, so `content_hash` values from 0.2.x are not comparable with 0.3.x hashes even
-when the logical parsing behavior is equivalent. Fully resolved mappings from
-`ParserConfigSerializer.to_mapping()` are recompilable in 0.3.1. See [CHANGELOG.md](CHANGELOG.md)
-for release details.
-
-### Migrating from 0.3.x to 0.4.x
-
-Existing 0.3 scalar YAML remains valid, and its canonical configuration hash remains stable.
-Version 0.4 adds parser types and one audit field rather than renaming existing configuration
-keys. Two compatibility details matter:
-
-- configurations adopting the new parser types receive their own canonical content hashes; and
-- `spark_parser_parse_results` appends `nested_error_paths` after the complete 0.3 field sequence,
-  so consumers that declare its nested schema manually must add that final field.
-
-Use `parser.review_yaml(old_config).to_markdown()` to produce the 0.4 resolved documentation and
-review the new content hash before promotion.
 
 ## Defaults and exhaustive YAML reference
 

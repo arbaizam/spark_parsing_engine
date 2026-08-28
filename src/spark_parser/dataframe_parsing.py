@@ -1,4 +1,9 @@
-"""Lazy parsed and audit projections over one shared Spark plan."""
+"""Lazy parsed and audit projections over one shared Spark plan.
+
+The runtime builds expensive normalization/parsing expressions once. This wrapper exposes a clean
+silver projection and a separate audit projection without duplicating the expression-building
+logic or forcing an action. Callers choose when Spark materializes either view.
+"""
 
 from __future__ import annotations
 
@@ -10,12 +15,19 @@ from pyspark.sql import functions as F
 
 
 def _column(name: str):
-    """Resolve one top-level column by its literal name."""
+    """Resolve one top-level column literally, including names containing dots or backticks."""
+    # Bare ``F.col(name)`` treats dots as nested-field separators. Backtick quoting keeps source and
+    # generated internal names literal and doubles embedded backticks using Spark SQL rules.
     return F.col(f"`{name.replace('`', '``')}`")
 
 
 class DataFrameParsing:
-    """Expose silver and audit projections built from the same lazy plan."""
+    """Expose silver and audit projections built from the same lazy Spark plan.
+
+    Accessing properties performs only logical ``select`` operations. Data is evaluated by later
+    actions such as ``collect``, ``write``, or ``count``. Persist this wrapper before materializing
+    both projections when recomputing the shared parser plan would be expensive.
+    """
 
     def __init__(
         self,
@@ -26,6 +38,9 @@ class DataFrameParsing:
         result_columns: Sequence[str],
         warnings: Sequence[str] = (),
     ) -> None:
+        """Store immutable projection metadata around the runtime's evaluated logical plan."""
+        # Convert every caller-owned sequence to a tuple so later mutation cannot silently alter
+        # column order or result identity.
         self._evaluated = evaluated
         self._parsed_columns = tuple(parsed_columns)
         self._key_columns = tuple(key_columns)
@@ -49,7 +64,11 @@ class DataFrameParsing:
 
     @property
     def parsed_df(self) -> DataFrame:
-        """Return only configured silver columns in configuration order."""
+        """Return only configured silver columns in configuration order.
+
+        Internal UUID-backed names prevent collisions while the plan is built. This final select
+        restores the public silver names promised by the configuration.
+        """
         return self._evaluated.select(
             *[
                 _column(internal_name).alias(column_name)
@@ -59,17 +78,24 @@ class DataFrameParsing:
 
     @property
     def results_df(self) -> DataFrame:
-        """Return row keys followed by nested parser audit metadata."""
+        """Return row keys followed by parser audit and configuration identity metadata."""
         return self._evaluated.select(
             *[_column(name) for name in (*self._key_columns, *self._result_columns)]
         )
 
     def persist(self, storage_level: StorageLevel = StorageLevel.MEMORY_AND_DISK):
-        """Persist the shared plan when both projections will be materialized."""
+        """Persist the shared plan and return ``self`` for fluent orchestration.
+
+        Persistence remains lazy: Spark stores partitions only after the next action.
+        """
         self._evaluated.persist(storage_level)
         return self
 
     def unpersist(self, *, blocking: bool = False):
-        """Release a plan previously persisted through :meth:`persist`."""
+        """Release cached partitions and return ``self``.
+
+        Non-blocking release is the Spark default and is appropriate for most job cleanup. Select
+        blocking cleanup only when subsequent resource-sensitive work must wait for eviction.
+        """
         self._evaluated.unpersist(blocking=blocking)
         return self

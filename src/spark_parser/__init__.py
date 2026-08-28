@@ -1,4 +1,9 @@
-"""Public package surface for Spark Parser."""
+"""Stable public package surface for Spark Parser.
+
+Compiler and metadata APIs import without initializing PySpark. Spark-backed runtime objects are
+loaded lazily through :func:`__getattr__`, allowing configuration authoring and review tools to run
+in lightweight Python environments.
+"""
 
 from spark_parser.compiler_yaml import YamlParserConfigCompiler
 from spark_parser.data_types import SparkDataType, SparkStructField, parse_spark_data_type
@@ -66,7 +71,12 @@ __all__ = [
 
 
 def __getattr__(name: str):
-    """Load Spark-backed objects only when requested."""
+    """Load Spark-backed objects only when a caller explicitly requests them.
+
+    Python invokes this hook only after normal module attribute lookup fails. Keeping the imports
+    inside the branches avoids importing PySpark for compiler-only workflows while preserving the
+    convenient ``from spark_parser import SparkDataFrameParser`` API.
+    """
     if name == "DataFrameParsing":
         from spark_parser.dataframe_parsing import DataFrameParsing
 

@@ -1,4 +1,9 @@
-"""Public exception hierarchy for :mod:`spark_parser`."""
+"""Small public exception hierarchy for predictable caller error handling.
+
+Compilation and schema binding fail before Spark execution where possible. Row-value failures may
+still surface later from lazy Spark actions, while recoverable missing-source conditions use a
+warning category rather than an exception.
+"""
 
 
 class SparkParserError(Exception):

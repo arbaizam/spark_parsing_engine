@@ -1,4 +1,9 @@
-"""Spark datatype parsing independent of a running Spark session."""
+"""Parse the supported Spark DDL subset without starting a Spark session.
+
+Keeping this parser independent of PySpark is deliberate. Configuration authors should receive
+fast, deterministic feedback before a cluster is allocated, and the compiler needs a small
+recursive type model that it can use to validate nested parser trees and typed defaults.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +13,12 @@ from dataclasses import dataclass
 from spark_parser.enums import COMPLEX_PARSER_TYPES, ParserType
 from spark_parser.exceptions import CompilationError
 
+# Unquoted Spark identifiers accepted by this package. Struct fields outside this conservative
+# subset must use Spark-style backticks, which keeps rendering and reparsing unambiguous.
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+# Users commonly write Spark SQL aliases. Canonicalizing them here gives the compiler, serializer,
+# runtime, and content hasher one shared vocabulary.
 _TYPE_ALIASES = {
     "tinyint": "byte",
     "smallint": "short",
@@ -22,7 +32,11 @@ _TYPE_ALIASES = {
 
 @dataclass(frozen=True)
 class SparkStructField:
-    """One field in a parsed Spark struct type."""
+    """One immutable field in a parsed Spark ``struct`` type.
+
+    ``name`` preserves author-supplied case. ``data_type`` may itself contain an arbitrarily
+    nested array, struct, or map.
+    """
 
     name: str
     data_type: SparkDataType
@@ -30,7 +44,12 @@ class SparkStructField:
 
 @dataclass(frozen=True)
 class SparkDataType:
-    """Canonical recursive Spark datatype description."""
+    """Canonical recursive description of one supported Spark datatype.
+
+    Only fields relevant to ``parser_type`` are populated. For example, decimals use precision
+    and scale, arrays use ``element_type``, and structs use ``fields``. Instances are frozen so a
+    compiled configuration cannot drift after its content hash has been calculated.
+    """
 
     parser_type: ParserType
     precision: int | None = None
@@ -42,11 +61,16 @@ class SparkDataType:
 
     @property
     def is_complex(self) -> bool:
+        """Return whether this type contains child values parsed recursively."""
         return self.parser_type in COMPLEX_PARSER_TYPES
 
     @property
     def supports_equality(self) -> bool:
-        """Whether Spark can compare values for operations such as array_distinct."""
+        """Return whether Spark can compare values for operations such as ``array_distinct``.
+
+        Spark does not define equality for maps. That restriction propagates through an array or
+        struct containing a map, so the compiler can reject ``distinct: true`` before execution.
+        """
         if self.parser_type is ParserType.MAP:
             return False
         if self.parser_type is ParserType.ARRAY:
@@ -58,6 +82,7 @@ class SparkDataType:
 
     @property
     def canonical(self) -> str:
+        """Render stable Spark DDL used in schemas, reports, and configuration hashes."""
         if self.parser_type is ParserType.DECIMAL:
             return f"decimal({self.precision},{self.scale})"
         if self.parser_type is ParserType.ARRAY:
@@ -75,13 +100,22 @@ class SparkDataType:
 
 
 def canonical_type_name(value: str) -> str:
-    """Return the canonical spelling of one Spark datatype or parser alias."""
+    """Return the canonical spelling of one Spark datatype or parser alias.
+
+    This helper only normalizes a single type name. Full recursive validation belongs to
+    :func:`parse_spark_data_type`.
+    """
     normalized = value.strip().lower()
     return _TYPE_ALIASES.get(normalized, normalized)
 
 
 def parse_spark_data_type(value: str) -> SparkDataType:
-    """Parse and canonicalize the supported Spark SQL datatype grammar."""
+    """Parse and canonicalize the supported Spark SQL datatype grammar.
+
+    The entire input must be consumed. Accepting a valid prefix and ignoring trailing text would
+    make a typo look successful and could produce a different runtime schema than the author
+    intended.
+    """
     if not isinstance(value, str) or not value.strip():
         raise CompilationError("expected_data_type must be a non-empty string.")
     parser = _DataTypeParser(value)
@@ -93,25 +127,37 @@ def parse_spark_data_type(value: str) -> SparkDataType:
 
 
 def _quote_field(name: str) -> str:
+    """Quote a struct field only when the conservative identifier grammar requires it."""
     if _IDENTIFIER.fullmatch(name):
         return name
     return f"`{name.replace('`', '``')}`"
 
 
 class _DataTypeParser:
+    """Small cursor-based recursive-descent parser for Spark DDL.
+
+    A hand-written parser is easier to audit than a permissive regular expression for nested
+    ``array<...>``, ``map<...>``, and ``struct<...>`` values. Every error includes the current
+    character position to make invalid YAML practical to fix.
+    """
+
     def __init__(self, text: str) -> None:
+        """Store the original text and start the cursor at its first character."""
         self.text = text
         self.position = 0
 
     @property
     def at_end(self) -> bool:
+        """Return ``True`` when the cursor has consumed the complete input."""
         return self.position >= len(self.text)
 
     def skip_whitespace(self) -> None:
+        """Advance over authoring whitespace without changing field-name contents."""
         while not self.at_end and self.text[self.position].isspace():
             self.position += 1
 
     def parse_type(self) -> SparkDataType:
+        """Parse one scalar or recursively parameterized type at the current cursor."""
         type_name = canonical_type_name(self.read_identifier("datatype"))
         if type_name in {"decimal", "dec", "numeric"}:
             return self.parse_decimal()
@@ -143,6 +189,7 @@ class _DataTypeParser:
         return SparkDataType(parser_type)
 
     def parse_decimal(self) -> SparkDataType:
+        """Parse ``decimal(precision, scale)`` and enforce Spark's numeric bounds."""
         self.expect("(")
         precision = self.read_integer("decimal precision")
         self.expect(",")
@@ -155,6 +202,7 @@ class _DataTypeParser:
         return SparkDataType(ParserType.DECIMAL, precision=precision, scale=scale)
 
     def parse_struct(self) -> SparkDataType:
+        """Parse a non-empty ordered struct and reject duplicate field names."""
         self.expect("<")
         fields: list[SparkStructField] = []
         self.skip_whitespace()
@@ -170,12 +218,15 @@ class _DataTypeParser:
                 break
             self.expect(",")
         names = [field.name for field in fields]
+        # Duplicate struct names make getField resolution ambiguous. Preserve the author's order,
+        # but fail compilation rather than allowing Spark to choose a surprising field.
         duplicates = sorted({name for name in names if names.count(name) > 1})
         if duplicates:
             raise CompilationError(f"Struct datatype contains duplicate fields: {duplicates}.")
         return SparkDataType(ParserType.STRUCT, fields=tuple(fields))
 
     def read_field_name(self) -> str:
+        """Read an ordinary or backtick-quoted struct field name."""
         self.skip_whitespace()
         if self.peek("`"):
             self.position += 1
@@ -187,6 +238,7 @@ class _DataTypeParser:
                     self.position += 1
                     continue
                 if self.position + 1 < len(self.text) and self.text[self.position + 1] == "`":
+                    # Spark escapes a literal backtick by doubling it inside a quoted identifier.
                     pieces.append("`")
                     self.position += 2
                     continue
@@ -198,6 +250,7 @@ class _DataTypeParser:
         return self.read_identifier("struct field name", preserve_case=True)
 
     def read_identifier(self, label: str, *, preserve_case: bool = False) -> str:
+        """Read one conservative identifier and optionally retain its original case."""
         self.skip_whitespace()
         match = _IDENTIFIER.match(self.text, self.position)
         if match is None:
@@ -207,6 +260,7 @@ class _DataTypeParser:
         return value if preserve_case else value.lower()
 
     def read_integer(self, label: str) -> int:
+        """Read an unsigned integer token used for decimal precision and scale."""
         self.skip_whitespace()
         start = self.position
         while not self.at_end and self.text[self.position].isdigit():
@@ -216,15 +270,18 @@ class _DataTypeParser:
         return int(self.text[start : self.position])
 
     def expect(self, token: str) -> None:
+        """Consume one required punctuation token after optional whitespace."""
         self.skip_whitespace()
         if not self.peek(token):
             self.fail(f"Expected {token!r}")
         self.position += len(token)
 
     def peek(self, token: str) -> bool:
+        """Check the next characters without advancing the cursor."""
         return self.text.startswith(token, self.position)
 
     def fail(self, message: str, *, cause: Exception | None = None):
+        """Raise a position-aware public compilation error, preserving an optional cause."""
         error = CompilationError(
             f"Invalid expected_data_type at character {self.position + 1}: {message}. "
             f"Value: {self.text!r}."

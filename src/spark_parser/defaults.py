@@ -1,4 +1,9 @@
-"""Single source of truth for parser authoring defaults."""
+"""Single source of truth for parser authoring defaults.
+
+Compiler logic, metadata discovery, serialization, audits, and documentation all import values
+from this module. A default must never be duplicated as an unrelated literal elsewhere; changing
+one here should make the effective behavior and its public description change together.
+"""
 
 from typing import Final
 
@@ -14,6 +19,8 @@ from spark_parser.enums import (
 DEFAULT_NULL_MARKERS: Final[tuple[str, ...]] = ()
 DEFAULT_NULL_MARKER_CASE_SENSITIVE: Final = True
 
+# Common normalization and final-value behavior. These defaults favor explicit failures for bad
+# non-null input while allowing genuinely absent values to remain null.
 DEFAULT_TRIM_WHITESPACE: Final = True
 DEFAULT_COLLAPSE_WHITESPACE: Final = True
 DEFAULT_EMPTY_IS_NULL: Final = True
@@ -23,6 +30,7 @@ DEFAULT_IS_NULLABLE: Final = True
 DEFAULT_ON_PARSE_ERROR: Final = ParseErrorMode.FAIL
 DEFAULT_AUDIT: Final = False
 
+# Parser-specific scalar defaults.
 DEFAULT_ZERO_IS_VALID: Final = True
 DEFAULT_STRING_FORMAT: Final = None
 DEFAULT_DATE_FORMATS: Final[tuple[str, ...]] = ("yyyy-MM-dd",)
@@ -34,13 +42,15 @@ DEFAULT_BOOLEAN_FALSE_VALUES: Final[tuple[str, ...]] = ("false",)
 DEFAULT_BOOLEAN_CASE_SENSITIVE: Final = False
 DEFAULT_BOOLEAN_VALUES_MODE: Final = BooleanValuesMode.REPLACE
 
+# Container defaults. Child failures fail closed unless an author chooses null/drop explicitly.
 DEFAULT_COMPLEX_INPUT_FORMAT: Final = ComplexInputFormat.JSON
 DEFAULT_CHILD_ERROR_MODE: Final = ChildErrorMode.FAIL
 DEFAULT_DROP_NULL_ELEMENTS: Final = False
 DEFAULT_ARRAY_DISTINCT: Final = False
 DEFAULT_DROP_NULL_VALUES: Final = False
 
-# JSON-compatible public view used by documentation and authoring clients.
+# JSON-compatible public view used by documentation and authoring clients. Lists are intentional
+# here: callers expect JSON-shaped data, while the immutable runtime models use tuples.
 PARSER_DEFAULTS: Final = {
     "globals": {
         "null_markers": list(DEFAULT_NULL_MARKERS),

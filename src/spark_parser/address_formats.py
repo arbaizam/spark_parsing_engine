@@ -1,10 +1,16 @@
-"""Deterministic native-Spark formatting profiles for US location strings."""
+"""Deterministic native-Spark formatting profiles for US location strings.
+
+Every helper returns a Spark :class:`~pyspark.sql.Column`; no value is collected to the driver and
+no Python UDF crosses the JVM boundary. The dictionaries below are intentionally explicit so a
+maintainer can review each business rule and understand exactly which transformations are allowed.
+"""
 
 from __future__ import annotations
 
 from pyspark.sql import Column
 from pyspark.sql import functions as F
 
+# Directionals are recognized case-insensitively after punctuation cleanup.
 _DIRECTIONALS = {
     "n": "N",
     "north": "N",
@@ -24,8 +30,8 @@ _DIRECTIONALS = {
     "southwest": "SW",
 }
 
-# Common Publication 28 suffix names and aliases. The versioned profile can be
-# expanded without silently changing previously versioned formatting behavior.
+# Common Publication 28 suffix names and aliases. Changes to this table alter canonical silver
+# output, so additions should be accompanied by focused runtime examples and UAT review.
 _SUFFIXES = {
     "alley": "Aly",
     "aly": "Aly",
@@ -85,6 +91,7 @@ _SUFFIXES = {
     "way": "Way",
 }
 
+# Secondary-unit designators are also used to recognize the following alphanumeric unit value.
 _UNIT_DESIGNATORS = {
     "apartment": "Apt",
     "apt": "Apt",
@@ -110,6 +117,8 @@ _UNIT_DESIGNATORS = {
     "us": "US",
 }
 
+# ``initcap`` cannot infer internal capitalization. Keep the small, intentional exception list
+# visible rather than embedding opaque regular-expression replacements.
 _NAME_EXCEPTIONS = {
     "dekalb": "DeKalb",
     "delacruz": "DeLaCruz",
@@ -122,13 +131,17 @@ _NAME_EXCEPTIONS = {
 
 
 def _map_lookup(mapping: dict[str, str], key: Column) -> Column:
+    """Build a native Spark map lookup from a small code-owned Python dictionary."""
     pairs: list[Column] = []
     for source, target in mapping.items():
         pairs.extend((F.lit(source), F.lit(target)))
+    # ``element_at`` returns null when a token is not present. Later coalesce/when clauses use that
+    # null to continue through the formatting precedence rules.
     return F.element_at(F.create_map(*pairs), key)
 
 
 def _clean_token(token: Column) -> Column:
+    """Lowercase one token and remove punctuation ignored by these display profiles."""
     return F.regexp_replace(F.lower(token), r"[,.]", "")
 
 
@@ -139,12 +152,20 @@ def _smart_token(
     suffix_allowed: Column | None = None,
     previous_token: Column | None = None,
 ) -> Column:
+    """Format one token according to explicit, ordered address/name rules.
+
+    Rule order matters: named exceptions win first, then address vocabulary, then Mc casing,
+    ordinals, unit identifiers, and finally general apostrophe/hyphen-aware title casing.
+    """
     cleaned = _clean_token(token)
     exception = _map_lookup(_NAME_EXCEPTIONS, cleaned)
     mapped = F.lit(None).cast("string")
     if address:
         suffix = _map_lookup(_SUFFIXES, cleaned)
         if suffix_allowed is not None:
+            # Street-like words can occur inside a proper name. Only the last suffix-looking token
+            # is treated as the street suffix, preventing ``Center Street`` from becoming two
+            # abbreviations.
             suffix = F.when(suffix_allowed, suffix)
         mapped = F.coalesce(
             _map_lookup(_DIRECTIONALS, cleaned),
@@ -158,6 +179,8 @@ def _smart_token(
     )
     title_cased = F.concat_ws(
         "-",
+        # Split twice so both ``Smith-Jones`` and ``O'Brien`` retain their separators while each
+        # component receives predictable title casing.
         F.transform(
             F.split(cleaned, "-"),
             lambda hyphen_part: F.concat_ws(
@@ -170,6 +193,7 @@ def _smart_token(
     alphanumeric = cleaned.rlike(r"^(?=.*\d)(?=.*[a-z])[a-z0-9-]+$")
     unit_value = previous_cleaned.isin(*_UNIT_DESIGNATORS)
     hash_unit_value = cleaned.rlike(r"^#(?=.*\d)(?=.*[a-z])[a-z0-9-]+$")
+    # The chained conditions below are a precedence table. Reordering them is a behavioral change.
     return (
         F.when(exception.isNotNull(), exception)
         .when(mapped.isNotNull(), mapped)
@@ -182,10 +206,17 @@ def _smart_token(
 
 
 def format_address_us_v1(value: Column) -> Column:
-    """Return a USPS-oriented display representation without a Python UDF."""
+    """Return a USPS-oriented display representation using native Spark expressions.
+
+    The input is expected to have already passed common whitespace normalization. Nulls remain
+    null, and empty punctuation-only tokens are removed before joining the final value.
+    """
     tokens = F.split(value, " ")
+    # ``array_position(reverse(...))`` identifies the final suffix candidate without collecting
+    # the token array. Spark array positions are one-based, while transform indices are zero-based.
     suffix_flags = F.transform(tokens, lambda token: _clean_token(token).isin(*_SUFFIXES))
     last_suffix_index = F.size(tokens) - F.array_position(F.reverse(suffix_flags), True)
+    # Prepending an empty token lets every transformed token read its predecessor safely.
     padded_tokens = F.concat(F.array(F.lit("")), tokens)
     formatted_tokens = F.transform(
         tokens,
@@ -201,7 +232,13 @@ def format_address_us_v1(value: Column) -> Column:
 
 
 def format_county(value: Column) -> Column:
-    """Return a smart-cased county name ending in exactly one ``County``."""
+    """Return a smart-cased county name ending in exactly one ``County``.
+
+    A value containing only the suffix has no meaningful county name and therefore returns null;
+    the caller's configured parse-error policy decides whether that null fails, remains null, or
+    becomes a default.
+    """
+    # Remove at most the semantic trailing suffix before rebuilding one canonical suffix.
     core = F.trim(F.regexp_replace(value, r"(?i)(?:^|\s+)county\.?$", ""))
     formatted = F.concat_ws(
         " ",
@@ -216,8 +253,14 @@ def format_county(value: Column) -> Column:
 
 
 def format_zip(value: Column) -> Column:
-    """Return ZIP5 or ZIP+4, padding short components with leading zeroes."""
+    """Return ZIP5 or ZIP+4, padding short components with leading zeroes.
+
+    The return type is string so leading zeroes survive. Malformed input becomes null and is later
+    resolved by the configured parse-error policy.
+    """
     compact = F.regexp_replace(value, r"\s+", "")
+    # Classify first, then construct output only from a matching shape. This avoids permissive
+    # substring extraction accidentally accepting letters or multiple hyphens.
     hyphenated = compact.rlike(r"^\d{1,5}-\d{1,4}$")
     digits_five_or_less = compact.rlike(r"^\d{1,5}$")
     digits_plus_four = compact.rlike(r"^\d{6,9}$")

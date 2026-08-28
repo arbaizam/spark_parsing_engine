@@ -1,4 +1,9 @@
-"""High-level public service API and UAT configuration reporting."""
+"""High-level API for compilation, parsing, discovery, and configuration review.
+
+The service keeps callers away from internal compiler/runtime wiring and provides one consistent
+entry point for notebooks, jobs, authoring tools, and tests. Report generation is intentionally
+Spark-free: a team can review resolved behavior before binding a configuration to live data.
+"""
 
 from __future__ import annotations
 
@@ -23,16 +28,20 @@ from spark_parser.version import __version__
 
 
 def _markdown_text(value: Any) -> str:
+    """Render one arbitrary report value safely inside a Markdown table cell."""
     if value is None:
         return "—"
     if isinstance(value, (dict, list, tuple)):
         rendered = json.dumps(value, ensure_ascii=False, default=str)
     else:
         rendered = str(value)
+    # Pipes would create extra columns and line breaks would break the row. Escape/flatten only the
+    # structural Markdown characters; otherwise preserve the human-readable representation.
     return rendered.replace("|", "\\|").replace("\n", " ")
 
 
 def _walk_parser_options(options: ParserOptions):
+    """Yield a parser node followed by every recursive child in deterministic order."""
     yield options
     if options.element_parser is not None:
         yield from _walk_parser_options(options.element_parser.parser)
@@ -43,12 +52,14 @@ def _walk_parser_options(options: ParserOptions):
 
 
 def _schema_tree(column: ColumnParser) -> str:
+    """Render one column's recursive source-to-silver parser tree as plain text."""
     lines = [
         f"{column.silver_column_name}: {column.expected_data_type} "
         f"[{column.parser.parser_type.value}] <- {column.source_column_name}"
     ]
 
     def append(options: ParserOptions, prefix: str) -> None:
+        """Append child nodes using indentation while preserving compiled schema order."""
         if options.element_parser is not None:
             element = options.element_parser
             lines.append(
@@ -76,7 +87,12 @@ def _schema_tree(column: ColumnParser) -> str:
 
 @dataclass(frozen=True)
 class UatReviewReport:
-    """Structured validation and resolved-behavior report for UAT review."""
+    """Immutable structured result of reviewing one parser configuration.
+
+    Invalid reports carry authoring errors without raising, which makes them suitable for review
+    UIs and CI artifacts. Valid reports include the complete resolved configuration so reviewers do
+    not have to infer inherited defaults from source shorthand.
+    """
 
     is_valid: bool
     source: str | None
@@ -88,7 +104,9 @@ class UatReviewReport:
     resolved_config: dict[str, Any] | None
 
     def to_mapping(self) -> dict[str, Any]:
-        """Return a detached JSON-compatible report mapping."""
+        """Return a detached JSON-compatible report mapping safe for caller mutation."""
+        # deepcopy protects this frozen report's nested dictionaries/lists from being modified via
+        # a value returned to an authoring UI.
         return deepcopy(
             {
                 "report_type": "spark_parser_uat_config_review",
@@ -105,17 +123,22 @@ class UatReviewReport:
         )
 
     def to_json(self, *, indent: int = 2) -> str:
-        """Render the report as JSON for storage or downstream review tooling."""
+        """Render UTF-8-friendly JSON for durable review artifacts and automation."""
         return json.dumps(self.to_mapping(), indent=indent, ensure_ascii=False, default=str)
 
     def write_json(self, path: str | Path, *, indent: int = 2) -> Path:
-        """Write the structured report as UTF-8 JSON and return its path."""
+        """Write the structured report as newline-terminated UTF-8 JSON and return its path."""
         target = Path(path)
         target.write_text(self.to_json(indent=indent) + "\n", encoding="utf-8")
         return target
 
     def to_markdown(self) -> str:
-        """Render a human-readable Markdown UAT document."""
+        """Render a standalone human-readable Markdown review document.
+
+        Invalid reports stop after errors/warnings because there is no trustworthy resolved
+        configuration to describe. Valid reports include summaries, evidence-based checks, parser
+        trees, effective options, behavioral guidance, and copy-ready canonical YAML.
+        """
         status = "PASS" if self.is_valid else "FAIL"
         lines = [
             "# Spark Parser UAT Configuration Review",
@@ -134,6 +157,8 @@ class UatReviewReport:
             lines.extend(f"- {_markdown_text(warning)}" for warning in self.warnings)
             lines.append("")
         if not self.is_valid:
+            # Never attempt to render tables from absent/partial config state. The invalid report is
+            # still a useful artifact containing source identity and actionable compiler errors.
             return "\n".join(lines)
 
         lines.extend(
@@ -195,6 +220,8 @@ class UatReviewReport:
                 "",
             ]
         )
+        # Options differ by parser type, so one small table per column is clearer and more stable
+        # than a very wide union of every possible parser argument.
         for column in self.column_reviews:
             lines.extend(
                 [
@@ -222,6 +249,8 @@ class UatReviewReport:
                         "",
                     ]
                 )
+        # YAML is generated from already-resolved JSON-compatible data. It is documentation, not a
+        # round trip through untrusted Python object constructors.
         resolved_yaml = yaml.safe_dump(
             self.resolved_config,
             sort_keys=False,
@@ -243,14 +272,17 @@ class UatReviewReport:
         return "\n".join(lines)
 
     def write_markdown(self, path: str | Path) -> Path:
-        """Write the standalone human-readable review as UTF-8 Markdown."""
+        """Write newline-terminated UTF-8 Markdown and return the resulting path."""
         target = Path(path)
         target.write_text(self.to_markdown() + "\n", encoding="utf-8")
         return target
 
 
 class _ParserMetadataAccessor:
+    """Bind a discoverable service attribute to one canonical parser type."""
+
     def __init__(self, parser_type: ParserType) -> None:
+        """Store the parser type described by this lightweight accessor."""
         self._parser_type = parser_type
 
     def describe(self) -> dict[str, Any]:
@@ -259,6 +291,8 @@ class _ParserMetadataAccessor:
 
 
 class _ConfigMetadataAccessor:
+    """Expose configuration authoring metadata through ``parser.config``."""
+
     @staticmethod
     def describe() -> dict[str, Any]:
         """Return top-level, global, and column configuration metadata."""
@@ -266,8 +300,15 @@ class _ConfigMetadataAccessor:
 
 
 class SparkParserService:
-    """One entry point for compilation, parsing, metadata, and UAT review."""
+    """Facade for the package's compiler, serializer, runtime, and review metadata.
 
+    Parser accessor attributes are stateless and shared. Compiler and serializer instances are
+    created per service so callers may instantiate isolated facades for dependency injection while
+    most users rely on the module-level :data:`parser` singleton.
+    """
+
+    # Attribute access such as ``parser.decimal.describe()`` is intentionally discoverable in
+    # notebooks and IDE completion; users need not memorize a separate metadata registry API.
     config = _ConfigMetadataAccessor()
     string = _ParserMetadataAccessor(ParserType.STRING)
     byte = _ParserMetadataAccessor(ParserType.BYTE)
@@ -287,11 +328,12 @@ class SparkParserService:
     map = _ParserMetadataAccessor(ParserType.MAP)
 
     def __init__(self) -> None:
+        """Create the stateless compiler and serializer collaborators used by this facade."""
         self._compiler = YamlParserConfigCompiler()
         self._serializer = ParserConfigSerializer()
 
     def describe(self, parser_type: str | ParserType | None = None) -> dict[str, Any]:
-        """Describe one parser, or return the complete parser catalog."""
+        """Describe one parser, or return a fresh complete parser catalog mapping."""
         if parser_type is None:
             return {member.value: parser_description(member) for member in ParserType}
         normalized = parser_type if isinstance(parser_type, ParserType) else ParserType(parser_type)
@@ -299,12 +341,12 @@ class SparkParserService:
 
     @staticmethod
     def defaults() -> dict[str, Any]:
-        """Return a detached view of all compiler defaults."""
+        """Return a detached view of all compiler defaults safe for caller mutation."""
         return deepcopy(PARSER_DEFAULTS)
 
     @staticmethod
     def normalize_data_type(value: str) -> str:
-        """Validate Spark DDL and return its canonical supported representation."""
+        """Validate supported Spark DDL and return its canonical representation without Spark."""
         return parse_spark_data_type(value).canonical
 
     def compile_text(self, text: str) -> ParserConfig:
@@ -320,7 +362,7 @@ class SparkParserService:
         return self._compiler.compile_mapping(payload)
 
     def compile_yaml(self, source: str | Path | Mapping[str, Any]) -> ParserConfig:
-        """Compile YAML text, a YAML path, or a YAML-compatible mapping."""
+        """Compile YAML text, an existing YAML path, or a YAML-compatible mapping."""
         config, _ = self._compile_source(source)
         return config
 
@@ -344,7 +386,11 @@ class SparkParserService:
         key_columns: Sequence[str] | None = None,
         column_prefix: str = "spark_parser",
     ):
-        """Compile when necessary and build parsed/audit Spark projections."""
+        """Compile when necessary and build lazy parsed/audit Spark projections.
+
+        Importing the runtime inside this method preserves the package's Spark-free compiler and
+        metadata use cases. Passing an already compiled config avoids redundant authoring work.
+        """
         resolved = config if isinstance(config, ParserConfig) else self.compile_yaml(config)
         from spark_parser.spark_runtime import SparkDataFrameParser
 
@@ -359,7 +405,11 @@ class SparkParserService:
         self,
         source: str | Path | Mapping[str, Any],
     ) -> UatReviewReport:
-        """Validate YAML and return a detailed structured UAT review report."""
+        """Validate authoring input and return a detailed report instead of raising.
+
+        Only expected input/compilation failures are converted into an invalid report. Programming
+        errors outside that boundary should still surface normally rather than being hidden.
+        """
         source_label: str | None = None
         try:
             config, source_label = self._compile_source(source)
@@ -377,6 +427,8 @@ class SparkParserService:
 
         resolved = self._serializer.to_mapping(config)
         report_warnings: list[str] = []
+        # Ownership metadata is not required for execution, but missing values reduce the usefulness
+        # of a UAT artifact and therefore deserve explicit review warnings.
         if config.description is None:
             report_warnings.append("description is not set; UAT scope may be less clear.")
         if config.owner is None:
@@ -389,6 +441,8 @@ class SparkParserService:
                 "No columns have audit enabled; results_df will contain an empty parse-results array."
             )
 
+        # Reusing one bronze source for multiple silver interpretations is allowed. Report it so a
+        # reviewer can distinguish an intentional fan-out from accidental duplicate authoring.
         repeated_sources = sorted(
             {
                 column.source_column_name
@@ -403,6 +457,7 @@ class SparkParserService:
         column_reviews: list[dict[str, Any]] = []
         resolved_columns = resolved["columns"]
         for column, resolved_column in zip(config.columns, resolved_columns, strict=True):
+            # ``strict=True`` asserts the serializer preserved one-to-one column correspondence.
             description = parser_description(column.parser.parser_type)
             parser_options = deepcopy(resolved_column["parser"])
             parser_options.setdefault("default_on_null", None)
@@ -425,6 +480,8 @@ class SparkParserService:
                 }
             )
 
+        # Flatten the recursive parser forest once so validation evidence includes nested parser
+        # nodes rather than reporting only top-level columns.
         all_options = [
             options for column in config.columns for options in _walk_parser_options(column.parser)
         ]
@@ -441,6 +498,8 @@ class SparkParserService:
                 for column in config.columns
             }
         )
+        # Checks describe concrete compiler evidence. They are not a second validation engine; a
+        # PASS means the strict compiler already proved the stated invariant.
         checks = (
             {
                 "check": "YAML and metadata contract",
@@ -512,6 +571,7 @@ class SparkParserService:
         self,
         source: str | Path | Mapping[str, Any],
     ) -> tuple[ParserConfig, str]:
+        """Disambiguate mapping, path, and inline-text inputs and return a source label."""
         if isinstance(source, Mapping):
             return self.compile_mapping(source), "mapping"
         if isinstance(source, Path):
@@ -519,6 +579,8 @@ class SparkParserService:
         if not isinstance(source, str):
             raise TypeError("YAML source must be text, a path, or a mapping.")
         if "\n" not in source and "\r" not in source:
+            # A single-line string may be either YAML text or a path. Existing files win; a missing
+            # string ending in .yaml/.yml is treated as a path typo instead of confusing YAML.
             try:
                 path = Path(source)
                 if path.is_file():
@@ -531,6 +593,7 @@ class SparkParserService:
 
     @staticmethod
     def _source_label(source: Any) -> str | None:
+        """Return a best-effort report label when compilation failed before source resolution."""
         if isinstance(source, Mapping):
             return "mapping"
         if isinstance(source, Path):
@@ -540,5 +603,7 @@ class SparkParserService:
         return None
 
 
+# Most consumers need no mutable service state, so a package-level singleton is the ergonomic
+# default. Tests and dependency-injected applications may still instantiate SparkParserService.
 parser = SparkParserService()
 """Convenience singleton for compilation, parsing, discovery, and UAT reporting."""

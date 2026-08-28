@@ -1,0 +1,102 @@
+parser_config_id: databricks_bronze_to_silver_uat
+parser_config_name: Databricks Bronze to Silver UAT
+version: "1.0.0"
+description: Representative Databricks UAT coverage for scalar and nested parsing behavior.
+owner: Data Engineering
+owner_department: Enterprise Data
+
+globals:
+  null_markers: [NA, N/A]
+  null_marker_case_sensitive: false
+  true_values: ["true", Y]
+  false_values: ["false", N]
+  boolean_case_sensitive: false
+
+columns:
+  - source_column_name: record_id
+    silver_column_name: RecordId
+    expected_data_type: string
+    parser: string
+
+  - source_column_name: customer_name
+    silver_column_name: CustomerName
+    expected_data_type: string
+    parser:
+      type: string
+      format: upper
+      replace_null_markers: true
+      audit: true
+
+  - source_column_name: amount
+    silver_column_name: Amount
+    expected_data_type: decimal(10,2)
+    parser:
+      type: decimal
+      on_parse_error: null
+      audit: true
+
+  - source_column_name: quantity
+    silver_column_name: Quantity
+    expected_data_type: integer
+    parser:
+      type: integer
+      on_parse_error: default
+      default_on_error: 0
+      audit: true
+
+  - source_column_name: event_date
+    silver_column_name: EventDate
+    expected_data_type: date
+    parser:
+      type: date
+      formats: [yyyy-MM-dd]
+      audit: true
+
+  - source_column_name: aliases
+    silver_column_name: Aliases
+    expected_data_type: array<string>
+    parser:
+      type: array
+      element_parser:
+        type: string
+        format: upper
+      on_element_error: drop
+      drop_null_elements: true
+      distinct: true
+      on_parse_error: default
+      default_on_error: [UNKNOWN]
+      audit: true
+
+  - source_column_name: profile
+    silver_column_name: Profile
+    expected_data_type: struct<postal_code:string,scores:array<integer>>
+    parser:
+      type: struct
+      fields:
+        - source_field_name: zip_code
+          silver_field_name: postal_code
+          parser:
+            type: string
+            format: zip
+            on_parse_error: null
+        - source_field_name: raw_scores
+          silver_field_name: scores
+          parser:
+            type: array
+            element_parser: integer
+            on_element_error: null
+      on_parse_error: default
+      default_on_error:
+        postal_code: "00000"
+        scores: []
+      audit: true
+
+  - source_column_name: attributes
+    silver_column_name: Attributes
+    expected_data_type: map<string,decimal(10,2)>
+    parser:
+      type: map
+      value_parser: decimal
+      on_value_error: drop
+      on_parse_error: null
+      audit: true

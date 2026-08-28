@@ -1,4 +1,8 @@
-"""Canonical configuration vocabulary."""
+"""Canonical, closed vocabulary accepted by configuration and runtime code.
+
+Enums prevent spelling drift between YAML compilation, Spark expression generation, metadata,
+and audit output. Each value is also a string so serialized output stays straightforward.
+"""
 
 from enum import Enum
 
@@ -80,6 +84,8 @@ class BinaryEncoding(str, Enum):
     UTF8 = "utf8"
 
 
+# Shared parser families keep conditional behavior centralized. ``frozenset`` documents that
+# these groupings are constants and makes accidental runtime mutation impossible.
 NUMERIC_PARSER_TYPES = frozenset(
     {
         ParserType.BYTE,
