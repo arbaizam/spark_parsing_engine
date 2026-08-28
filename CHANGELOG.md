@@ -4,6 +4,9 @@
 
 - Add `title` string formatting for display text that retains normalized spaces.
 - Add `state_us` string formatting for the 50 US states and Washington, DC.
+- Accept US month-first 12-hour timestamp strings such as `09/30/2026 12:00 AM` and
+  `09/30/2026 12:00:00 AM` as built-in fallbacks for date, timestamp, and
+  timestamp-without-timezone parsing after their ISO formats.
 - Make malformed `timestamp_ntz` values honor configured error policies under ANSI mode.
 - Reject incomplete nested numeric tokens and non-finite nested floating-point values.
 - Treat strict-JSON failures and duplicate map keys as container parse errors instead of allowing

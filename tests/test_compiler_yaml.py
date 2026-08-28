@@ -212,7 +212,21 @@ columns:
     assert options.on_parse_error is ParseErrorMode.FAIL
     assert options.audit is False
     assert PARSER_DEFAULTS["common"]["collapse_whitespace"] is True
-    assert PARSER_DEFAULTS["date"]["formats"] == ["yyyy-MM-dd"]
+    assert PARSER_DEFAULTS["date"]["formats"] == [
+        "yyyy-MM-dd",
+        "MM/dd/yyyy hh:mm a",
+        "MM/dd/yyyy hh:mm:ss a",
+    ]
+    assert PARSER_DEFAULTS["timestamp"]["formats"] == [
+        "yyyy-MM-dd HH:mm:ss",
+        "MM/dd/yyyy hh:mm a",
+        "MM/dd/yyyy hh:mm:ss a",
+    ]
+    assert PARSER_DEFAULTS["timestamp_ntz"]["formats"] == [
+        "yyyy-MM-dd HH:mm:ss",
+        "MM/dd/yyyy hh:mm a",
+        "MM/dd/yyyy hh:mm:ss a",
+    ]
 
 
 @pytest.mark.parametrize(

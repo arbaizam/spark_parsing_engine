@@ -248,7 +248,8 @@ columns:                                   # [required] Non-empty ordered list.
       on_parse_error: fail
       # default_on_error: 1970-01-01
       audit: false
-      formats: [yyyy-MM-dd]                 # [optional; default: [yyyy-MM-dd]]
+      # US month-first defaults accept timestamps both with and without seconds.
+      formats: [yyyy-MM-dd, "MM/dd/yyyy hh:mm a", "MM/dd/yyyy hh:mm:ss a"] # [optional]
 
   # Timestamp parser. Formats cascade in list order; the first successful parse wins.
   - source_column_name: timestamp_value
@@ -268,7 +269,8 @@ columns:                                   # [required] Non-empty ordered list.
       on_parse_error: fail
       # default_on_error: 1970-01-01T00:00:00
       audit: false
-      formats: [yyyy-MM-dd HH:mm:ss]        # [optional; default: [yyyy-MM-dd HH:mm:ss]]
+      # US month-first defaults accept timestamps both with and without seconds.
+      formats: [yyyy-MM-dd HH:mm:ss, "MM/dd/yyyy hh:mm a", "MM/dd/yyyy hh:mm:ss a"] # [optional]
 
   # Timestamp without timezone. Represents local wall-clock time.
   - source_column_name: timestamp_ntz_value
@@ -288,7 +290,8 @@ columns:                                   # [required] Non-empty ordered list.
       on_parse_error: fail
       # default_on_error: 1970-01-01T00:00:00
       audit: false
-      formats: [yyyy-MM-dd HH:mm:ss]        # [optional; default: [yyyy-MM-dd HH:mm:ss]]
+      # US month-first defaults accept timestamps both with and without seconds.
+      formats: [yyyy-MM-dd HH:mm:ss, "MM/dd/yyyy hh:mm a", "MM/dd/yyyy hh:mm:ss a"] # [optional]
 
   # Array parser. JSON supports recursive element types; delimited supports scalar elements.
   - source_column_name: array_value

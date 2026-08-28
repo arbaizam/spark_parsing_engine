@@ -419,15 +419,23 @@ columns:
 
 | Parser | Argument | Default | Behavior |
 | --- | --- | --- | --- |
-| `date` | `formats` | `[yyyy-MM-dd]` | Non-empty ordered Spark datetime patterns; first successful parse wins, then casts to date. |
-| `timestamp` | `formats` | `[yyyy-MM-dd HH:mm:ss]` | Non-empty ordered Spark datetime patterns; first successful parse wins. |
-| `timestamp_ntz` | `formats` | `[yyyy-MM-dd HH:mm:ss]` | First successful parse wins without applying a session timezone. |
+| `date` | `formats` | `[yyyy-MM-dd, MM/dd/yyyy hh:mm a, MM/dd/yyyy hh:mm:ss a]` | Non-empty ordered Spark datetime patterns; first successful parse wins, then casts to date. |
+| `timestamp` | `formats` | `[yyyy-MM-dd HH:mm:ss, MM/dd/yyyy hh:mm a, MM/dd/yyyy hh:mm:ss a]` | Non-empty ordered Spark datetime patterns; first successful parse wins. |
+| `timestamp_ntz` | `formats` | `[yyyy-MM-dd HH:mm:ss, MM/dd/yyyy hh:mm a, MM/dd/yyyy hh:mm:ss a]` | First successful parse wins without applying a session timezone. |
 
 Formats cascade in declared order. Automatic inference is not performed because ambiguous forms
 such as `MM/dd/yyyy` and `dd/MM/yyyy` can both parse valid but different dates. Patterns are Spark
 datetime patterns, not Python `strptime` patterns. `timestamp` represents an absolute instant and
 its interpretation follows the active Spark SQL session timezone. `timestamp_ntz` represents a
 local wall-clock value and performs no timezone conversion.
+
+The built-in datetime formats accept ISO text and common US bronze exports such as
+`09/30/2026 12:00 AM` and `09/30/2026 12:00:00 AM`. The slash-based forms are deliberately defined
+as month/day/year; the parser does not guess locale. The `date` parser discards the successfully
+parsed time component and produces `2026-09-30`. The `timestamp` and `timestamp_ntz` parsers
+preserve midnight as `2026-09-30 00:00:00`, with the timezone behavior described above. Supplying
+`formats` replaces the relevant parser's defaults when a source contract uses a different
+representation.
 
 ### Array
 

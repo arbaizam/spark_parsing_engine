@@ -161,6 +161,7 @@ state string,
 amount string,
 quantity string,
 event_date string,
+event_timestamp string,
 aliases string,
 profile string,
 attributes string
@@ -175,7 +176,8 @@ bronze_rows = [
         "Illinois",
         "12.345",
         "7",
-        "2026-08-27",
+        "09/30/2026 12:00:00 AM",
+        "09/30/2026 12:00:00 AM",
         '[" ally ","ALLY",null]',
         '{"zip_code":"1234","raw_scores":[1,"bad",3]}',
         '{"principal":"10.125","bad":"x","empty":null}',
@@ -188,6 +190,7 @@ bronze_rows = [
         "not-a-decimal",
         "not-an-integer",
         "2026-08-28",
+        "2026-08-28 13:45:00",
         "not-json",
         "not-json",
         "not-json",
@@ -224,7 +227,9 @@ assert good["LoanStatus"] == "Active Loan"
 assert good["StateCode"] == "IL"
 assert good["Amount"] == Decimal("12.35")
 assert good["Quantity"] == 7
-assert good["EventDate"].isoformat() == "2026-08-27"
+assert good["EventDate"].isoformat() == "2026-09-30"
+assert good["EventTimestamp"].isoformat(sep=" ") == "2026-09-30 00:00:00"
+assert good["EventTimestampNtz"].isoformat(sep=" ") == "2026-09-30 00:00:00"
 assert good["Aliases"] == ["ALLY"]
 assert good["Profile"]["postal_code"] == "01234"
 assert good["Profile"]["scores"] == [1, None, 3]
@@ -237,6 +242,8 @@ assert handled["StateCode"] is None
 assert handled["Amount"] is None
 assert handled["Quantity"] == 0
 assert handled["EventDate"].isoformat() == "2026-08-28"
+assert handled["EventTimestamp"].isoformat(sep=" ") == "2026-08-28 13:45:00"
+assert handled["EventTimestampNtz"].isoformat(sep=" ") == "2026-08-28 13:45:00"
 assert handled["Aliases"] == ["UNKNOWN"]
 assert handled["Profile"] == {"postal_code": "00000", "scores": []}
 assert handled["Attributes"] is None

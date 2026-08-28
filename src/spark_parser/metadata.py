@@ -313,10 +313,17 @@ _SPECIFIC_BEHAVIORS = {
         "Case-insensitive vocabularies are validated for true/false overlap after lowercasing, matching Spark runtime behavior.",
         "Quote YAML tokens such as 'true', 'false', 'yes', 'no', 'on', and 'off' so they remain strings.",
     ],
-    ParserType.DATE: ["Formats cascade in order; format inference is not performed."],
-    ParserType.TIMESTAMP: ["Formats cascade in order; format inference is not performed."],
+    ParserType.DATE: [
+        "Formats cascade in order; format inference is not performed.",
+        "The defaults accept an ISO date or a US month-first 12-hour timestamp, with or without seconds, and return only the date.",
+    ],
+    ParserType.TIMESTAMP: [
+        "Formats cascade in order; format inference is not performed.",
+        "The defaults accept an ISO timestamp or a US month-first 12-hour timestamp with or without seconds.",
+    ],
     ParserType.TIMESTAMP_NTZ: [
-        "Formats cascade in order without applying the Spark session timezone."
+        "Formats cascade in order without applying the Spark session timezone.",
+        "The defaults accept an ISO timestamp or a US month-first 12-hour timestamp with or without seconds.",
     ],
     ParserType.ARRAY: [
         "JSON arrays support recursive element types; delimited arrays support scalar elements.",
@@ -351,12 +358,17 @@ _SPECIFIC_GOTCHAS = {
         "parsed_value audit output is canonical base64 regardless of input encoding."
     ],
     ParserType.BOOLEAN: ["Unknown non-null tokens are parse errors, not false."],
-    ParserType.DATE: ["Spark datetime patterns are not Python strptime patterns."],
+    ParserType.DATE: [
+        "Spark datetime patterns are not Python strptime patterns.",
+        "The built-in slash-date fallback is explicitly MM/dd/yyyy, not dd/MM/yyyy.",
+    ],
     ParserType.TIMESTAMP: [
-        "Timestamp interpretation follows the active Spark SQL session timezone."
+        "Timestamp interpretation follows the active Spark SQL session timezone.",
+        "The built-in slash-date fallback is explicitly MM/dd/yyyy, not dd/MM/yyyy.",
     ],
     ParserType.TIMESTAMP_NTZ: [
-        "Use timestamp when the value represents an absolute instant rather than local wall-clock time."
+        "Use timestamp when the value represents an absolute instant rather than local wall-clock time.",
+        "The built-in slash-date fallback is explicitly MM/dd/yyyy, not dd/MM/yyyy.",
     ],
     ParserType.ARRAY: [
         "Delimited input treats the delimiter literally and does not implement CSV quoting.",

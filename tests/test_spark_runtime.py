@@ -318,6 +318,67 @@ columns:
     assert invalid_audit[1].actions_applied == ["parse_error_default_applied"]
 
 
+def test_datetime_defaults_accept_iso_and_us_12_hour_timestamp(spark: SparkSession) -> None:
+    """Keep documented date and timestamp defaults working under production-style ANSI mode."""
+    assert spark.conf.get("spark.sql.ansi.enabled") == "true"
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: default_date_formats
+parser_config_name: Default Date Formats
+version: "1"
+columns:
+  - source_column_name: event_date
+    silver_column_name: EventDate
+    expected_data_type: date
+    parser:
+      type: date
+      on_parse_error: null
+  - source_column_name: event_timestamp
+    silver_column_name: EventTimestamp
+    expected_data_type: timestamp
+    parser:
+      type: timestamp
+      on_parse_error: null
+  - source_column_name: event_timestamp
+    silver_column_name: EventTimestampNtz
+    expected_data_type: timestamp_ntz
+    parser:
+      type: timestamp_ntz
+      on_parse_error: null
+"""
+    )
+    bronze_df = spark.createDataFrame(
+        [
+            (1, "2026-09-29", "2026-09-29 01:02:03"),
+            (2, "09/30/2026 12:00 AM", "09/30/2026 12:00 AM"),
+            (3, "09/30/2026 12:00:00 AM", "09/30/2026 12:00:00 AM"),
+            # A bare slash date remains invalid. Accepting it would silently guess whether the
+            # source uses month/day or day/month ordering.
+            (4, "09/10/2026", "09/10/2026"),
+        ],
+        "row_id integer, event_date string, event_timestamp string",
+    )
+
+    rows = (
+        SparkDataFrameParser()
+        .parse_dataframe(bronze_df, config)
+        .parsed_df.orderBy("row_id")
+        .collect()
+    )
+    assert rows[0].EventDate.isoformat() == "2026-09-29"
+    assert rows[1].EventDate.isoformat() == "2026-09-30"
+    assert rows[2].EventDate.isoformat() == "2026-09-30"
+    assert rows[3].EventDate is None
+    assert str(rows[0].EventTimestamp) == "2026-09-29 01:02:03"
+    assert str(rows[1].EventTimestamp) == "2026-09-30 00:00:00"
+    assert str(rows[2].EventTimestamp) == "2026-09-30 00:00:00"
+    assert rows[3].EventTimestamp is None
+    assert str(rows[0].EventTimestampNtz) == "2026-09-29 01:02:03"
+    assert str(rows[1].EventTimestampNtz) == "2026-09-30 00:00:00"
+    assert str(rows[2].EventTimestampNtz) == "2026-09-30 00:00:00"
+    assert rows[3].EventTimestampNtz is None
+
+
 def test_audit_schema_is_stable_with_or_without_audited_columns(spark: SparkSession) -> None:
     template = """
 parser_config_id: audit_schema

@@ -66,7 +66,20 @@ columns:
     expected_data_type: date
     parser:
       type: date
-      formats: [yyyy-MM-dd]
+      audit: true
+
+  - source_column_name: event_timestamp
+    silver_column_name: EventTimestamp
+    expected_data_type: timestamp
+    parser:
+      type: timestamp
+      audit: true
+
+  - source_column_name: event_timestamp
+    silver_column_name: EventTimestampNtz
+    expected_data_type: timestamp_ntz
+    parser:
+      type: timestamp_ntz
       audit: true
 
   - source_column_name: aliases

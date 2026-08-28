@@ -33,8 +33,26 @@ DEFAULT_AUDIT: Final = False
 # Parser-specific scalar defaults.
 DEFAULT_ZERO_IS_VALID: Final = True
 DEFAULT_STRING_FORMAT: Final = None
-DEFAULT_DATE_FORMATS: Final[tuple[str, ...]] = ("yyyy-MM-dd",)
-DEFAULT_TIMESTAMP_FORMATS: Final[tuple[str, ...]] = ("yyyy-MM-dd HH:mm:ss",)
+US_MONTH_FIRST_12_HOUR_FORMAT: Final = "MM/dd/yyyy hh:mm a"
+US_MONTH_FIRST_12_HOUR_SECONDS_FORMAT: Final = "MM/dd/yyyy hh:mm:ss a"
+# Date inputs often arrive from two predictable bronze contracts: an ISO date string or a US
+# reporting-system timestamp whose time is irrelevant to the silver date. Keep ISO first because it
+# is unambiguous. The slash-based fallback is deliberately month-first and requires both a time and
+# an AM/PM marker, so this default does not pretend to infer ambiguous bare values such as 01/02/2026.
+DEFAULT_DATE_FORMATS: Final[tuple[str, ...]] = (
+    "yyyy-MM-dd",
+    US_MONTH_FIRST_12_HOUR_FORMAT,
+    US_MONTH_FIRST_12_HOUR_SECONDS_FORMAT,
+)
+# Timestamp parsers accept the same US export without sacrificing the time component. The regular
+# timestamp parser applies Spark's session timezone; timestamp_ntz reuses this tuple but treats the
+# parsed clock time as timezone-free. Keeping the shared format in one named constant prevents the
+# three parser families from drifting apart as their defaults evolve.
+DEFAULT_TIMESTAMP_FORMATS: Final[tuple[str, ...]] = (
+    "yyyy-MM-dd HH:mm:ss",
+    US_MONTH_FIRST_12_HOUR_FORMAT,
+    US_MONTH_FIRST_12_HOUR_SECONDS_FORMAT,
+)
 DEFAULT_TIMESTAMP_NTZ_FORMATS: Final[tuple[str, ...]] = DEFAULT_TIMESTAMP_FORMATS
 DEFAULT_BINARY_ENCODING: Final = BinaryEncoding.BASE64
 DEFAULT_BOOLEAN_TRUE_VALUES: Final[tuple[str, ...]] = ("true",)
