@@ -11,12 +11,153 @@ from spark_parser import (
     CompilationError,
     NullMarkersMode,
     ParseErrorMode,
+    ParserConfigSerializer,
     ParserType,
     StringFormat,
     YamlParserConfigCompiler,
+    parse_spark_data_type,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_recursive_spark_datatype_grammar_is_canonical() -> None:
+    parsed = parse_spark_data_type(
+        " STRUCT<`Display Name`: STRING, values: ARRAY<DECIMAL(18, 2)>, attrs: MAP<STRING, INT>> "
+    )
+
+    assert parsed.canonical == (
+        "struct<`Display Name`:string,values:array<decimal(18,2)>,attrs:map<string,integer>>"
+    )
+    assert parsed.fields[1].data_type.element_type is not None
+
+
+def test_complex_parsers_compile_recursively_and_round_trip() -> None:
+    compiler = YamlParserConfigCompiler()
+    config = compiler.compile_text(
+        """
+parser_config_id: complex
+parser_config_name: Complex
+version: "1"
+columns:
+  - source_column_name: names
+    silver_column_name: Names
+    expected_data_type: array<string>
+    parser:
+      type: array
+      element_parser: {type: string, format: upper}
+      on_element_error: drop
+      distinct: true
+  - source_column_name: object
+    silver_column_name: Object
+    expected_data_type: struct<name:string,scores:array<integer>>
+    parser:
+      type: struct
+      fields:
+        - {source_field_name: raw_name, silver_field_name: name, parser: string}
+        - source_field_name: raw_scores
+          silver_field_name: scores
+          parser: {type: array, element_parser: integer, on_element_error: null}
+  - source_column_name: attributes
+    silver_column_name: Attributes
+    expected_data_type: map<string,decimal(8,2)>
+    parser: {type: map, value_parser: decimal, on_value_error: drop}
+"""
+    )
+
+    assert [column.parser.parser_type for column in config.columns] == [
+        ParserType.ARRAY,
+        ParserType.STRUCT,
+        ParserType.MAP,
+    ]
+    struct_options = config.columns[1].parser
+    assert struct_options.field_parsers[1].parser.element_parser is not None
+    serializer = ParserConfigSerializer()
+    payload = serializer.to_mapping(config)
+    assert serializer.canonical_json(
+        compiler.compile_mapping(payload)
+    ) == serializer.canonical_json(config)
+
+
+@pytest.mark.parametrize(
+    ("expected_data_type", "parser_yaml", "message"),
+    [
+        ("map<integer,string>", "{type: map, value_parser: string}", "map<string"),
+        (
+            "array<array<string>>",
+            "{type: array, input_format: delimited, delimiter: ',', element_parser: array}",
+            "scalar element",
+        ),
+        (
+            "array<string>",
+            "{type: array, input_format: delimited, element_parser: string}",
+            "delimiter",
+        ),
+        (
+            "struct<a:string,b:string>",
+            "{type: struct, fields: [{source_field_name: a, silver_field_name: a, parser: string}]}",
+            "missing field",
+        ),
+        (
+            "array<map<string,string>>",
+            "{type: array, element_parser: {type: map, value_parser: string}, distinct: true}",
+            "non-comparable",
+        ),
+        ("variant", "string", "Unsupported datatype"),
+    ],
+)
+def test_invalid_complex_contracts_fail_compilation(
+    expected_data_type: str,
+    parser_yaml: str,
+    message: str,
+) -> None:
+    with pytest.raises(CompilationError, match=message):
+        YamlParserConfigCompiler().compile_text(
+            f"""
+parser_config_id: invalid
+parser_config_name: Invalid
+version: "1"
+columns:
+  - source_column_name: value
+    silver_column_name: Value
+    expected_data_type: {expected_data_type}
+    parser: {parser_yaml}
+"""
+        )
+
+
+@pytest.mark.parametrize(
+    ("data_type", "default_value", "extra_option", "message"),
+    [
+        ("byte", "128", "", "does not fit byte"),
+        ("short", "32768", "", "does not fit short"),
+        ("binary", "GG", "encoding: hex", "valid hex"),
+        ("binary", "not base64!", "", "valid base64"),
+    ],
+)
+def test_new_scalar_defaults_are_strictly_validated(
+    data_type: str,
+    default_value: str,
+    extra_option: str,
+    message: str,
+) -> None:
+    with pytest.raises(CompilationError, match=message):
+        YamlParserConfigCompiler().compile_text(
+            f"""
+parser_config_id: invalid_default
+parser_config_name: Invalid Default
+version: "1"
+columns:
+  - source_column_name: value
+    silver_column_name: Value
+    expected_data_type: {data_type}
+    parser:
+      type: {data_type}
+      is_nullable: false
+      default_on_null: {default_value}
+      {extra_option}
+"""
+        )
 
 
 def test_repository_example_compiles_with_resolved_options() -> None:

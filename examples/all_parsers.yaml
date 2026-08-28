@@ -46,6 +46,46 @@ columns:                                   # [required] Non-empty ordered list.
       # Allowed: null|lower|upper|pascal|address_us_v1|county|zip
       format: null                         # [optional; default: null]
 
+  # Byte parser (`tinyint` is an accepted alias).
+  - source_column_name: byte_value
+    silver_column_name: ByteValue
+    expected_data_type: byte
+    parser:
+      type: byte
+      collapse_whitespace: true
+      trim_whitespace: true
+      empty_is_null: true
+      replace_null_markers: false
+      null_markers: []
+      null_markers_mode: replace
+      null_marker_case_sensitive: true
+      is_nullable: true
+      # default_on_null: 0
+      on_parse_error: fail
+      # default_on_error: 0
+      audit: false
+      zero_is_valid: true
+
+  # Short parser (`smallint` is an accepted alias).
+  - source_column_name: short_value
+    silver_column_name: ShortValue
+    expected_data_type: short
+    parser:
+      type: short
+      collapse_whitespace: true
+      trim_whitespace: true
+      empty_is_null: true
+      replace_null_markers: false
+      null_markers: []
+      null_markers_mode: replace
+      null_marker_case_sensitive: true
+      is_nullable: true
+      # default_on_null: 0
+      on_parse_error: fail
+      # default_on_error: 0
+      audit: false
+      zero_is_valid: true
+
   # Integer parser (`expected_data_type: int` and `type: int` are accepted aliases).
   - source_column_name: integer_value
     silver_column_name: IntegerValue
@@ -84,6 +124,26 @@ columns:                                   # [required] Non-empty ordered list.
       # default_on_null: 0
       on_parse_error: fail
       # default_on_error: 0
+      audit: false
+      zero_is_valid: true
+
+  # Float parser (`real` is an accepted alias).
+  - source_column_name: float_value
+    silver_column_name: FloatValue
+    expected_data_type: float
+    parser:
+      type: float
+      collapse_whitespace: true
+      trim_whitespace: true
+      empty_is_null: true
+      replace_null_markers: false
+      null_markers: []
+      null_markers_mode: replace
+      null_marker_case_sensitive: true
+      is_nullable: true
+      # default_on_null: 0.0
+      on_parse_error: fail
+      # default_on_error: 0.0
       audit: false
       zero_is_valid: true
 
@@ -126,6 +186,26 @@ columns:                                   # [required] Non-empty ordered list.
       # default_on_error: 0.0
       audit: false
       zero_is_valid: true
+
+  # Binary parser. Audit values are always rendered as canonical base64.
+  - source_column_name: binary_value
+    silver_column_name: BinaryValue
+    expected_data_type: binary
+    parser:
+      type: binary
+      collapse_whitespace: true
+      trim_whitespace: true
+      empty_is_null: true
+      replace_null_markers: false
+      null_markers: []
+      null_markers_mode: replace
+      null_marker_case_sensitive: true
+      is_nullable: true
+      # default_on_null: U3BhcmsgUGFyc2Vy
+      on_parse_error: fail
+      # default_on_error: U3BhcmsgUGFyc2Vy
+      audit: false
+      encoding: base64                     # [optional; default: base64; base64|hex|utf8]
 
   # Boolean parser
   - source_column_name: boolean_value
@@ -189,3 +269,105 @@ columns:                                   # [required] Non-empty ordered list.
       # default_on_error: 1970-01-01T00:00:00
       audit: false
       formats: [yyyy-MM-dd HH:mm:ss]        # [optional; default: [yyyy-MM-dd HH:mm:ss]]
+
+  # Timestamp without timezone. Represents local wall-clock time.
+  - source_column_name: timestamp_ntz_value
+    silver_column_name: TimestampNtzValue
+    expected_data_type: timestamp_ntz
+    parser:
+      type: timestamp_ntz
+      collapse_whitespace: true
+      trim_whitespace: true
+      empty_is_null: true
+      replace_null_markers: false
+      null_markers: []
+      null_markers_mode: replace
+      null_marker_case_sensitive: true
+      is_nullable: true
+      # default_on_null: 1970-01-01T00:00:00
+      on_parse_error: fail
+      # default_on_error: 1970-01-01T00:00:00
+      audit: false
+      formats: [yyyy-MM-dd HH:mm:ss]        # [optional; default: [yyyy-MM-dd HH:mm:ss]]
+
+  # Array parser. JSON supports recursive element types; delimited supports scalar elements.
+  - source_column_name: array_value
+    silver_column_name: ArrayValue
+    expected_data_type: array<string>
+    parser:
+      type: array
+      collapse_whitespace: true
+      trim_whitespace: true
+      empty_is_null: true
+      replace_null_markers: false
+      null_markers: []
+      null_markers_mode: replace
+      null_marker_case_sensitive: true
+      is_nullable: true
+      # default_on_null: []
+      on_parse_error: fail
+      # default_on_error: []
+      audit: false
+      input_format: json                    # [optional; default: json; json|delimited]
+      # delimiter: ","                     # [conditionally required for delimited input]
+      element_parser:                       # [required] Recursive parser matching array<T>.
+        type: string
+        format: null
+      on_element_error: fail                # [optional; default: fail; fail|null|drop]
+      drop_null_elements: false             # [optional; default: false]
+      distinct: false                       # [optional; default: false]
+
+  # Struct parser. Every target field must have one source-to-silver mapping.
+  - source_column_name: struct_value
+    silver_column_name: StructValue
+    expected_data_type: struct<name:string,zip:string>
+    parser:
+      type: struct
+      collapse_whitespace: true
+      trim_whitespace: true
+      empty_is_null: true
+      replace_null_markers: false
+      null_markers: []
+      null_markers_mode: replace
+      null_marker_case_sensitive: true
+      is_nullable: true
+      # default_on_null: {name: UNKNOWN, zip: "00000"}
+      on_parse_error: fail
+      # default_on_error: {name: UNKNOWN, zip: "00000"}
+      audit: false
+      input_format: json                    # [optional; default: json; JSON only]
+      fields:                               # [required] Complete recursive field list.
+        - source_field_name: name
+          silver_field_name: name
+          parser:
+            type: string
+            format: null
+        - source_field_name: postal_code
+          silver_field_name: zip
+          parser:
+            type: string
+            format: zip
+            on_parse_error: null
+
+  # Map parser. JSON input currently requires string keys.
+  - source_column_name: map_value
+    silver_column_name: MapValue
+    expected_data_type: map<string,decimal(18,2)>
+    parser:
+      type: map
+      collapse_whitespace: true
+      trim_whitespace: true
+      empty_is_null: true
+      replace_null_markers: false
+      null_markers: []
+      null_markers_mode: replace
+      null_marker_case_sensitive: true
+      is_nullable: true
+      # default_on_null: {}
+      on_parse_error: fail
+      # default_on_error: {}
+      audit: false
+      input_format: json                    # [optional; default: json; JSON only]
+      value_parser: decimal                 # [required] Recursive parser matching map value type.
+      on_value_error: fail                  # [optional; default: fail; fail|null|drop]
+      drop_null_values: false               # [optional; default: false]

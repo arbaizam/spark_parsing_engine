@@ -411,3 +411,284 @@ columns:
     )
     value = config.columns[0].parser.default_on_null
     assert SparkDataFrameParser._option_text(value) == "1970-01-01T00:00:00"
+
+
+def test_complex_types_parse_recursively_with_paths_and_canonical_audit(
+    spark: SparkSession,
+) -> None:
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: complex_runtime
+parser_config_name: Complex Runtime
+version: "1"
+globals:
+  true_values: [Y]
+  false_values: [N]
+  boolean_case_sensitive: false
+columns:
+  - source_column_name: names
+    silver_column_name: Names
+    expected_data_type: array<string>
+    parser:
+      type: array
+      element_parser: {type: string, format: upper}
+      on_element_error: drop
+      drop_null_elements: true
+      distinct: true
+      audit: true
+  - source_column_name: object
+    silver_column_name: Object
+    expected_data_type: struct<street:string,zip:string,scores:array<integer>,approved:boolean,due:date>
+    parser:
+      type: struct
+      fields:
+        - source_field_name: address
+          silver_field_name: street
+          parser: {type: string, format: address_us_v1}
+        - source_field_name: postal
+          silver_field_name: zip
+          parser: {type: string, format: zip, on_parse_error: null}
+        - source_field_name: values
+          silver_field_name: scores
+          parser: {type: array, element_parser: integer, on_element_error: null}
+        - {source_field_name: is_approved, silver_field_name: approved, parser: boolean}
+        - source_field_name: due_date
+          silver_field_name: due
+          parser: {type: date, formats: [MM/dd/yyyy]}
+      audit: true
+  - source_column_name: attributes
+    silver_column_name: Attributes
+    expected_data_type: map<string,decimal(8,2)>
+    parser: {type: map, value_parser: decimal, on_value_error: drop, audit: true}
+"""
+    )
+    df = spark.sql(
+        """
+SELECT
+  1 AS id,
+  '[" alice ","BOB",null,"alice"]' AS names,
+  '{"address":"123 mccormick st. apt #4b","postal":"1234","values":[1,"bad",3],"is_approved":"y","due_date":"08/27/2026"}' AS object,
+  '{"a":12.345,"bad":"x","empty":null}' AS attributes
+"""
+    )
+
+    parsing = SparkDataFrameParser().parse_dataframe(df, config, key_columns=["id"])
+    row = parsing.parsed_df.first()
+    assert row.Names == ["ALICE", "BOB"]
+    assert row.Object.street == "123 McCormick St Apt #4B"
+    assert row.Object.zip == "01234"
+    assert row.Object.scores == [1, None, 3]
+    assert row.Object.approved is True
+    assert str(row.Object.due) == "2026-08-27"
+    assert str(row.Attributes["a"]) == "12.35"
+    assert "bad" not in row.Attributes
+    assert row.Attributes["empty"] is None
+
+    audits = {
+        item.silver_column_name: item
+        for item in parsing.results_df.first().spark_parser_parse_results
+    }
+    assert audits["Names"].parsed_value == '["ALICE","BOB"]'
+    assert audits["Object"].nested_error_paths == ["$.scores[1]"]
+    assert audits["Attributes"].nested_error_paths == ["$['bad']"]
+    assert "nested_parse_errors_resolved" in audits["Object"].actions_applied
+    assert '"type":"string"' in audits["Names"].options["element_parser"]
+
+
+def test_delimited_arrays_complex_defaults_and_malformed_json(
+    spark: SparkSession,
+) -> None:
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: complex_edges
+parser_config_name: Complex Edges
+version: "1"
+columns:
+  - source_column_name: numbers
+    silver_column_name: Numbers
+    expected_data_type: array<integer>
+    parser:
+      type: array
+      input_format: delimited
+      delimiter: "|"
+      element_parser: integer
+      on_element_error: drop
+      distinct: true
+      audit: true
+  - source_column_name: object
+    silver_column_name: Object
+    expected_data_type: struct<a:integer>
+    parser:
+      type: struct
+      fields:
+        - {source_field_name: a, silver_field_name: a, parser: integer}
+      on_parse_error: default
+      default_on_error: {a: -1}
+      audit: true
+"""
+    )
+    df = spark.sql("SELECT 1 AS id, '001|2|bad|2' AS numbers, 'not json' AS object")
+
+    parsing = SparkDataFrameParser().parse_dataframe(df, config, key_columns=["id"])
+    row = parsing.parsed_df.first()
+    assert row.Numbers == [1, 2]
+    assert row.Object.a == -1
+    audits = {
+        item.silver_column_name: item
+        for item in parsing.results_df.first().spark_parser_parse_results
+    }
+    assert audits["Numbers"].nested_error_paths == ["$[2]"]
+    assert audits["Object"].nested_error_paths == ["$"]
+    assert audits["Object"].actions_applied == ["parse_error_default_applied"]
+
+
+def test_new_scalar_types_are_first_class(spark: SparkSession) -> None:
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: new_scalars
+parser_config_name: New Scalars
+version: "1"
+columns:
+  - {source_column_name: byte_value, silver_column_name: ByteValue, expected_data_type: byte, parser: byte}
+  - {source_column_name: short_value, silver_column_name: ShortValue, expected_data_type: short, parser: short}
+  - {source_column_name: float_value, silver_column_name: FloatValue, expected_data_type: float, parser: float}
+  - source_column_name: local_time
+    silver_column_name: LocalTime
+    expected_data_type: timestamp_ntz
+    parser: {type: timestamp_ntz, formats: [MM/dd/yyyy HH:mm]}
+  - source_column_name: hex_value
+    silver_column_name: HexValue
+    expected_data_type: binary
+    parser: {type: binary, encoding: hex, audit: true}
+  - source_column_name: base64_value
+    silver_column_name: Base64Value
+    expected_data_type: binary
+    parser: binary
+  - source_column_name: utf8_value
+    silver_column_name: Utf8Value
+    expected_data_type: binary
+    parser: {type: binary, encoding: utf8}
+"""
+    )
+    df = spark.sql(
+        "SELECT '127' byte_value, '32767' short_value, '1.25' float_value, "
+        "'08/27/2026 14:30' local_time, '4869' hex_value, "
+        "'SGk=' base64_value, 'Hi' utf8_value"
+    )
+
+    parsing = SparkDataFrameParser().parse_dataframe(df, config, key_columns=["byte_value"])
+    row = parsing.parsed_df.first()
+    assert row.ByteValue == 127
+    assert row.ShortValue == 32767
+    assert row.FloatValue == pytest.approx(1.25)
+    assert str(row.LocalTime) == "2026-08-27 14:30:00"
+    assert bytes(row.HexValue) == b"Hi"
+    assert bytes(row.Base64Value) == b"Hi"
+    assert bytes(row.Utf8Value) == b"Hi"
+    audit = parsing.results_df.first().spark_parser_parse_results[0]
+    assert audit.parsed_value == "SGk="
+
+
+def test_nested_fail_policy_raises_when_materialized(spark: SparkSession) -> None:
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: nested_fail
+parser_config_name: Nested Fail
+version: "1"
+columns:
+  - source_column_name: values
+    silver_column_name: Values
+    expected_data_type: array<integer>
+    parser: {type: array, element_parser: integer, on_element_error: fail}
+"""
+    )
+    parsing = SparkDataFrameParser().parse_dataframe(
+        spark.sql("SELECT '[1,\"bad\"]' AS values"),
+        config,
+        key_columns=["values"],
+    )
+
+    with pytest.raises((Py4JJavaError, PySparkException)):
+        parsing.parsed_df.collect()
+
+
+def test_arbitrarily_nested_containers_fail_at_the_exact_child_path(
+    spark: SparkSession,
+) -> None:
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: recursive
+parser_config_name: Recursive
+version: "1"
+columns:
+  - source_column_name: payload
+    silver_column_name: Payload
+    expected_data_type: array<struct<name:string,scores:array<integer>>>
+    parser:
+      type: array
+      on_element_error: drop
+      element_parser:
+        type: struct
+        fields:
+          - {source_field_name: raw_name, silver_field_name: name, parser: {type: string, format: upper}}
+          - source_field_name: raw_scores
+            silver_field_name: scores
+            parser: {type: array, element_parser: integer, on_element_error: null}
+      audit: true
+  - source_column_name: nested_map
+    silver_column_name: NestedMap
+    expected_data_type: map<string,array<integer>>
+    parser:
+      type: map
+      value_parser:
+        type: array
+        element_parser: integer
+        on_element_error: null
+      on_value_error: fail
+      audit: true
+"""
+    )
+    df = spark.sql(
+        'SELECT \'[{"raw_name":"alice","raw_scores":[1,"bad"]},"wrong shape"]\' AS payload, '
+        '\'{"x":[1,"bad"]}\' AS nested_map'
+    )
+
+    parsing = SparkDataFrameParser().parse_dataframe(df, config, key_columns=["payload"])
+    row = parsing.parsed_df.first().Payload
+    assert len(row) == 1
+    assert row[0].name == "ALICE"
+    assert row[0].scores == [1, None]
+    assert parsing.parsed_df.first().NestedMap["x"] == [1, None]
+    audits = parsing.results_df.first().spark_parser_parse_results
+    assert audits[0].nested_error_paths == ["$[0].scores[1]", "$[1]"]
+    assert audits[1].nested_error_paths == ["$['x'][1]"]
+
+
+def test_json_null_is_a_successful_complex_null(spark: SparkSession) -> None:
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: json_null
+parser_config_name: JSON Null
+version: "1"
+columns:
+  - source_column_name: payload
+    silver_column_name: Payload
+    expected_data_type: array<string>
+    parser:
+      type: array
+      element_parser: string
+      is_nullable: false
+      default_on_null: []
+      audit: true
+"""
+    )
+    parsing = SparkDataFrameParser().parse_dataframe(
+        spark.sql("SELECT 'null' AS payload"),
+        config,
+        key_columns=["payload"],
+    )
+
+    assert parsing.parsed_df.first().Payload == []
+    audit = parsing.results_df.first().spark_parser_parse_results[0]
+    assert audit.actions_applied == ["json_null_to_null", "default_on_null_applied"]
+    assert audit.error is None

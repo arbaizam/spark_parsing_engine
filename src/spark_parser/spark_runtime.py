@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import warnings as python_warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -15,10 +16,26 @@ from pyspark.sql import functions as F
 from pyspark.sql import types as T
 
 from spark_parser.address_formats import format_address_us_v1, format_county, format_zip
+from spark_parser.data_types import SparkDataType
 from spark_parser.dataframe_parsing import DataFrameParsing
-from spark_parser.enums import NUMERIC_PARSER_TYPES, ParseErrorMode, ParserType, StringFormat
+from spark_parser.enums import (
+    COMPLEX_PARSER_TYPES,
+    NUMERIC_PARSER_TYPES,
+    BinaryEncoding,
+    ChildErrorMode,
+    ComplexInputFormat,
+    ParseErrorMode,
+    ParserType,
+    StringFormat,
+)
 from spark_parser.exceptions import SchemaValidationError, SchemaWarning
-from spark_parser.models import ColumnParser, ParserConfig, ParserOptions
+from spark_parser.models import (
+    ColumnParser,
+    NestedValueParser,
+    ParserConfig,
+    ParserOptions,
+    StructFieldParser,
+)
 from spark_parser.serializer import ParserConfigSerializer
 from spark_parser.version import __version__
 
@@ -34,12 +51,26 @@ PARSE_RESULT_STRUCT = T.StructType(
         T.StructField("effective", T.BooleanType(), True),
         T.StructField("actions_applied", T.ArrayType(T.StringType(), True), True),
         T.StructField("options", T.MapType(T.StringType(), T.StringType(), True), True),
+        T.StructField("nested_error_paths", T.ArrayType(T.StringType(), True), True),
         T.StructField("error", T.StringType(), True),
     ]
 )
 PARSE_RESULT_ARRAY = T.ArrayType(PARSE_RESULT_STRUCT, containsNull=True)
 _WHITESPACE_PATTERN = r"[\s\u00A0]+"
 _EDGE_WHITESPACE_PATTERN = r"^[\s\u00A0]+|[\s\u00A0]+$"
+_STRICT_JSON_OPTIONS = {
+    "mode": "PERMISSIVE",
+    "allowComments": "false",
+    "allowSingleQuotes": "false",
+    "allowUnquotedFieldNames": "false",
+    "allowNumericLeadingZeros": "false",
+}
+_AUDIT_JSON_OPTIONS = {
+    "ignoreNullFields": "false",
+    "dateFormat": "yyyy-MM-dd",
+    "timestampFormat": "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
+    "timestampNTZFormat": "yyyy-MM-dd'T'HH:mm:ss.SSS",
+}
 
 
 @dataclass(frozen=True)
@@ -48,9 +79,17 @@ class _ColumnRuntimePlan:
     source_missing: bool
     normalized_name: str
     candidate_name: str
+    nested_errors_name: str
     post_parse_name: str
     post_zero_name: str
     final_name: str
+
+
+@dataclass(frozen=True)
+class _NestedParse:
+    value: Column
+    failed: Column
+    error_paths: Column
 
 
 def _column(name: str) -> Column:
@@ -109,16 +148,16 @@ class SparkDataFrameParser:
                 for plan in plans
             }
         )
-        working = working.withColumns(
-            {
-                plan.candidate_name: self._parse_candidate(
-                    _column(plan.normalized_name),
-                    plan.normalized_name,
-                    plan.config,
-                )
-                for plan in plans
-            }
-        )
+        candidate_columns: dict[str, Column] = {}
+        for plan in plans:
+            candidate, nested_errors = self._parse_candidate(
+                _column(plan.normalized_name),
+                plan.normalized_name,
+                plan.config,
+            )
+            candidate_columns[plan.candidate_name] = candidate
+            candidate_columns[plan.nested_errors_name] = nested_errors
+        working = working.withColumns(candidate_columns)
         working = working.withColumns(
             {
                 plan.post_parse_name: self._resolve_parse_error(
@@ -256,6 +295,7 @@ class SparkDataFrameParser:
             source_missing=source_missing,
             normalized_name=f"__spark_parser_normalized_{token}",
             candidate_name=f"__spark_parser_candidate_{token}",
+            nested_errors_name=f"__spark_parser_nested_errors_{token}",
             post_parse_name=f"__spark_parser_post_parse_{token}",
             post_zero_name=f"__spark_parser_post_zero_{token}",
             final_name=f"__spark_parser_final_{token}",
@@ -276,7 +316,7 @@ class SparkDataFrameParser:
     ) -> tuple[Column, Column, Column]:
         whitespace_normalized = (
             F.regexp_replace(source, _WHITESPACE_PATTERN, " ")
-            if options.collapse_whitespace
+            if options.collapse_whitespace and options.parser_type not in COMPLEX_PARSER_TYPES
             else source
         )
         if options.trim_whitespace:
@@ -297,14 +337,21 @@ class SparkDataFrameParser:
             source,
             options,
         )
+        json_null = self._json_null_match(whitespace_normalized, options)
         return (
-            F.when(empty_to_null, F.lit(None).cast("string"))
+            F.when(empty_to_null | json_null, F.lit(None).cast("string"))
             .when(
                 marker_match & F.lit(options.replace_null_markers),
                 F.lit(None).cast("string"),
             )
             .otherwise(whitespace_normalized)
         )
+
+    @staticmethod
+    def _json_null_match(value: Column, options: ParserOptions) -> Column:
+        if options.parser_type not in COMPLEX_PARSER_TYPES:
+            return F.lit(False)
+        return F.coalesce(F.lower(value) == F.lit("null"), F.lit(False))
 
     @staticmethod
     def _parse_failed(plan: _ColumnRuntimePlan) -> Column:
@@ -346,31 +393,38 @@ class SparkDataFrameParser:
                 self._default_on_null_applied(plan),
                 self._typed_literal(
                     options.default_on_null,
-                    plan.config.expected_data_type,
+                    plan.config.data_type,
+                    options,
                 ),
             ).otherwise(_column(plan.post_zero_name))
         return _column(plan.post_zero_name)
 
     def _audit_for_plan(self, plan: _ColumnRuntimePlan) -> Column:
         source = self._source_value(plan)
-        _, empty_to_null, marker_match = self._normalization_state(
+        whitespace_normalized, empty_to_null, marker_match = self._normalization_state(
             source,
             plan.config.parser,
         )
+        json_null = self._json_null_match(whitespace_normalized, plan.config.parser)
         return self._audit_struct(
             plan.config,
             source=source,
             parsed=_column(plan.final_name),
             empty_to_null=empty_to_null,
             marker_replaced=(
-                marker_match & F.lit(plan.config.parser.replace_null_markers) & ~empty_to_null
+                marker_match
+                & F.lit(plan.config.parser.replace_null_markers)
+                & ~empty_to_null
+                & ~json_null
             ),
+            json_null=json_null,
             parse_failed=self._parse_failed(plan),
             zero_invalidated=self._zero_invalidated(plan),
             default_on_null_applied=self._default_on_null_applied(plan),
             source_missing=F.lit(plan.source_missing),
             normalized=_column(plan.normalized_name),
             candidate=_column(plan.candidate_name),
+            nested_error_paths=_column(plan.nested_errors_name),
         )
 
     def _parse_candidate(
@@ -378,9 +432,52 @@ class SparkDataFrameParser:
         normalized: Column,
         normalized_name: str,
         column_config: ColumnParser,
+    ) -> tuple[Column, Column]:
+        if column_config.parser.parser_type in COMPLEX_PARSER_TYPES:
+            raw_value = self._parse_raw_complex(normalized, column_config)
+            nested = self._parse_nested_complex(
+                raw_value,
+                column_config.data_type,
+                column_config.parser,
+                F.lit("$"),
+            )
+            container_failed = normalized.isNotNull() & ~self._complex_input_valid(
+                normalized,
+                column_config.parser,
+            )
+            container_errors = self._error_paths(container_failed, F.lit("$"))
+            candidate = F.when(
+                container_failed,
+                F.lit(None).cast(column_config.expected_data_type),
+            ).otherwise(nested.value)
+            return candidate, F.concat(nested.error_paths, container_errors)
+        if column_config.parser.parser_type in NUMERIC_PARSER_TYPES:
+            candidate = F.expr(
+                "try_cast("
+                f"{_quoted_identifier(normalized_name)} AS {column_config.expected_data_type})"
+            )
+            if column_config.parser.parser_type in {ParserType.FLOAT, ParserType.DOUBLE}:
+                candidate = F.when(
+                    F.isnan(candidate) | (F.abs(candidate) == F.lit(float("inf"))),
+                    F.lit(None).cast(column_config.expected_data_type),
+                ).otherwise(candidate)
+            return candidate, self._empty_error_paths()
+        return (
+            self._parse_scalar_candidate(
+                normalized,
+                column_config.data_type,
+                column_config.parser,
+            ),
+            self._empty_error_paths(),
+        )
+
+    def _parse_scalar_candidate(
+        self,
+        normalized: Column,
+        data_type: SparkDataType,
+        options: ParserOptions,
     ) -> Column:
-        options = column_config.parser
-        parser_type = options.parser_type
+        parser_type = data_type.parser_type
         if parser_type is ParserType.STRING:
             if options.string_format is StringFormat.LOWER:
                 return F.lower(normalized)
@@ -396,10 +493,27 @@ class SparkDataFrameParser:
                 return format_zip(normalized)
             return normalized
         if parser_type in NUMERIC_PARSER_TYPES:
-            return F.expr(
-                "try_cast("
-                f"{_quoted_identifier(normalized_name)} AS {column_config.expected_data_type})"
-            )
+            json_number = F.regexp_replace(normalized, r"^\+", "")
+            json_number = F.regexp_replace(json_number, r"^(-?)0+(?=\d)", "$1")
+            json_number = F.regexp_replace(json_number, r"^\.", "0.")
+            json_number = F.regexp_replace(json_number, r"^-\.", "-0.")
+            json_number = F.regexp_replace(json_number, r"\.$", "")
+            json_number = F.regexp_replace(json_number, r"\.(?=[eE])", "")
+            parsed = F.from_json(
+                F.concat(F.lit('{"value":'), json_number, F.lit("}")),
+                f"struct<value:{data_type.canonical}>",
+                _STRICT_JSON_OPTIONS,
+            ).getField("value")
+            if parser_type in {ParserType.FLOAT, ParserType.DOUBLE}:
+                return F.when(F.abs(parsed) == F.lit(float("inf")), F.lit(None)).otherwise(parsed)
+            return parsed
+        if parser_type is ParserType.BINARY:
+            binary_format = {
+                BinaryEncoding.BASE64: "base64",
+                BinaryEncoding.HEX: "hex",
+                BinaryEncoding.UTF8: "utf-8",
+            }[options.binary_encoding]
+            return F.try_to_binary(normalized, F.lit(binary_format))
         if parser_type is ParserType.BOOLEAN:
             comparable = normalized if options.boolean_case_sensitive else F.lower(normalized)
             true_values = (
@@ -417,7 +531,13 @@ class SparkDataFrameParser:
                 .when(comparable.isin(*false_values), F.lit(False))
                 .otherwise(F.lit(None).cast("boolean"))
             )
-        if parser_type in {ParserType.DATE, ParserType.TIMESTAMP}:
+        if parser_type in {ParserType.DATE, ParserType.TIMESTAMP, ParserType.TIMESTAMP_NTZ}:
+            if parser_type is ParserType.TIMESTAMP_NTZ:
+                candidates = [
+                    F.to_timestamp_ntz(normalized, F.lit(datetime_format))
+                    for datetime_format in options.formats
+                ]
+                return F.coalesce(*candidates)
             candidates = [
                 F.try_to_timestamp(normalized, F.lit(datetime_format))
                 for datetime_format in options.formats
@@ -425,6 +545,309 @@ class SparkDataFrameParser:
             parsed = F.coalesce(*candidates)
             return parsed.cast("date") if parser_type is ParserType.DATE else parsed
         raise ValueError(f"Unsupported parser type: {parser_type.value}.")
+
+    def _parse_raw_complex(self, normalized: Column, column_config: ColumnParser) -> Column:
+        options = column_config.parser
+        if (
+            options.parser_type is ParserType.ARRAY
+            and options.input_format is ComplexInputFormat.DELIMITED
+        ):
+            assert options.delimiter is not None
+            return F.split(normalized, re.escape(options.delimiter), -1)
+        return F.from_json(
+            normalized,
+            self._raw_type_ddl(column_config.data_type, options),
+            _STRICT_JSON_OPTIONS,
+        )
+
+    @staticmethod
+    def _complex_input_valid(normalized: Column, options: ParserOptions) -> Column:
+        if (
+            options.parser_type is ParserType.ARRAY
+            and options.input_format is ComplexInputFormat.DELIMITED
+        ):
+            return F.lit(True)
+        if options.parser_type is ParserType.ARRAY:
+            return F.json_array_length(normalized).isNotNull()
+        return F.json_object_keys(normalized).isNotNull()
+
+    def _parse_nested_complex(
+        self,
+        raw: Column,
+        data_type: SparkDataType,
+        options: ParserOptions,
+        path: Column,
+    ) -> _NestedParse:
+        parser_type = data_type.parser_type
+        if parser_type is ParserType.ARRAY:
+            return self._parse_nested_array(raw, data_type, options, path)
+        if parser_type is ParserType.STRUCT:
+            return self._parse_nested_struct(raw, data_type, options, path)
+        if parser_type is ParserType.MAP:
+            return self._parse_nested_map(raw, data_type, options, path)
+        raise ValueError(f"Expected a complex parser type, found {parser_type.value}.")
+
+    def _parse_nested_value(
+        self,
+        raw: Column,
+        nested: NestedValueParser | StructFieldParser,
+        path: Column,
+        *,
+        child_error_mode: ChildErrorMode | None = None,
+    ) -> _NestedParse:
+        if nested.data_type.is_complex:
+            normalized = self._normalized_value(raw, nested.parser)
+            raw_complex = F.from_json(
+                normalized,
+                self._raw_type_ddl(nested.data_type, nested.parser),
+                _STRICT_JSON_OPTIONS,
+            )
+            failed = normalized.isNotNull() & ~self._complex_input_valid(
+                normalized,
+                nested.parser,
+            )
+            state = self._parse_nested_complex(
+                raw_complex,
+                nested.data_type,
+                nested.parser,
+                path,
+            )
+            candidate = F.when(
+                failed,
+                F.lit(None).cast(nested.expected_data_type),
+            ).otherwise(state.value)
+            value = self._resolve_nested_parse_error(
+                candidate,
+                failed,
+                raw,
+                nested,
+                path,
+                child_error_mode,
+            )
+            value = self._apply_nested_default(value, nested, path)
+            return _NestedParse(
+                value,
+                failed,
+                F.concat(state.error_paths, self._error_paths(failed, path)),
+            )
+
+        normalized = self._normalized_value(raw, nested.parser)
+        candidate = self._parse_scalar_candidate(normalized, nested.data_type, nested.parser)
+        failed = normalized.isNotNull() & candidate.isNull()
+        value = self._resolve_nested_parse_error(
+            candidate,
+            failed,
+            raw,
+            nested,
+            path,
+            child_error_mode,
+        )
+        if nested.parser.parser_type in NUMERIC_PARSER_TYPES and not nested.parser.zero_is_valid:
+            value = F.when(
+                value == F.lit(0).cast(nested.expected_data_type),
+                F.lit(None).cast(nested.expected_data_type),
+            ).otherwise(value)
+        value = self._apply_nested_default(value, nested, path)
+        return _NestedParse(value, failed, self._error_paths(failed, path))
+
+    def _parse_nested_array(
+        self,
+        raw: Column,
+        data_type: SparkDataType,
+        options: ParserOptions,
+        path: Column,
+    ) -> _NestedParse:
+        assert options.element_parser is not None
+
+        def parse_element(element: Column, index: Column) -> Column:
+            element_path = F.concat(path, F.lit("["), index.cast("string"), F.lit("]"))
+            parsed = self._parse_nested_value(
+                element,
+                options.element_parser,
+                element_path,
+                child_error_mode=options.on_element_error,
+            )
+            return F.struct(
+                parsed.value.alias("value"),
+                parsed.failed.alias("failed"),
+                parsed.error_paths.alias("error_paths"),
+            )
+
+        records = F.transform(raw, parse_element)
+        retained = (
+            F.filter(records, lambda record: ~record.getField("failed"))
+            if options.on_element_error is ChildErrorMode.DROP
+            else records
+        )
+        if options.drop_null_elements:
+            retained = F.filter(retained, lambda record: record.getField("value").isNotNull())
+        values = F.transform(retained, lambda record: record.getField("value"))
+        if options.distinct:
+            values = F.array_distinct(values)
+        error_paths = F.flatten(F.transform(records, lambda record: record.getField("error_paths")))
+        return _NestedParse(
+            F.when(raw.isNull(), F.lit(None).cast(data_type.canonical)).otherwise(values),
+            F.lit(False),
+            F.when(raw.isNull(), self._empty_error_paths()).otherwise(error_paths),
+        )
+
+    def _parse_nested_struct(
+        self,
+        raw: Column,
+        data_type: SparkDataType,
+        options: ParserOptions,
+        path: Column,
+    ) -> _NestedParse:
+        parsed_fields: list[Column] = []
+        errors: list[Column] = []
+        for field in options.field_parsers:
+            field_path = F.concat(path, F.lit("."), F.lit(field.silver_field_name))
+            parsed = self._parse_nested_value(
+                raw.getField(field.source_field_name),
+                field,
+                field_path,
+            )
+            parsed_fields.append(parsed.value.alias(field.silver_field_name))
+            errors.append(parsed.error_paths)
+        value = F.struct(*parsed_fields)
+        return _NestedParse(
+            F.when(raw.isNull(), F.lit(None).cast(data_type.canonical)).otherwise(value),
+            F.lit(False),
+            F.when(raw.isNull(), self._empty_error_paths()).otherwise(F.concat(*errors)),
+        )
+
+    def _parse_nested_map(
+        self,
+        raw: Column,
+        data_type: SparkDataType,
+        options: ParserOptions,
+        path: Column,
+    ) -> _NestedParse:
+        assert options.value_parser is not None
+
+        def parse_entry(entry: Column) -> Column:
+            key = entry.getField("key")
+            value_path = F.concat(path, F.lit("['"), key, F.lit("']"))
+            parsed = self._parse_nested_value(
+                entry.getField("value"),
+                options.value_parser,
+                value_path,
+                child_error_mode=options.on_value_error,
+            )
+            return F.struct(
+                key.alias("key"),
+                parsed.value.alias("value"),
+                parsed.failed.alias("failed"),
+                parsed.error_paths.alias("error_paths"),
+            )
+
+        records = F.transform(F.map_entries(raw), parse_entry)
+        retained = (
+            F.filter(records, lambda record: ~record.getField("failed"))
+            if options.on_value_error is ChildErrorMode.DROP
+            else records
+        )
+        if options.drop_null_values:
+            retained = F.filter(retained, lambda record: record.getField("value").isNotNull())
+        entries = F.transform(
+            retained,
+            lambda record: F.struct(
+                record.getField("key").alias("key"),
+                record.getField("value").alias("value"),
+            ),
+        )
+        value = F.map_from_entries(entries)
+        error_paths = F.flatten(F.transform(records, lambda record: record.getField("error_paths")))
+        return _NestedParse(
+            F.when(raw.isNull(), F.lit(None).cast(data_type.canonical)).otherwise(value),
+            F.lit(False),
+            F.when(raw.isNull(), self._empty_error_paths()).otherwise(error_paths),
+        )
+
+    def _resolve_nested_parse_error(
+        self,
+        candidate: Column,
+        failed: Column,
+        source: Column,
+        nested: NestedValueParser | StructFieldParser,
+        path: Column,
+        child_error_mode: ChildErrorMode | None,
+    ) -> Column:
+        if child_error_mode is ChildErrorMode.FAIL:
+            message = F.concat(
+                F.lit("Spark Parser could not parse nested value at "),
+                path,
+                F.lit(f" as {nested.expected_data_type}: "),
+                source.cast("string"),
+            )
+            return F.when(
+                failed,
+                F.raise_error(message).cast(nested.expected_data_type),
+            ).otherwise(candidate)
+        if child_error_mode in {ChildErrorMode.NULL, ChildErrorMode.DROP}:
+            return candidate
+        if nested.parser.on_parse_error is ParseErrorMode.NULL:
+            return candidate
+        if nested.parser.on_parse_error is ParseErrorMode.DEFAULT:
+            return F.when(
+                failed,
+                self._typed_value_literal(
+                    nested.parser.default_on_error,
+                    nested.data_type,
+                    nested.parser,
+                ),
+            ).otherwise(candidate)
+        message = F.concat(
+            F.lit("Spark Parser could not parse nested value at "),
+            path,
+            F.lit(f" as {nested.expected_data_type}: "),
+            source.cast("string"),
+        )
+        return F.when(
+            failed,
+            F.raise_error(message).cast(nested.expected_data_type),
+        ).otherwise(candidate)
+
+    def _apply_nested_default(
+        self,
+        value: Column,
+        nested: NestedValueParser | StructFieldParser,
+        path: Column,
+    ) -> Column:
+        del path
+        if nested.parser.is_nullable:
+            return value
+        return F.when(
+            value.isNull(),
+            self._typed_value_literal(
+                nested.parser.default_on_null,
+                nested.data_type,
+                nested.parser,
+            ),
+        ).otherwise(value)
+
+    def _raw_type_ddl(self, data_type: SparkDataType, options: ParserOptions) -> str:
+        if not data_type.is_complex:
+            return "string"
+        if data_type.parser_type is ParserType.ARRAY:
+            return "array<string>"
+        if data_type.parser_type is ParserType.MAP:
+            return "map<string,string>"
+        fields = ",".join(
+            f"{_quoted_identifier(field.source_field_name)}:string"
+            for field in options.field_parsers
+        )
+        return f"struct<{fields}>"
+
+    @staticmethod
+    def _empty_error_paths() -> Column:
+        return F.array().cast("array<string>")
+
+    def _error_paths(self, failed: Column, path: Column) -> Column:
+        return F.filter(
+            F.array(F.when(failed, path)),
+            lambda item: item.isNotNull(),
+        )
 
     def _resolve_parse_error(
         self,
@@ -441,7 +864,8 @@ class SparkDataFrameParser:
                 parse_failed,
                 self._typed_literal(
                     options.default_on_error,
-                    column_config.expected_data_type,
+                    column_config.data_type,
+                    options,
                 ),
             ).otherwise(candidate)
         message = F.concat(
@@ -457,9 +881,66 @@ class SparkDataFrameParser:
             F.raise_error(message).cast(column_config.expected_data_type),
         ).otherwise(candidate)
 
-    @staticmethod
-    def _typed_literal(value: Any, data_type: str) -> Column:
-        return F.lit(value).cast(data_type)
+    def _typed_literal(
+        self,
+        value: Any,
+        data_type: SparkDataType,
+        options: ParserOptions,
+    ) -> Column:
+        return self._typed_value_literal(value, data_type, options)
+
+    def _typed_value_literal(
+        self,
+        value: Any,
+        data_type: SparkDataType,
+        options: ParserOptions,
+    ) -> Column:
+        if value is None:
+            return F.lit(None).cast(data_type.canonical)
+        if data_type.parser_type is ParserType.BINARY:
+            binary_format = {
+                BinaryEncoding.BASE64: "base64",
+                BinaryEncoding.HEX: "hex",
+                BinaryEncoding.UTF8: "utf-8",
+            }[options.binary_encoding]
+            return F.try_to_binary(F.lit(value), F.lit(binary_format))
+        if data_type.parser_type is ParserType.ARRAY:
+            assert data_type.element_type is not None and options.element_parser is not None
+            items = [
+                self._typed_value_literal(
+                    item,
+                    data_type.element_type,
+                    options.element_parser.parser,
+                )
+                for item in value
+            ]
+            return (F.array(*items) if items else F.array()).cast(data_type.canonical)
+        if data_type.parser_type is ParserType.STRUCT:
+            fields = [
+                self._typed_value_literal(
+                    value[field.silver_field_name],
+                    field.data_type,
+                    field.parser,
+                ).alias(field.silver_field_name)
+                for field in options.field_parsers
+            ]
+            return F.struct(*fields).cast(data_type.canonical)
+        if data_type.parser_type is ParserType.MAP:
+            assert data_type.value_type is not None and options.value_parser is not None
+            pairs: list[Column] = []
+            for key, item in value.items():
+                pairs.extend(
+                    (
+                        F.lit(key),
+                        self._typed_value_literal(
+                            item,
+                            data_type.value_type,
+                            options.value_parser.parser,
+                        ),
+                    )
+                )
+            return (F.create_map(*pairs) if pairs else F.create_map()).cast(data_type.canonical)
+        return F.lit(value).cast(data_type.canonical)
 
     @staticmethod
     def _null_marker_match(value: Column, options: ParserOptions) -> Column:
@@ -479,16 +960,19 @@ class SparkDataFrameParser:
         parsed: Column,
         empty_to_null: Column,
         marker_replaced: Column,
+        json_null: Column,
         parse_failed: Column,
         zero_invalidated: Column,
         default_on_null_applied: Column,
         source_missing: Column,
         normalized: Column,
         candidate: Column,
+        nested_error_paths: Column,
     ) -> Column:
         options = column_config.parser
         parse_to_null = parse_failed & F.lit(options.on_parse_error is ParseErrorMode.NULL)
         parse_default = parse_failed & F.lit(options.on_parse_error is ParseErrorMode.DEFAULT)
+        nested_failed = (F.size(nested_error_paths) > 0) & ~parse_failed
         is_zip = options.string_format is StringFormat.ZIP
         compact_zip = F.regexp_replace(normalized, r"\s+", "")
         zip_digit_count = F.length(F.regexp_replace(compact_zip, r"\D", ""))
@@ -511,8 +995,10 @@ class SparkDataFrameParser:
                 F.when(source_missing, F.lit("source_column_missing")),
                 F.when(empty_to_null, F.lit("empty_string_to_null")),
                 F.when(marker_replaced, F.lit("null_marker_replaced")),
+                F.when(json_null, F.lit("json_null_to_null")),
                 F.when(parse_to_null, F.lit("parse_error_to_null")),
                 F.when(parse_default, F.lit("parse_error_default_applied")),
+                F.when(nested_failed, F.lit("nested_parse_errors_resolved")),
                 F.when(zero_invalidated, F.lit("zero_invalidated")),
                 F.when(default_on_null_applied, F.lit("default_on_null_applied")),
                 F.when(zip_padded, F.lit("zip_padded")),
@@ -525,8 +1011,10 @@ class SparkDataFrameParser:
                 source_missing
                 | empty_to_null
                 | marker_replaced
+                | json_null
                 | parse_to_null
                 | parse_default
+                | nested_failed
                 | zero_invalidated
                 | default_on_null_applied
                 | zip_padded
@@ -534,55 +1022,46 @@ class SparkDataFrameParser:
             ),
             F.lit(False),
         )
-        error = F.when(source_missing, F.lit("Source column is missing.")).when(
-            parse_failed,
-            F.lit(f"Value could not be parsed as {column_config.expected_data_type}."),
+        error = (
+            F.when(source_missing, F.lit("Source column is missing."))
+            .when(
+                parse_failed,
+                F.lit(f"Value could not be parsed as {column_config.expected_data_type}."),
+            )
+            .when(
+                nested_failed,
+                F.lit("One or more nested values could not be parsed; see nested_error_paths."),
+            )
         )
+        if options.parser_type in COMPLEX_PARSER_TYPES:
+            parsed_value = F.to_json(parsed, _AUDIT_JSON_OPTIONS)
+        elif options.parser_type is ParserType.BINARY:
+            parsed_value = F.base64(parsed)
+        else:
+            parsed_value = parsed.cast("string")
         return F.struct(
             F.lit(column_config.source_column_name).alias("source_column_name"),
             F.lit(column_config.silver_column_name).alias("silver_column_name"),
             F.lit(options.parser_type.value).alias("parser_type"),
             F.lit(column_config.expected_data_type).alias("expected_data_type"),
             source.alias("original_value"),
-            parsed.cast("string").alias("parsed_value"),
+            parsed_value.alias("parsed_value"),
             changed.alias("changed"),
             (~source_missing).alias("effective"),
             actions.alias("actions_applied"),
             self._options_map(options).alias("options"),
+            nested_error_paths.alias("nested_error_paths"),
             error.alias("error"),
         )
 
     def _options_map(self, options: ParserOptions) -> Column:
-        payload: dict[str, Any] = {
-            "type": options.parser_type.value,
-            "trim_whitespace": options.trim_whitespace,
-            "collapse_whitespace": options.collapse_whitespace,
-            "empty_is_null": options.empty_is_null,
-            "replace_null_markers": options.replace_null_markers,
-            "null_markers": list(options.null_markers),
-            "null_markers_mode": options.null_markers_mode.value,
-            "null_marker_case_sensitive": options.null_marker_case_sensitive,
-            "is_nullable": options.is_nullable,
-            "default_on_null": options.default_on_null,
-            "on_parse_error": options.on_parse_error.value,
-            "default_on_error": options.default_on_error,
-            "audit": options.audit,
-        }
-        if options.parser_type in NUMERIC_PARSER_TYPES:
-            payload["zero_is_valid"] = options.zero_is_valid
-        if options.parser_type is ParserType.STRING:
-            payload["format"] = (
-                options.string_format.value if options.string_format is not None else None
-            )
-        if options.parser_type in {ParserType.DATE, ParserType.TIMESTAMP}:
-            payload["formats"] = list(options.formats)
-        if options.parser_type is ParserType.BOOLEAN:
-            payload.update(
-                true_values=list(options.true_values),
-                false_values=list(options.false_values),
-                boolean_case_sensitive=options.boolean_case_sensitive,
-                boolean_values_mode=options.boolean_values_mode.value,
-            )
+        payload = ParserConfigSerializer().parser_mapping(
+            options,
+            include_audit=True,
+            include_error_mode=True,
+        )
+        payload.setdefault("default_on_null", None)
+        payload.setdefault("default_on_error", None)
         pairs: list[Column] = []
         for key, value in payload.items():
             pairs.extend((F.lit(key), F.lit(self._option_text(value))))

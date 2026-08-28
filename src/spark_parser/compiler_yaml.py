@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import math
 import re
 from collections.abc import Mapping
@@ -12,14 +14,21 @@ from typing import Any
 
 import yaml
 
+from spark_parser.data_types import SparkDataType, parse_spark_data_type
 from spark_parser.defaults import (
+    DEFAULT_ARRAY_DISTINCT,
     DEFAULT_AUDIT,
+    DEFAULT_BINARY_ENCODING,
     DEFAULT_BOOLEAN_CASE_SENSITIVE,
     DEFAULT_BOOLEAN_FALSE_VALUES,
     DEFAULT_BOOLEAN_TRUE_VALUES,
     DEFAULT_BOOLEAN_VALUES_MODE,
+    DEFAULT_CHILD_ERROR_MODE,
     DEFAULT_COLLAPSE_WHITESPACE,
+    DEFAULT_COMPLEX_INPUT_FORMAT,
     DEFAULT_DATE_FORMATS,
+    DEFAULT_DROP_NULL_ELEMENTS,
+    DEFAULT_DROP_NULL_VALUES,
     DEFAULT_EMPTY_IS_NULL,
     DEFAULT_IS_NULLABLE,
     DEFAULT_NULL_MARKER_CASE_SENSITIVE,
@@ -28,26 +37,47 @@ from spark_parser.defaults import (
     DEFAULT_ON_PARSE_ERROR,
     DEFAULT_REPLACE_NULL_MARKERS,
     DEFAULT_TIMESTAMP_FORMATS,
+    DEFAULT_TIMESTAMP_NTZ_FORMATS,
     DEFAULT_TRIM_WHITESPACE,
     DEFAULT_ZERO_IS_VALID,
 )
 from spark_parser.enums import (
+    COMPLEX_PARSER_TYPES,
     NUMERIC_PARSER_TYPES,
+    BinaryEncoding,
     BooleanValuesMode,
+    ChildErrorMode,
+    ComplexInputFormat,
     NullMarkersMode,
     ParseErrorMode,
     ParserType,
     StringFormat,
 )
 from spark_parser.exceptions import CompilationError
-from spark_parser.models import ColumnParser, ParserConfig, ParserGlobals, ParserOptions
+from spark_parser.models import (
+    ColumnParser,
+    NestedValueParser,
+    ParserConfig,
+    ParserGlobals,
+    ParserOptions,
+    StructFieldParser,
+)
 
 _MISSING = object()
 _DECIMAL_PATTERN = re.compile(r"decimal\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)", re.IGNORECASE)
 _TYPE_ALIASES = {
+    "tinyint": "byte",
+    "smallint": "short",
     "int": "integer",
     "bigint": "long",
+    "real": "float",
+    "bool": "boolean",
+    "timestamp_ltz": "timestamp",
 }
+_BYTE_MIN = -(2**7)
+_BYTE_MAX = 2**7 - 1
+_SHORT_MIN = -(2**15)
+_SHORT_MAX = 2**15 - 1
 _INTEGER_MIN = -(2**31)
 _INTEGER_MAX = 2**31 - 1
 _LONG_MIN = -(2**63)
@@ -215,20 +245,20 @@ class YamlParserConfigCompiler:
         )
         source_column_name = self._required_string(payload, "source_column_name")
         silver_column_name = self._required_string(payload, "silver_column_name")
-        expected_data_type, expected_parser_type = self._normalize_data_type(
-            self._required_string(payload, "expected_data_type")
-        )
+        data_type = parse_spark_data_type(self._required_string(payload, "expected_data_type"))
+        expected_data_type = data_type.canonical
         options = self._compile_parser(
             payload.get("parser", _MISSING),
             globals_config,
-            expected_parser_type,
-            expected_data_type,
+            data_type,
             silver_column_name,
+            allow_audit=True,
         )
         return ColumnParser(
             source_column_name=source_column_name,
             silver_column_name=silver_column_name,
             expected_data_type=expected_data_type,
+            data_type=data_type,
             parser=options,
         )
 
@@ -236,9 +266,11 @@ class YamlParserConfigCompiler:
         self,
         raw_parser: Any,
         globals_config: ParserGlobals,
-        expected_type: ParserType,
-        expected_data_type: str,
+        data_type: SparkDataType,
         silver_column_name: str,
+        *,
+        allow_audit: bool,
+        child_error_owned_by_parent: bool = False,
     ) -> ParserOptions:
         if raw_parser is _MISSING:
             raise CompilationError(f"parser is required for column {silver_column_name!r}.")
@@ -248,42 +280,20 @@ class YamlParserConfigCompiler:
             payload = self._ensure_mapping(raw_parser, f"parser for {silver_column_name!r}")
 
         parser_type = self._parser_type(self._required_string(payload, "type"))
-        if parser_type is not expected_type:
+        expected_data_type = data_type.canonical
+        if parser_type is not data_type.parser_type:
             raise CompilationError(
                 f"Parser {parser_type.value!r} is incompatible with expected_data_type "
                 f"{expected_data_type!r} for silver column {silver_column_name!r}; "
-                f"expected {expected_type.value!r}."
+                f"expected {data_type.parser_type.value!r}."
             )
-        allowed_keys = {
-            "type",
-            "trim_whitespace",
-            "collapse_whitespace",
-            "empty_is_null",
-            "replace_null_markers",
-            "null_markers",
-            "null_markers_mode",
-            "null_marker_case_sensitive",
-            "is_nullable",
-            "default_on_null",
-            "on_parse_error",
-            "default_on_error",
-            "audit",
-        }
-        if parser_type in NUMERIC_PARSER_TYPES:
-            allowed_keys.add("zero_is_valid")
-        if parser_type is ParserType.STRING:
-            allowed_keys.add("format")
-        if parser_type in {ParserType.DATE, ParserType.TIMESTAMP}:
-            allowed_keys.add("formats")
-        if parser_type is ParserType.BOOLEAN:
-            allowed_keys.update(
-                {
-                    "true_values",
-                    "false_values",
-                    "boolean_case_sensitive",
-                    "boolean_values_mode",
-                }
-            )
+        self._validate_nested_parser_contract(
+            payload,
+            silver_column_name,
+            allow_audit=allow_audit,
+            child_error_owned_by_parent=child_error_owned_by_parent,
+        )
+        allowed_keys = self._parser_allowed_keys(parser_type, allow_audit=allow_audit)
         self._reject_keys(payload, allowed_keys, f"Parser for {silver_column_name!r}")
 
         markers_mode = self._enum_value(
@@ -328,8 +338,7 @@ class YamlParserConfigCompiler:
         default_on_null = (
             self._typed_default(
                 raw_default_on_null,
-                parser_type,
-                expected_data_type,
+                data_type,
                 "default_on_null",
             )
             if raw_default_on_null is not _MISSING
@@ -358,8 +367,7 @@ class YamlParserConfigCompiler:
         default_on_error = (
             self._typed_default(
                 raw_default_on_error,
-                parser_type,
-                expected_data_type,
+                data_type,
                 "default_on_error",
             )
             if raw_default_on_error is not _MISSING
@@ -399,7 +407,13 @@ class YamlParserConfigCompiler:
             silver_column_name,
             globals_config,
         )
-        return ParserOptions(
+        complex_options = self._compile_complex_options(
+            payload,
+            data_type,
+            globals_config,
+            silver_column_name,
+        )
+        compiled_options = ParserOptions(
             parser_type=parser_type,
             trim_whitespace=self._bool(
                 payload,
@@ -424,7 +438,7 @@ class YamlParserConfigCompiler:
             default_on_null=default_on_null,
             on_parse_error=on_parse_error,
             default_on_error=default_on_error,
-            audit=self._bool(payload, "audit", DEFAULT_AUDIT),
+            audit=self._bool(payload, "audit", DEFAULT_AUDIT) if allow_audit else False,
             zero_is_valid=zero_is_valid,
             string_format=string_format,
             formats=formats,
@@ -432,7 +446,162 @@ class YamlParserConfigCompiler:
             false_values=false_values,
             boolean_case_sensitive=boolean_case_sensitive,
             boolean_values_mode=boolean_values_mode,
+            binary_encoding=self._enum_value(
+                BinaryEncoding,
+                payload.get("encoding", DEFAULT_BINARY_ENCODING.value),
+                "encoding",
+            ),
+            **complex_options,
         )
+        self._validate_binary_defaults(compiled_options, data_type)
+        return compiled_options
+
+    def _validate_binary_defaults(
+        self,
+        options: ParserOptions,
+        data_type: SparkDataType,
+    ) -> None:
+        if options.default_on_null is not None:
+            self._validate_binary_value(
+                options.default_on_null,
+                data_type,
+                options,
+                "default_on_null",
+            )
+        if options.default_on_error is not None:
+            self._validate_binary_value(
+                options.default_on_error,
+                data_type,
+                options,
+                "default_on_error",
+            )
+
+    def _validate_binary_value(
+        self,
+        value: Any,
+        data_type: SparkDataType,
+        options: ParserOptions,
+        label: str,
+    ) -> None:
+        if value is None:
+            return
+        if data_type.parser_type is ParserType.BINARY:
+            try:
+                if options.binary_encoding is BinaryEncoding.BASE64:
+                    base64.b64decode(value, validate=True)
+                elif options.binary_encoding is BinaryEncoding.HEX:
+                    bytes.fromhex(value)
+                else:
+                    value.encode("utf-8")
+            except (ValueError, UnicodeError, binascii.Error) as exc:
+                raise CompilationError(
+                    f"{label} is not valid {options.binary_encoding.value} binary text."
+                ) from exc
+            return
+        if data_type.parser_type is ParserType.ARRAY:
+            assert data_type.element_type is not None and options.element_parser is not None
+            for index, item in enumerate(value):
+                self._validate_binary_value(
+                    item,
+                    data_type.element_type,
+                    options.element_parser.parser,
+                    f"{label}[{index}]",
+                )
+            return
+        if data_type.parser_type is ParserType.STRUCT:
+            for field in options.field_parsers:
+                self._validate_binary_value(
+                    value[field.silver_field_name],
+                    field.data_type,
+                    field.parser,
+                    f"{label}.{field.silver_field_name}",
+                )
+            return
+        if data_type.parser_type is ParserType.MAP:
+            assert data_type.value_type is not None and options.value_parser is not None
+            for key, item in value.items():
+                self._validate_binary_value(
+                    item,
+                    data_type.value_type,
+                    options.value_parser.parser,
+                    f"{label}[{key!r}]",
+                )
+
+    @staticmethod
+    def _validate_nested_parser_contract(
+        payload: Mapping[str, Any],
+        label: str,
+        *,
+        allow_audit: bool,
+        child_error_owned_by_parent: bool,
+    ) -> None:
+        if not allow_audit and "audit" in payload:
+            raise CompilationError(
+                f"Nested parser {label!r} cannot enable audit; audit belongs to its "
+                "configured top-level column."
+            )
+        if child_error_owned_by_parent and (
+            "on_parse_error" in payload or "default_on_error" in payload
+        ):
+            raise CompilationError(
+                f"Nested parser {label!r} is controlled by its parent child-error policy "
+                "and cannot set on_parse_error or default_on_error."
+            )
+
+    @staticmethod
+    def _parser_allowed_keys(parser_type: ParserType, *, allow_audit: bool) -> set[str]:
+        common = {
+            "type",
+            "trim_whitespace",
+            "collapse_whitespace",
+            "empty_is_null",
+            "replace_null_markers",
+            "null_markers",
+            "null_markers_mode",
+            "null_marker_case_sensitive",
+            "is_nullable",
+            "default_on_null",
+            "on_parse_error",
+            "default_on_error",
+        }
+        if allow_audit:
+            common.add("audit")
+        specific = {
+            ParserType.STRING: {"format"},
+            ParserType.BYTE: {"zero_is_valid"},
+            ParserType.SHORT: {"zero_is_valid"},
+            ParserType.INTEGER: {"zero_is_valid"},
+            ParserType.LONG: {"zero_is_valid"},
+            ParserType.FLOAT: {"zero_is_valid"},
+            ParserType.DECIMAL: {"zero_is_valid"},
+            ParserType.DOUBLE: {"zero_is_valid"},
+            ParserType.BINARY: {"encoding"},
+            ParserType.BOOLEAN: {
+                "true_values",
+                "false_values",
+                "boolean_case_sensitive",
+                "boolean_values_mode",
+            },
+            ParserType.DATE: {"formats"},
+            ParserType.TIMESTAMP: {"formats"},
+            ParserType.TIMESTAMP_NTZ: {"formats"},
+            ParserType.ARRAY: {
+                "input_format",
+                "delimiter",
+                "element_parser",
+                "on_element_error",
+                "drop_null_elements",
+                "distinct",
+            },
+            ParserType.STRUCT: {"input_format", "fields"},
+            ParserType.MAP: {
+                "input_format",
+                "value_parser",
+                "on_value_error",
+                "drop_null_values",
+            },
+        }
+        return common | specific[parser_type]
 
     def _compile_string_format(
         self,
@@ -455,6 +624,8 @@ class YamlParserConfigCompiler:
             default = DEFAULT_DATE_FORMATS
         elif parser_type is ParserType.TIMESTAMP:
             default = DEFAULT_TIMESTAMP_FORMATS
+        elif parser_type is ParserType.TIMESTAMP_NTZ:
+            default = DEFAULT_TIMESTAMP_NTZ_FORMATS
         else:
             return ()
         if "formats" not in payload:
@@ -463,6 +634,196 @@ class YamlParserConfigCompiler:
         if not formats:
             raise CompilationError("formats must contain at least one Spark datetime pattern.")
         return formats
+
+    def _compile_complex_options(
+        self,
+        payload: Mapping[str, Any],
+        data_type: SparkDataType,
+        globals_config: ParserGlobals,
+        label: str,
+    ) -> dict[str, Any]:
+        defaults: dict[str, Any] = {
+            "input_format": DEFAULT_COMPLEX_INPUT_FORMAT,
+            "delimiter": None,
+            "element_parser": None,
+            "field_parsers": (),
+            "value_parser": None,
+            "on_element_error": DEFAULT_CHILD_ERROR_MODE,
+            "on_value_error": DEFAULT_CHILD_ERROR_MODE,
+            "drop_null_elements": DEFAULT_DROP_NULL_ELEMENTS,
+            "distinct": DEFAULT_ARRAY_DISTINCT,
+            "drop_null_values": DEFAULT_DROP_NULL_VALUES,
+        }
+        parser_type = data_type.parser_type
+        if parser_type not in COMPLEX_PARSER_TYPES:
+            return defaults
+
+        input_format = self._enum_value(
+            ComplexInputFormat,
+            payload.get("input_format", DEFAULT_COMPLEX_INPUT_FORMAT.value),
+            "input_format",
+        )
+        if parser_type in {ParserType.STRUCT, ParserType.MAP} and (
+            input_format is not ComplexInputFormat.JSON
+        ):
+            raise CompilationError(
+                f"{parser_type.value} parser {label!r} supports only JSON input."
+            )
+        defaults["input_format"] = input_format
+
+        if parser_type is ParserType.ARRAY:
+            assert data_type.element_type is not None
+            raw_element_parser = payload.get("element_parser", _MISSING)
+            if raw_element_parser is _MISSING:
+                raise CompilationError(f"Array parser {label!r} requires element_parser.")
+            if input_format is ComplexInputFormat.DELIMITED:
+                if data_type.element_type.is_complex:
+                    raise CompilationError(
+                        f"Delimited array parser {label!r} requires a scalar element type."
+                    )
+                delimiter = payload.get("delimiter")
+                if not isinstance(delimiter, str) or not delimiter:
+                    raise CompilationError(
+                        f"delimiter for array parser {label!r} must be a non-empty string."
+                    )
+                defaults["delimiter"] = delimiter
+            elif "delimiter" in payload:
+                raise CompilationError(
+                    f"delimiter for array parser {label!r} requires input_format: delimited."
+                )
+            element_options = self._compile_parser(
+                raw_element_parser,
+                globals_config,
+                data_type.element_type,
+                f"{label}[]",
+                allow_audit=False,
+                child_error_owned_by_parent=True,
+            )
+            distinct = self._bool(payload, "distinct", DEFAULT_ARRAY_DISTINCT)
+            if distinct and not data_type.element_type.supports_equality:
+                raise CompilationError(
+                    f"Array parser {label!r} cannot use distinct with non-comparable element "
+                    f"type {data_type.element_type.canonical!r}."
+                )
+            defaults.update(
+                element_parser=NestedValueParser(
+                    expected_data_type=data_type.element_type.canonical,
+                    data_type=data_type.element_type,
+                    parser=element_options,
+                ),
+                on_element_error=self._child_error_mode(payload, "on_element_error"),
+                drop_null_elements=self._bool(
+                    payload,
+                    "drop_null_elements",
+                    DEFAULT_DROP_NULL_ELEMENTS,
+                ),
+                distinct=distinct,
+            )
+            return defaults
+
+        if parser_type is ParserType.STRUCT:
+            raw_fields = payload.get("fields")
+            if not isinstance(raw_fields, list) or not raw_fields:
+                raise CompilationError(f"Struct parser {label!r} requires a non-empty fields list.")
+            expected_fields = {field.name: field.data_type for field in data_type.fields}
+            compiled_by_name: dict[str, StructFieldParser] = {}
+            source_names: list[str] = []
+            for index, raw_field in enumerate(raw_fields, start=1):
+                field_payload = self._ensure_mapping(
+                    raw_field,
+                    f"field {index} for struct parser {label!r}",
+                )
+                self._reject_keys(
+                    field_payload,
+                    {"source_field_name", "silver_field_name", "parser"},
+                    f"Field {index} for struct parser {label!r}",
+                )
+                source_name = self._required_string(field_payload, "source_field_name")
+                silver_name = self._required_string(field_payload, "silver_field_name")
+                if silver_name not in expected_fields:
+                    raise CompilationError(
+                        f"Struct parser {label!r} configures unknown silver field "
+                        f"{silver_name!r}; expected {sorted(expected_fields)}."
+                    )
+                if silver_name in compiled_by_name:
+                    raise CompilationError(
+                        f"Struct parser {label!r} has duplicate silver field {silver_name!r}."
+                    )
+                field_type = expected_fields[silver_name]
+                field_options = self._compile_parser(
+                    field_payload.get("parser", _MISSING),
+                    globals_config,
+                    field_type,
+                    f"{label}.{silver_name}",
+                    allow_audit=False,
+                )
+                compiled_by_name[silver_name] = StructFieldParser(
+                    source_field_name=source_name,
+                    silver_field_name=silver_name,
+                    expected_data_type=field_type.canonical,
+                    data_type=field_type,
+                    parser=field_options,
+                )
+                source_names.append(source_name)
+            missing_fields = sorted(set(expected_fields) - set(compiled_by_name))
+            if missing_fields:
+                raise CompilationError(
+                    f"Struct parser {label!r} is missing field configs for {missing_fields}."
+                )
+            duplicate_sources = sorted(
+                {name for name in source_names if source_names.count(name) > 1}
+            )
+            if duplicate_sources:
+                raise CompilationError(
+                    f"Struct parser {label!r} has duplicate source fields {duplicate_sources}."
+                )
+            defaults["field_parsers"] = tuple(
+                compiled_by_name[field.name] for field in data_type.fields
+            )
+            return defaults
+
+        assert parser_type is ParserType.MAP
+        assert data_type.key_type is not None and data_type.value_type is not None
+        if data_type.key_type.parser_type is not ParserType.STRING:
+            raise CompilationError(
+                f"JSON map parser {label!r} requires map<string,...>; found "
+                f"{data_type.key_type.canonical} keys."
+            )
+        raw_value_parser = payload.get("value_parser", _MISSING)
+        if raw_value_parser is _MISSING:
+            raise CompilationError(f"Map parser {label!r} requires value_parser.")
+        value_options = self._compile_parser(
+            raw_value_parser,
+            globals_config,
+            data_type.value_type,
+            f"{label}{{value}}",
+            allow_audit=False,
+            child_error_owned_by_parent=True,
+        )
+        defaults.update(
+            value_parser=NestedValueParser(
+                expected_data_type=data_type.value_type.canonical,
+                data_type=data_type.value_type,
+                parser=value_options,
+            ),
+            on_value_error=self._child_error_mode(payload, "on_value_error"),
+            drop_null_values=self._bool(
+                payload,
+                "drop_null_values",
+                DEFAULT_DROP_NULL_VALUES,
+            ),
+        )
+        return defaults
+
+    def _child_error_mode(
+        self,
+        payload: Mapping[str, Any],
+        key: str,
+    ) -> ChildErrorMode:
+        raw_value = payload.get(key, DEFAULT_CHILD_ERROR_MODE.value)
+        if key in payload and raw_value is None:
+            raw_value = ChildErrorMode.NULL.value
+        return self._enum_value(ChildErrorMode, raw_value, key)
 
     def _compile_boolean_values(
         self,
@@ -546,24 +907,8 @@ class YamlParserConfigCompiler:
             )
 
     def _normalize_data_type(self, value: str) -> tuple[str, ParserType]:
-        normalized = _TYPE_ALIASES.get(value.strip().lower(), value.strip().lower())
-        decimal_match = _DECIMAL_PATTERN.fullmatch(normalized)
-        if decimal_match:
-            precision = int(decimal_match.group(1))
-            scale = int(decimal_match.group(2))
-            if not 1 <= precision <= 38:
-                raise CompilationError("Decimal precision must be between 1 and 38.")
-            if not 0 <= scale <= precision:
-                raise CompilationError("Decimal scale must be between 0 and its precision.")
-            return f"decimal({precision},{scale})", ParserType.DECIMAL
-        try:
-            parser_type = ParserType(normalized)
-        except ValueError as exc:
-            valid = ", ".join(member.value for member in ParserType)
-            raise CompilationError(
-                f"Unsupported expected_data_type {value!r}. Valid types: {valid}, decimal(p,s)."
-            ) from exc
-        return parser_type.value, parser_type
+        data_type = parse_spark_data_type(value)
+        return data_type.canonical, data_type.parser_type
 
     def _parser_type(self, value: str) -> ParserType:
         normalized = _TYPE_ALIASES.get(value.strip().lower(), value.strip().lower())
@@ -576,41 +921,90 @@ class YamlParserConfigCompiler:
     def _typed_default(
         self,
         value: Any,
-        parser_type: ParserType,
-        data_type: str,
+        data_type: SparkDataType,
         label: str,
     ) -> Any:
         if value is None:
             raise CompilationError(f"{label} must be non-null.")
+        parser_type = data_type.parser_type
         if parser_type is ParserType.STRING:
             if not isinstance(value, str):
                 raise CompilationError(f"{label} for string must be a string.")
             return value
-        if parser_type in {ParserType.INTEGER, ParserType.LONG}:
+        if parser_type in {
+            ParserType.BYTE,
+            ParserType.SHORT,
+            ParserType.INTEGER,
+            ParserType.LONG,
+        }:
             return self._integer_default(value, parser_type, label)
-        if parser_type is ParserType.DOUBLE:
+        if parser_type in {ParserType.FLOAT, ParserType.DOUBLE}:
             return self._double_default(value, label)
         if parser_type is ParserType.DECIMAL:
-            return self._decimal_default(value, data_type, label)
+            return self._decimal_default(value, data_type.canonical, label)
         if parser_type is ParserType.BOOLEAN:
             if not isinstance(value, bool):
                 raise CompilationError(f"{label} for boolean must be true or false.")
             return value
         if parser_type is ParserType.DATE:
             return self._date_default(value, label)
-        if parser_type is ParserType.TIMESTAMP:
+        if parser_type in {ParserType.TIMESTAMP, ParserType.TIMESTAMP_NTZ}:
             return self._timestamp_default(value, label)
+        if parser_type is ParserType.BINARY:
+            if not isinstance(value, str):
+                raise CompilationError(f"{label} for binary must be an encoded string.")
+            return value
+        if parser_type is ParserType.ARRAY:
+            if not isinstance(value, list):
+                raise CompilationError(f"{label} for array must be a YAML list.")
+            assert data_type.element_type is not None
+            return [
+                None if item is None else self._typed_default(item, data_type.element_type, label)
+                for item in value
+            ]
+        if parser_type is ParserType.STRUCT:
+            mapping = self._ensure_mapping(value, f"{label} for struct")
+            expected = {field.name: field.data_type for field in data_type.fields}
+            unknown = sorted(set(mapping) - set(expected))
+            missing = sorted(set(expected) - set(mapping))
+            if unknown or missing:
+                raise CompilationError(
+                    f"{label} for struct has missing fields {missing} and unknown fields {unknown}."
+                )
+            return {
+                name: (
+                    None
+                    if mapping[name] is None
+                    else self._typed_default(mapping[name], field_type, f"{label}.{name}")
+                )
+                for name, field_type in expected.items()
+            }
+        if parser_type is ParserType.MAP:
+            mapping = self._ensure_mapping(value, f"{label} for map")
+            assert data_type.key_type is not None and data_type.value_type is not None
+            if data_type.key_type.parser_type is not ParserType.STRING:
+                raise CompilationError(f"{label} supports only string-keyed map defaults.")
+            return {
+                key: (
+                    None
+                    if item is None
+                    else self._typed_default(item, data_type.value_type, f"{label}[{key!r}]")
+                )
+                for key, item in mapping.items()
+            }
         raise CompilationError(f"Unsupported parser type for {label}: {parser_type.value}.")
 
     @staticmethod
     def _integer_default(value: Any, parser_type: ParserType, label: str) -> int:
         if isinstance(value, bool) or not isinstance(value, int):
             raise CompilationError(f"{label} for {parser_type.value} must be an integer.")
-        minimum, maximum = (
-            (_INTEGER_MIN, _INTEGER_MAX)
-            if parser_type is ParserType.INTEGER
-            else (_LONG_MIN, _LONG_MAX)
-        )
+        ranges = {
+            ParserType.BYTE: (_BYTE_MIN, _BYTE_MAX),
+            ParserType.SHORT: (_SHORT_MIN, _SHORT_MAX),
+            ParserType.INTEGER: (_INTEGER_MIN, _INTEGER_MAX),
+            ParserType.LONG: (_LONG_MIN, _LONG_MAX),
+        }
+        minimum, maximum = ranges[parser_type]
         if not minimum <= value <= maximum:
             raise CompilationError(f"{label} does not fit {parser_type.value}.")
         return value

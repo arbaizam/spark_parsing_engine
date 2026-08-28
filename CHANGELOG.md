@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.0
+
+- Add recursive first-class `array`, `struct`, and string-keyed `map` parsers.
+- Support JSON complex values plus literal-delimited scalar arrays without Python UDFs.
+- Add `fail`, `null`, and `drop` child-error policies with nested audit paths.
+- Add byte/tinyint, short/smallint, float/real, binary, and timestamp-without-timezone parsers.
+- Parse and canonicalize nested Spark DDL types without requiring a running Spark session.
+- Support recursive formatting, typed defaults, source-to-silver struct field renaming, array
+  deduplication/null removal, and map null-value removal.
+- Render complex audit values as canonical JSON and binary audit values as base64.
+- Expand Markdown UAT output with resolved globals, recursive schema trees, compatibility
+  metadata, and a copy-ready canonical YAML appendix.
+
+Existing 0.3 scalar configurations and their canonical hashes remain compatible. The nested audit
+struct adds `nested_error_paths`, so consumers that declare that schema manually must update it.
+
 ## 0.3.1
 
 - Preserve nulls through `address_us_v1`, including missing-source and non-null-default paths.

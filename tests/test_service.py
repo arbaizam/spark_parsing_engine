@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from spark_parser import SparkParserService, parser
+from spark_parser import ParserType, SparkParserService, parser
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -30,19 +30,14 @@ def test_parser_metadata_is_discoverable_and_detached() -> None:
         if argument["name"] == "boolean_case_sensitive"
     )
     assert boolean_global["default"] is False
-    assert set(parser.describe()) == {
-        "string",
-        "integer",
-        "long",
-        "decimal",
-        "double",
-        "boolean",
-        "date",
-        "timestamp",
-    }
+    assert set(parser.describe()) == {member.value for member in ParserType}
+    assert parser.array.describe()["parser_type"] == "array"
+    assert parser.struct.describe()["parser_type"] == "struct"
+    assert parser.map.describe()["parser_type"] == "map"
+    assert parser.normalize_data_type("ARRAY < INT >") == "array<integer>"
 
 
-def test_uat_report_contains_validation_resolved_options_and_markdown() -> None:
+def test_uat_report_contains_validation_resolved_options_and_markdown(tmp_path: Path) -> None:
     service = SparkParserService()
     report = service.review_yaml(ROOT / "test_config.yaml")
 
@@ -53,12 +48,23 @@ def test_uat_report_contains_validation_resolved_options_and_markdown() -> None:
     assert report.column_reviews[0]["resolved_parser_options"]["collapse_whitespace"] is True
     assert report.column_reviews[0]["resolved_parser_options"]["default_on_error"] is None
     assert report.validation_checks[-1]["status"] == "N/A"
-    assert "No Boolean mappings" in report.validation_checks[-1]["detail"]
+    assert "No Boolean parser nodes" in report.validation_checks[-1]["detail"]
     assert report.resolved_config is not None
     markdown = report.to_markdown()
     assert "Validation status:** PASS" in markdown
     assert "## Resolved parser options" in markdown
+    assert "## Resolved globals" in markdown
+    assert "## Resolved schema and parser tree" in markdown
+    assert "## Canonical resolved configuration" in markdown
     assert "ColumnName1" in markdown
+    recompiled = service.compile_mapping(report.resolved_config)
+    assert service.content_hash(recompiled) == report.summary["content_hash"]
+    markdown_path = report.write_markdown(tmp_path / "review.md")
+    json_path = report.write_json(tmp_path / "review.json")
+    assert markdown_path.read_text(encoding="utf-8").startswith("# Spark Parser")
+    assert '"report_type": "spark_parser_uat_config_review"' in json_path.read_text(
+        encoding="utf-8"
+    )
     assert report.to_mapping()["report_type"] == "spark_parser_uat_config_review"
 
 
@@ -90,4 +96,4 @@ columns:
     )
     boolean_check = boolean_report.validation_checks[-1]
     assert boolean_check["status"] == "PASS"
-    assert "1 Boolean mapping" in boolean_check["detail"]
+    assert "1 Boolean parser node" in boolean_check["detail"]

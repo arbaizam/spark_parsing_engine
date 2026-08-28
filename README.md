@@ -8,11 +8,14 @@ The package provides:
 
 - strict YAML compilation with resolved, code-owned defaults;
 - source-to-silver column mapping and exact Spark datatype validation;
-- string, integer, long, decimal, double, Boolean, date, and timestamp parsers;
+- complete practical scalar parsing: string, byte, short, integer, long, float, decimal,
+  double, binary, Boolean, date, timestamp, and timestamp-without-timezone;
+- recursive first-class `array`, `struct`, and string-keyed `map` parsers, including nested
+  combinations such as `array<struct<...>>`;
 - native address, county, and ZIP normalization profiles;
 - optional row-level audit structs aligned to rules-engine-style output;
 - a discoverable service API (`parser.string.describe()`); and
-- structured JSON or Markdown UAT configuration reports.
+- structured JSON reports and standalone human-readable Markdown configuration documents.
 
 ## Quick start
 
@@ -56,6 +59,17 @@ columns:
       zero_is_valid: false
       on_parse_error: null
       audit: true
+
+  - source_column_name: borrower_names_json
+    silver_column_name: BorrowerNames
+    expected_data_type: array<string>
+    parser:
+      type: array
+      element_parser:
+        type: string
+        format: pascal
+      on_element_error: null
+      audit: true
 ```
 
 ```python
@@ -91,15 +105,17 @@ The service is the recommended entry point for common package operations.
 | `parser.canonical_json(config)` | Return deterministic canonical JSON. |
 | `parser.content_hash(config)` | Return the SHA-256 identity of the resolved configuration. |
 | `parser.defaults()` | Return a detached mapping of all code-owned defaults. |
+| `parser.normalize_data_type(value)` | Validate supported scalar/complex Spark DDL and return its canonical representation without starting Spark. |
 | `parser.describe()` | Return metadata for every parser type. |
 | `parser.describe("date")` | Return metadata for one parser by name. |
 | `parser.string.describe()` | Return the string parser's arguments, defaults, behavior, and gotchas. The same accessor exists for every parser type. |
 | `parser.config.describe()` | Return top-level, global, and column metadata definitions. |
 | `parser.review_yaml(source)` | Validate YAML and return a `UatReviewReport` instead of raising for authoring errors. |
 
-Parser metadata accessors are `string`, `integer`, `long`, `decimal`, `double`, `boolean`,
-`date`, and `timestamp`. Descriptions are machine-readable dictionaries so notebooks,
-catalogs, and authoring UIs can render the same defaults used by the compiler.
+Parser metadata accessors are `string`, `byte`, `short`, `integer`, `long`, `float`, `decimal`,
+`double`, `binary`, `boolean`, `date`, `timestamp`, `timestamp_ntz`, `array`, `struct`, and `map`.
+Descriptions are machine-readable dictionaries so notebooks, catalogs, and authoring UIs can
+render the same defaults used by the compiler.
 
 ```python
 string_help = parser.string.describe()
@@ -118,10 +134,13 @@ config_help = parser.config.describe()
 - an evidence-based summary of the compiler validations the config passed, with `N/A` for
   checks that do not apply;
 - source-to-silver mappings and exact expected datatypes;
+- a recursive resolved schema/parser tree for every configured column;
+- a dedicated table of resolved global settings;
 - every fully resolved parser option, including inherited globals and defaults;
 - effective error, nullability, formatting, and audit behavior;
 - parser-specific key behaviors and gotchas; and
-- review warnings such as missing ownership metadata or no audited columns.
+- review warnings such as missing ownership metadata or no audited columns; and
+- a copy-ready canonical YAML appendix containing inherited values and effective defaults.
 
 It does not inspect a DataFrame, so input-schema warnings such as a missing source column are
 reported later by `parse_dataframe()`.
@@ -133,15 +152,18 @@ if not report.is_valid:
     raise ValueError(report.errors)
 
 display(report.to_markdown())
+report.write_markdown("customer_parser_uat.md")
+report.write_json("customer_parser_uat.json")
 report_json = report.to_json()
 report_payload = report.to_mapping()
 ```
 
 `UatReviewReport` properties are `is_valid`, `source`, `errors`, `warnings`, `summary`,
 `validation_checks`, `column_reviews`, and `resolved_config`. `to_mapping()` returns a detached
-JSON-compatible structure; `to_json(indent=2)` and `to_markdown()` provide storage and human
-review formats. An invalid report contains its compiler errors and renders a `FAIL` status
-without raising the compilation exception.
+JSON-compatible structure; `to_json(indent=2)` and `to_markdown()` render storage and human review
+formats. `write_json(path)` and `write_markdown(path)` save UTF-8 artifacts and return their target
+`Path` objects. An invalid report contains its compiler errors and renders a `FAIL`
+status without raising the compilation exception.
 
 ## Configuration metadata
 
@@ -188,12 +210,15 @@ tokens, and strict compilation rejects them.
 | --- | ---: | --- | --- |
 | `source_column_name` | Yes | — | Exact top-level bronze name. It may be reused by multiple mappings. A missing source warns rather than failing. |
 | `silver_column_name` | Yes | — | Non-empty, unique name emitted by `parsed_df`. Duplicate silver names fail compilation. |
-| `expected_data_type` | Yes | — | Exact target Spark type: `string`, `integer`, `long`, `decimal(p,s)`, `double`, `boolean`, `date`, or `timestamp`. Aliases `int` and `bigint` compile to `integer` and `long`. |
-| `parser` | Yes | — | Matching scalar parser name or a mapping containing `type` and options. |
+| `expected_data_type` | Yes | — | Exact target Spark DDL type. Scalars and recursively nested `array<T>`, `struct<field:T,...>`, and `map<string,T>` are supported. |
+| `parser` | Yes | — | Matching scalar or complex parser name, or a mapping containing `type` and options. |
 
 `expected_data_type` is intentionally separate from `parser.type`: the parser selects the
 conversion implementation, while the expected type fixes the silver schema—including integer
-width and decimal precision/scale. The compiler requires them to agree.
+width, decimal precision/scale, and the complete nested schema. The compiler recursively requires
+the parser tree to agree with it. Scalar aliases are `tinyint` → `byte`, `smallint` → `short`,
+`int` → `integer`, `bigint` → `long`, `real` → `float`, `bool` → `boolean`, and
+`timestamp_ltz` → `timestamp`.
 
 Scalar form such as `parser: date` applies every safe default. Mapping form is required when
 setting any option:
@@ -234,6 +259,14 @@ These options apply to every parser type.
 
 Compilation rejects misplaced parser-specific arguments, invalid option types, unknown keys,
 incompatible typed defaults, empty required lists, and contradictory conditional arguments.
+
+For complex JSON containers, outer `trim_whitespace`, empty/null-marker handling, nullability,
+defaults, and `on_parse_error` apply to the complete bronze string. `collapse_whitespace` is not
+applied inside raw JSON because doing so could change quoted JSON string values. Each configured
+leaf parser performs its own normal whitespace normalization after JSON decoding. Nested parsers
+cannot enable separate audit entries; their effective options and error paths are consolidated
+under the audited top-level column. A JSON literal `null` is treated as a successful typed null
+and records `json_null_to_null` when audited.
 
 ## Parser-specific reference
 
@@ -296,10 +329,11 @@ ZIP values remain strings so leading zeroes are preserved.
 Audited padding records `zip_padded`; inserting or changing ZIP+4 formatting records
 `zip_plus4_formatted`.
 
-### Integer and long
+### Byte, short, integer, and long
 
-`integer` targets a signed 32-bit Spark integer. `long` targets a signed 64-bit Spark long.
-Their aliases are `int` and `bigint`. Overflow and non-integral input are parse errors.
+`byte`, `short`, `integer`, and `long` target signed 8-bit, 16-bit, 32-bit, and 64-bit Spark
+integers. Their aliases are `tinyint`, `smallint`, `int`, and `bigint`. Overflow and non-integral
+input are parse errors.
 
 Both add `zero_is_valid` (default `true`). When false, a successfully parsed zero becomes null
 before final null handling. If the column is non-nullable, `default_on_null` is then assigned.
@@ -315,10 +349,18 @@ recommended over double for currency and other exact base-10 values. It supports
 scale to the configured scale (for example, `1.239` parsed as `decimal(18,2)` becomes `1.24`);
 typed defaults with excess scale remain compile-time errors.
 
-### Double
+### Float and double
 
-Double accepts finite numeric typed defaults and uses Spark's double conversion. It supports
-`zero_is_valid`. Use decimal when exact base-10 representation matters.
+Float and double accept only finite numeric typed defaults and use Spark's single- and
+double-precision representations. Both support `zero_is_valid`. Use decimal when exact base-10
+representation matters.
+
+### Binary
+
+Binary adds `encoding`, with `base64` as the safety default. `hex` and `utf8` are also supported.
+Invalid base64 or hexadecimal input follows `on_parse_error`; UTF-8 accepts every normalized
+string. The typed silver value is Spark `binary`, while audit `parsed_value` is always canonical
+base64 so audit storage remains printable and encoding-independent.
 
 ### Boolean
 
@@ -348,17 +390,154 @@ columns:
       boolean_values_mode: extend
 ```
 
-### Date and timestamp
+### Date, timestamp, and timestamp_ntz
 
 | Parser | Argument | Default | Behavior |
 | --- | --- | --- | --- |
 | `date` | `formats` | `[yyyy-MM-dd]` | Non-empty ordered Spark datetime patterns; first successful parse wins, then casts to date. |
 | `timestamp` | `formats` | `[yyyy-MM-dd HH:mm:ss]` | Non-empty ordered Spark datetime patterns; first successful parse wins. |
+| `timestamp_ntz` | `formats` | `[yyyy-MM-dd HH:mm:ss]` | First successful parse wins without applying a session timezone. |
 
 Formats cascade in declared order. Automatic inference is not performed because ambiguous forms
 such as `MM/dd/yyyy` and `dd/MM/yyyy` can both parse valid but different dates. Patterns are Spark
-datetime patterns, not Python `strptime` patterns. Timestamp interpretation follows the active
-Spark SQL session timezone.
+datetime patterns, not Python `strptime` patterns. `timestamp` represents an absolute instant and
+its interpretation follows the active Spark SQL session timezone. `timestamp_ntz` represents a
+local wall-clock value and performs no timezone conversion.
+
+### Array
+
+Array is a recursive first-class parser. The element datatype comes from `array<T>` and must match
+`element_parser`.
+
+| Argument | Required | Default | Behavior |
+| --- | ---: | --- | --- |
+| `input_format` | No | `json` | `json` for any recursive element type, or `delimited` for scalar elements. |
+| `delimiter` | Conditional | — | Required for `delimited`; treated literally rather than as a regular expression. |
+| `element_parser` | Yes | — | Recursive parser matching `T`. Element-level `audit` and `on_parse_error` are owned by the array and therefore rejected here. |
+| `on_element_error` | No | `fail` | `fail` raises lazily, `null` sends a typed null through the element parser's final-null handling, and `drop` removes the bad element. |
+| `drop_null_elements` | No | `false` | Remove both source nulls and values resolved to null. |
+| `distinct` | No | `false` | Remove duplicate parsed elements, preserving first occurrence order; rejected when the element tree contains a non-comparable map. |
+
+```yaml
+- source_column_name: borrower_scores
+  silver_column_name: BorrowerScores
+  expected_data_type: array<decimal(8,2)>
+  parser:
+    type: array
+    input_format: json
+    element_parser:
+      type: decimal
+      zero_is_valid: false
+    on_element_error: null
+    drop_null_elements: false
+    distinct: false
+    audit: true
+```
+
+Delimited input does not guess CSV quoting or escaping. For CSV-like inputs, ingest with Spark's
+CSV reader or normalize to a JSON array first. JSON arrays preserve their order. Error paths use
+zero-based indexes, for example `$[2]` or `$[1].birth_date`.
+
+### Struct
+
+Struct parses a JSON object into a complete, explicitly configured silver schema. The field names
+and datatypes in `expected_data_type` are the authoritative output schema. `fields` must configure
+every silver field exactly once.
+
+| Field argument | Required | Behavior |
+| --- | ---: | --- |
+| `source_field_name` | Yes | Exact JSON field name. |
+| `silver_field_name` | Yes | Must match one field in the parent `struct<...>` datatype. |
+| `parser` | Yes | Recursive parser inferred against that silver field's datatype. |
+
+```yaml
+- source_column_name: property_json
+  silver_column_name: Property
+  expected_data_type: struct<street:string,zip:string,scores:array<integer>>
+  parser:
+    type: struct
+    input_format: json
+    fields:
+      - source_field_name: address
+        silver_field_name: street
+        parser:
+          type: string
+          format: address_us_v1
+      - source_field_name: postal_code
+        silver_field_name: zip
+        parser:
+          type: string
+          format: zip
+          on_parse_error: null
+      - source_field_name: raw_scores
+        silver_field_name: scores
+        parser:
+          type: array
+          element_parser: integer
+          on_element_error: drop
+```
+
+Unknown JSON fields are ignored. A configured missing or explicit-null field follows its nested
+parser's `is_nullable`/`default_on_null` behavior. Nested field failures follow that field's
+`on_parse_error` behavior and produce paths such as `$.zip`. A nested value with the wrong
+container shape can become indistinguishable from a JSON null after Spark decoding; this is
+called out by `parser.struct.describe()` and the generated UAT document.
+
+### Map
+
+Map parses a JSON object into `map<string,T>`. JSON map keys are intentionally restricted to
+Spark strings; values may use any recursively supported datatype.
+
+| Argument | Required | Default | Behavior |
+| --- | ---: | --- | --- |
+| `input_format` | No | `json` | JSON object input; no inference. |
+| `value_parser` | Yes | — | Recursive parser matching `T`. Its immediate error outcome is owned by `on_value_error`. |
+| `on_value_error` | No | `fail` | `fail` raises, `null` sends a typed null through the value parser's final-null handling, and `drop` removes the entry. |
+| `drop_null_values` | No | `false` | Remove entries whose source or resolved value is null. |
+
+```yaml
+- source_column_name: balances_json
+  silver_column_name: Balances
+  expected_data_type: map<string,decimal(18,2)>
+  parser:
+    type: map
+    value_parser: decimal
+    on_value_error: drop
+    drop_null_values: false
+    audit: true
+```
+
+Map error paths identify the source key, for example `$['principal']`. Duplicate JSON object keys
+follow Spark's JSON decoder and cannot be distinguished after decoding; canonical bronze JSON
+should therefore contain unique keys.
+
+### Recursive nesting and complex defaults
+
+Complex parsers may nest without a package-defined depth limit: `array<struct<...>>`,
+`map<string,array<decimal(18,2)>>`, and structs containing arrays/maps/structs all use the same
+recursive compiler and runtime. Struct field order follows `expected_data_type`; array order is
+preserved unless elements are dropped or deduplicated.
+
+`default_on_null` and `default_on_error` accept YAML lists for arrays and mappings for structs or
+maps. A struct default must contain exactly its silver fields. Defaults are recursively type- and
+range-checked at compilation and emitted as properly typed native Spark literals.
+
+The supported vocabulary follows Spark's
+[SQL datatype model](https://spark.apache.org/docs/3.5.7/sql-ref-datatypes.html). Complex decoding
+uses native [`from_json`](https://spark.apache.org/docs/3.5.7/api/python/reference/pyspark.sql/api/pyspark.sql.functions.from_json.html)
+and higher-order Spark expressions; it never crosses into a Python or pandas UDF.
+
+JSON decoding uses explicit safety settings consistently across Spark 3.5+: comments,
+single-quoted strings, unquoted field names, and numeric literals with leading zeroes are rejected.
+Leading-zero bronze values remain supported when represented as JSON strings (for example,
+`"001"` inside an integer array parses to `1`). A malformed top-level container follows
+`on_parse_error`; malformed nested containers follow their field/element/value policy.
+
+Spark `variant` is intentionally excluded because this package supports Spark 3.5 and Variant is
+a Spark 4.x feature. Interval types remain out of scope until a concrete bronze encoding contract
+is defined. Spark `char`/`varchar` are table-schema types rather than general DataFrame expression
+types. UUIDs, enums, email addresses, and other domain concepts remain strings here and belong in
+the downstream rules engine for validation.
 
 ## Parsing order and error modes
 
@@ -379,6 +558,11 @@ Every column follows this order:
 - `null` returns a typed null; or
 - `default` assigns the required `default_on_error`.
 
+For a complex column, those modes govern malformed top-level JSON. Struct fields recursively use
+their own `on_parse_error`. Arrays use `on_element_error`, and maps use `on_value_error`, each with
+`fail`, `null`, or `drop`. Handled child errors are retained in the top-level audit's
+`nested_error_paths` even when the invalid element or entry is dropped.
+
 There is no `ignore` mode because an invalid bronze string cannot be retained in a typed silver
 column. Quarantine routing is not included yet; it needs an explicit `quarantine_df` contract
 rather than overloading null/error handling.
@@ -390,7 +574,9 @@ Strict compilation validates, without starting Spark:
 - YAML syntax and duplicate/unsupported keys;
 - required IDs, version, columns, and parser types;
 - unique non-empty `silver_column_name` values;
-- supported expected types, decimal precision/scale, and parser/type compatibility;
+- supported recursive Spark DDL types, decimal precision/scale, and parser/type compatibility;
+- complete struct field coverage, unique source/silver nested names, recursive child parsers,
+  string map keys, and complex input-format constraints;
 - option placement and primitive types;
 - conditional `default_on_null`/`default_on_error` rules and typed values;
 - global/column null-marker modes; and
@@ -449,16 +635,18 @@ Each parse-result struct contains:
 | `parser_type` | String | Canonical parser applied. |
 | `expected_data_type` | String | Canonical target Spark datatype. |
 | `original_value` | Nullable string | Unmodified bronze value; null for a missing source. |
-| `parsed_value` | Nullable string | Final typed value rendered as text for uniform audit storage. |
+| `parsed_value` | Nullable string | Final scalar rendered as text; complex values rendered as canonical JSON; binary rendered as canonical base64. |
 | `changed` | Boolean | Whether a material null/default/error/missing-source/ZIP action occurred. |
 | `effective` | Boolean | False for a missing source; true when the configured source was available. |
 | `actions_applied` | Array of strings | Ordered material actions applied to this row and column. |
 | `options` | Map of string to string | Every fully resolved effective option for this parser. |
+| `nested_error_paths` | Array of strings | JSONPath-like locations of handled child failures; empty for none. |
 | `error` | Nullable string | Handled parse or missing-source description; fail mode raises for bad values. |
 
 Possible actions are `source_column_missing`, `empty_string_to_null`, `null_marker_replaced`,
 `parse_error_to_null`, `parse_error_default_applied`, `zero_invalidated`,
-`default_on_null_applied`, `zip_padded`, and `zip_plus4_formatted`.
+`default_on_null_applied`, `json_null_to_null`, `nested_parse_errors_resolved`, `zip_padded`, and
+`zip_plus4_formatted`.
 
 Routine whitespace normalization, normal successful datatype conversion, and routine case/address/
 county formatting are visible through `original_value`, `parsed_value`, and the resolved `options`
@@ -478,6 +666,19 @@ shape also changed, so `content_hash` values from 0.2.x are not comparable with 
 when the logical parsing behavior is equivalent. Fully resolved mappings from
 `ParserConfigSerializer.to_mapping()` are recompilable in 0.3.1. See [CHANGELOG.md](CHANGELOG.md)
 for release details.
+
+### Migrating from 0.3.x to 0.4.x
+
+Existing 0.3 scalar YAML remains valid, and its canonical configuration hash remains stable.
+Version 0.4 adds parser types and one audit field rather than renaming existing configuration
+keys. Two compatibility details matter:
+
+- configurations adopting the new parser types receive their own canonical content hashes; and
+- `spark_parser_parse_results` adds `nested_error_paths`, so consumers that declare its nested
+  schema manually must update that schema.
+
+Use `parser.review_yaml(old_config).to_markdown()` to produce the 0.4 resolved documentation and
+review the new content hash before promotion.
 
 ## Defaults and exhaustive YAML reference
 

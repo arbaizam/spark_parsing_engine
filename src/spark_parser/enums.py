@@ -7,13 +7,21 @@ class ParserType(str, Enum):
     """Supported bronze-string parser implementations."""
 
     STRING = "string"
+    BYTE = "byte"
+    SHORT = "short"
     INTEGER = "integer"
     LONG = "long"
+    FLOAT = "float"
     DECIMAL = "decimal"
     DOUBLE = "double"
+    BINARY = "binary"
     BOOLEAN = "boolean"
     DATE = "date"
     TIMESTAMP = "timestamp"
+    TIMESTAMP_NTZ = "timestamp_ntz"
+    ARRAY = "array"
+    STRUCT = "struct"
+    MAP = "map"
 
 
 class NullMarkersMode(str, Enum):
@@ -49,11 +57,45 @@ class StringFormat(str, Enum):
     ZIP = "zip"
 
 
+class ComplexInputFormat(str, Enum):
+    """Supported bronze encodings for complex values."""
+
+    JSON = "json"
+    DELIMITED = "delimited"
+
+
+class ChildErrorMode(str, Enum):
+    """Resolution for an invalid array element or map value."""
+
+    FAIL = "fail"
+    NULL = "null"
+    DROP = "drop"
+
+
+class BinaryEncoding(str, Enum):
+    """Supported encodings for bronze binary strings."""
+
+    BASE64 = "base64"
+    HEX = "hex"
+    UTF8 = "utf8"
+
+
 NUMERIC_PARSER_TYPES = frozenset(
     {
+        ParserType.BYTE,
+        ParserType.SHORT,
         ParserType.INTEGER,
         ParserType.LONG,
+        ParserType.FLOAT,
         ParserType.DECIMAL,
         ParserType.DOUBLE,
+    }
+)
+
+COMPLEX_PARSER_TYPES = frozenset(
+    {
+        ParserType.ARRAY,
+        ParserType.STRUCT,
+        ParserType.MAP,
     }
 )

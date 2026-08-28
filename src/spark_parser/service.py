@@ -9,12 +9,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from spark_parser.compiler_yaml import YamlParserConfigCompiler
+from spark_parser.data_types import parse_spark_data_type
 from spark_parser.defaults import PARSER_DEFAULTS
 from spark_parser.enums import ParserType
 from spark_parser.exceptions import CompilationError
 from spark_parser.metadata import config_description, parser_description
-from spark_parser.models import ParserConfig
+from spark_parser.models import ColumnParser, ParserConfig, ParserOptions
 from spark_parser.serializer import ParserConfigSerializer
 from spark_parser.version import __version__
 
@@ -27,6 +30,48 @@ def _markdown_text(value: Any) -> str:
     else:
         rendered = str(value)
     return rendered.replace("|", "\\|").replace("\n", " ")
+
+
+def _walk_parser_options(options: ParserOptions):
+    yield options
+    if options.element_parser is not None:
+        yield from _walk_parser_options(options.element_parser.parser)
+    for field in options.field_parsers:
+        yield from _walk_parser_options(field.parser)
+    if options.value_parser is not None:
+        yield from _walk_parser_options(options.value_parser.parser)
+
+
+def _schema_tree(column: ColumnParser) -> str:
+    lines = [
+        f"{column.silver_column_name}: {column.expected_data_type} "
+        f"[{column.parser.parser_type.value}] <- {column.source_column_name}"
+    ]
+
+    def append(options: ParserOptions, prefix: str) -> None:
+        if options.element_parser is not None:
+            element = options.element_parser
+            lines.append(
+                f"{prefix}[]: {element.expected_data_type} "
+                f"[{element.parser.parser_type.value}; on error={options.on_element_error.value}]"
+            )
+            append(element.parser, prefix + "  ")
+        for field in options.field_parsers:
+            lines.append(
+                f"{prefix}.{field.silver_field_name}: {field.expected_data_type} "
+                f"[{field.parser.parser_type.value}] <- {field.source_field_name}"
+            )
+            append(field.parser, prefix + "  ")
+        if options.value_parser is not None:
+            value = options.value_parser
+            lines.append(
+                f"{prefix}{{value}}: {value.expected_data_type} "
+                f"[{value.parser.parser_type.value}; on error={options.on_value_error.value}]"
+            )
+            append(value.parser, prefix + "  ")
+
+    append(column.parser, "  ")
+    return "\n".join(lines)
 
 
 @dataclass(frozen=True)
@@ -63,6 +108,12 @@ class UatReviewReport:
         """Render the report as JSON for storage or downstream review tooling."""
         return json.dumps(self.to_mapping(), indent=indent, ensure_ascii=False, default=str)
 
+    def write_json(self, path: str | Path, *, indent: int = 2) -> Path:
+        """Write the structured report as UTF-8 JSON and return its path."""
+        target = Path(path)
+        target.write_text(self.to_json(indent=indent) + "\n", encoding="utf-8")
+        return target
+
     def to_markdown(self) -> str:
         """Render a human-readable Markdown UAT document."""
         status = "PASS" if self.is_valid else "FAIL"
@@ -96,6 +147,15 @@ class UatReviewReport:
                     for key, value in self.summary.items()
                 ),
                 "",
+                "## Resolved globals",
+                "",
+                "| Setting | Effective value |",
+                "| --- | --- |",
+                *(
+                    f"| {_markdown_text(key)} | {_markdown_text(value)} |"
+                    for key, value in (self.resolved_config or {}).get("globals", {}).items()
+                ),
+                "",
                 "## Validation checks",
                 "",
                 "| Check | Status | Detail |",
@@ -124,6 +184,13 @@ class UatReviewReport:
                     for column in self.column_reviews
                 ),
                 "",
+                "## Resolved schema and parser tree",
+                "",
+                *(
+                    f"### {_markdown_text(column['silver_column_name'])}\n\n"
+                    f"```text\n{column['schema_tree']}\n```\n"
+                    for column in self.column_reviews
+                ),
                 "## Resolved parser options",
                 "",
             ]
@@ -155,7 +222,31 @@ class UatReviewReport:
                         "",
                     ]
                 )
+        resolved_yaml = yaml.safe_dump(
+            self.resolved_config,
+            sort_keys=False,
+            allow_unicode=True,
+            default_flow_style=False,
+        ).rstrip()
+        lines.extend(
+            [
+                "## Canonical resolved configuration",
+                "",
+                "This copy-ready YAML includes inherited values and every effective default.",
+                "",
+                "```yaml",
+                resolved_yaml,
+                "```",
+                "",
+            ]
+        )
         return "\n".join(lines)
+
+    def write_markdown(self, path: str | Path) -> Path:
+        """Write the standalone human-readable review as UTF-8 Markdown."""
+        target = Path(path)
+        target.write_text(self.to_markdown() + "\n", encoding="utf-8")
+        return target
 
 
 class _ParserMetadataAccessor:
@@ -179,13 +270,21 @@ class SparkParserService:
 
     config = _ConfigMetadataAccessor()
     string = _ParserMetadataAccessor(ParserType.STRING)
+    byte = _ParserMetadataAccessor(ParserType.BYTE)
+    short = _ParserMetadataAccessor(ParserType.SHORT)
     integer = _ParserMetadataAccessor(ParserType.INTEGER)
     long = _ParserMetadataAccessor(ParserType.LONG)
+    float = _ParserMetadataAccessor(ParserType.FLOAT)
     decimal = _ParserMetadataAccessor(ParserType.DECIMAL)
     double = _ParserMetadataAccessor(ParserType.DOUBLE)
+    binary = _ParserMetadataAccessor(ParserType.BINARY)
     boolean = _ParserMetadataAccessor(ParserType.BOOLEAN)
     date = _ParserMetadataAccessor(ParserType.DATE)
     timestamp = _ParserMetadataAccessor(ParserType.TIMESTAMP)
+    timestamp_ntz = _ParserMetadataAccessor(ParserType.TIMESTAMP_NTZ)
+    array = _ParserMetadataAccessor(ParserType.ARRAY)
+    struct = _ParserMetadataAccessor(ParserType.STRUCT)
+    map = _ParserMetadataAccessor(ParserType.MAP)
 
     def __init__(self) -> None:
         self._compiler = YamlParserConfigCompiler()
@@ -202,6 +301,11 @@ class SparkParserService:
     def defaults() -> dict[str, Any]:
         """Return a detached view of all compiler defaults."""
         return deepcopy(PARSER_DEFAULTS)
+
+    @staticmethod
+    def normalize_data_type(value: str) -> str:
+        """Validate Spark DDL and return its canonical supported representation."""
+        return parse_spark_data_type(value).canonical
 
     def compile_text(self, text: str) -> ParserConfig:
         """Compile YAML text into an immutable, fully resolved configuration."""
@@ -300,9 +404,9 @@ class SparkParserService:
         resolved_columns = resolved["columns"]
         for column, resolved_column in zip(config.columns, resolved_columns, strict=True):
             description = parser_description(column.parser.parser_type)
-            resolved_column["parser"].setdefault("default_on_null", None)
-            resolved_column["parser"].setdefault("default_on_error", None)
             parser_options = deepcopy(resolved_column["parser"])
+            parser_options.setdefault("default_on_null", None)
+            parser_options.setdefault("default_on_error", None)
             format_or_formats = parser_options.get("format", parser_options.get("formats"))
             column_reviews.append(
                 {
@@ -315,17 +419,21 @@ class SparkParserService:
                     "on_parse_error": column.parser.on_parse_error.value,
                     "audit": column.parser.audit,
                     "resolved_parser_options": parser_options,
+                    "schema_tree": _schema_tree(column),
                     "key_behaviors": description["key_behaviors"],
                     "gotchas": description["gotchas"],
                 }
             )
 
-        boolean_columns = [
-            column for column in config.columns if column.parser.parser_type is ParserType.BOOLEAN
+        all_options = [
+            options for column in config.columns for options in _walk_parser_options(column.parser)
         ]
-        nonnullable_count = sum(not column.parser.is_nullable for column in config.columns)
+        boolean_columns = [
+            options for options in all_options if options.parser_type is ParserType.BOOLEAN
+        ]
+        nonnullable_count = sum(not options.is_nullable for options in all_options)
         error_default_count = sum(
-            column.parser.on_parse_error.value == "default" for column in config.columns
+            options.on_parse_error.value == "default" for options in all_options
         )
         type_pairs = sorted(
             {
@@ -360,8 +468,8 @@ class SparkParserService:
                 "status": "PASS",
                 "detail": (
                     "Resolved every optional value; "
-                    f"{nonnullable_count} non-nullable mapping(s) have typed null defaults and "
-                    f"{error_default_count} mapping(s) use typed parse-error defaults."
+                    f"{nonnullable_count} non-nullable parser node(s) have typed null defaults and "
+                    f"{error_default_count} parser node(s) use typed parse-error defaults."
                 ),
             },
             {
@@ -369,9 +477,9 @@ class SparkParserService:
                 "status": "PASS" if boolean_columns else "N/A",
                 "detail": (
                     f"Validated non-empty, non-overlapping effective token sets for "
-                    f"{len(boolean_columns)} Boolean mapping(s)."
+                    f"{len(boolean_columns)} Boolean parser node(s)."
                     if boolean_columns
-                    else "No Boolean mappings are configured."
+                    else "No Boolean parser nodes are configured."
                 ),
             },
         )
@@ -380,7 +488,9 @@ class SparkParserService:
             "parser_config_name": config.parser_config_name,
             "version": config.version,
             "content_hash": self._serializer.content_hash(config),
+            "minimum_spark_version": "3.5",
             "column_count": len(config.columns),
+            "parser_node_count": len(all_options),
             "audited_column_count": audited_count,
             "repeated_source_columns": repeated_sources,
             "description": config.description,
