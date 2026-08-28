@@ -3,12 +3,15 @@
 ## 0.4.0
 
 - Add `title` string formatting for display text that retains normalized spaces.
-- Add `state_us` string formatting for the 50 US states and Washington, DC.
+- Add `state_us` string formatting for the 50 US states and Washington, DC, including postal codes,
+  punctuation-tolerant names, and an explicit set of conventional abbreviations.
 - Add string-only `preserve` error handling so invalid formatted values can retain their exact raw
   tokens at top level and inside string struct fields, arrays, and map values.
 - Accept US month-first 12-hour timestamp strings such as `09/30/2026 12:00 AM` and
   `09/30/2026 12:00:00 AM` as built-in fallbacks for date, timestamp, and
   timestamp-without-timezone parsing after their ISO formats.
+- Accept local/offset-bearing ISO timestamps and optional microseconds while keeping
+  timestamp-without-timezone input and defaults strictly timezone-free.
 - Make malformed `timestamp_ntz` values honor configured error policies under ANSI mode.
 - Reject incomplete nested numeric tokens and non-finite nested floating-point values.
 - Treat strict-JSON failures and duplicate map keys as container parse errors instead of allowing
@@ -16,7 +19,7 @@
 - Honor `input_format: delimited` for recursively nested arrays.
 - Resolve outer complex-parser `collapse_whitespace` to its effective value of `false` in
   serialization, UAT reports, parser metadata, and row-level audit options.
-- Include `nested_error_paths` in the stable parser audit struct.
+- Include error, final-null default, and invalid-zero path arrays in the stable parser audit struct.
 - Include top-level source and silver column identity in nested fail-mode error messages.
 - Treat only lowercase `null` as the JSON null literal; other spellings follow normal null-marker
   or parse-error behavior.
@@ -40,6 +43,10 @@
 - Replace per-column projection chains with constant-depth, width-scalable Spark stages.
 - Make UAT validation summaries evidence-based and improve compiler/path errors.
 - Add Spark 3.5 and ANSI-mode regression coverage.
+- Add a Java-required CI matrix across the Spark 3.5 floor and a newer Spark line so skipped runtime
+  tests cannot produce a release green.
+- Add a checksum-required Databricks 16.4 LTS UAT that validates wheel identity, typed parsing,
+  audit output, Delta round trips, runtime evidence, and the rules-engine handoff.
 - Add global Boolean vocabularies with column `replace` and `extend` modes.
 - Add `address_us_v1`, `county`, and `zip` string formats.
 - Add the `SparkParserService`, discoverable parser metadata, and UAT reports.

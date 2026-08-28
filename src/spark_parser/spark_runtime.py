@@ -29,6 +29,12 @@ from spark_parser.address_formats import (
 )
 from spark_parser.data_types import SparkDataType
 from spark_parser.dataframe_parsing import DataFrameParsing
+from spark_parser.defaults import (
+    ISO_LOCAL_TIMESTAMP_FORMAT,
+    ISO_OFFSET_TIMESTAMP_FORMAT,
+    US_MONTH_FIRST_12_HOUR_FORMAT,
+    US_MONTH_FIRST_12_HOUR_SECONDS_FORMAT,
+)
 from spark_parser.enums import (
     COMPLEX_PARSER_TYPES,
     NUMERIC_PARSER_TYPES,
@@ -66,6 +72,16 @@ PARSE_RESULT_STRUCT = T.StructType(
         T.StructField("options", T.MapType(T.StringType(), T.StringType(), True), True),
         T.StructField("error", T.StringType(), True),
         T.StructField("nested_error_paths", T.ArrayType(T.StringType(), True), True),
+        T.StructField(
+            "nested_default_on_null_paths",
+            T.ArrayType(T.StringType(), True),
+            True,
+        ),
+        T.StructField(
+            "nested_zero_invalidated_paths",
+            T.ArrayType(T.StringType(), True),
+            True,
+        ),
     ]
 )
 PARSE_RESULT_ARRAY = T.ArrayType(PARSE_RESULT_STRUCT, containsNull=True)
@@ -78,6 +94,31 @@ _EDGE_WHITESPACE_PATTERN = r"^[\s\u00A0]+|[\s\u00A0]+$"
 # Numeric child values are decoded through strict JSON to obtain ANSI-safe casts. This pattern
 # rejects partial tokens and non-JSON spellings before Spark attempts the typed conversion.
 _JSON_NUMBER_PATTERN = r"^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$"
+
+# Spark 3.5's ``try_to_timestamp`` can still raise SparkUpgradeException under the default
+# ``spark.sql.legacy.timeParserPolicy=EXCEPTION`` when the legacy parser accepts a prefix that the
+# corrected parser rejects (for example, trying ``yyyy-MM-dd`` against an ISO timestamp). Full-token
+# shape guards keep known built-in formats away from the wrong formatter. Calendar validity remains
+# Spark's responsibility, while lexical mismatches safely become null and follow parser policy.
+_DATETIME_INPUT_SHAPES = {
+    "yyyy-MM-dd": r"^\d{4}-\d{2}-\d{2}$",
+    ISO_LOCAL_TIMESTAMP_FORMAT: (
+        r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?$"
+    ),
+    ISO_OFFSET_TIMESTAMP_FORMAT: (
+        r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?"
+        r"(?:Z|[+-]\d{2}:\d{2})$"
+    ),
+    "yyyy-MM-dd HH:mm:ss[.SSSSSS]": (
+        r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{1,6})?$"
+    ),
+    US_MONTH_FIRST_12_HOUR_FORMAT: (
+        r"^\d{2}/\d{2}/\d{4} \d{2}:\d{2} [AaPp][Mm]$"
+    ),
+    US_MONTH_FIRST_12_HOUR_SECONDS_FORMAT: (
+        r"^\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2} [AaPp][Mm]$"
+    ),
+}
 
 # ``PERMISSIVE`` gives a null result instead of throwing for malformed containers. The runtime can
 # then apply the user's explicit fail/null/default policy in a consistent way.
@@ -97,6 +138,14 @@ _AUDIT_JSON_OPTIONS = {
     "timestampNTZFormat": "yyyy-MM-dd'T'HH:mm:ss.SSS",
 }
 
+# Spark names these formats differently from the public enum. Keeping the translation in one place
+# prevents ordinary parsing and compiler-validated default literals from drifting apart.
+_BINARY_FORMATS = {
+    BinaryEncoding.BASE64: "base64",
+    BinaryEncoding.HEX: "hex",
+    BinaryEncoding.UTF8: "utf-8",
+}
+
 
 @dataclass(frozen=True)
 class _ColumnRuntimePlan:
@@ -111,6 +160,8 @@ class _ColumnRuntimePlan:
     normalized_name: str
     candidate_name: str
     nested_errors_name: str
+    nested_defaults_name: str
+    nested_zeros_name: str
     post_parse_name: str
     post_zero_name: str
     final_name: str
@@ -118,11 +169,28 @@ class _ColumnRuntimePlan:
 
 @dataclass(frozen=True)
 class _NestedParse:
-    """Value, immediate failure flag, and accumulated JSON paths for a nested parser node."""
+    """Value plus recursively accumulated diagnostics for one nested parser node.
+
+    Error, final-null default, and zero-invalidation paths stay separate because they describe
+    different business events. Keeping them in one immutable carrier ensures every container
+    propagates the same audit signals alongside the value it transforms.
+    """
 
     value: Column
     failed: Column
     error_paths: Column
+    default_on_null_paths: Column
+    zero_invalidated_paths: Column
+
+
+@dataclass(frozen=True)
+class _CandidateParse:
+    """Top-level candidate and the nested diagnostic paths produced while building it."""
+
+    value: Column
+    error_paths: Column
+    default_on_null_paths: Column
+    zero_invalidated_paths: Column
 
 
 @dataclass(frozen=True)
@@ -150,6 +218,10 @@ class SparkDataFrameParser:
     schema, creates collision-resistant internal columns, and exposes the final projections through
     :class:`DataFrameParsing`.
     """
+
+    def __init__(self) -> None:
+        """Create the stateless serializer reused for lineage and audit option rendering."""
+        self._serializer = ParserConfigSerializer()
 
     def parse_dataframe(
         self,
@@ -198,18 +270,20 @@ class SparkDataFrameParser:
                 for plan in plans
             }
         )
-        # Stage 2: build type-specific candidates and nested error paths. A candidate may be null
-        # either because the normalized input was null or because conversion failed; the next stage
-        # distinguishes those cases explicitly.
+        # Stage 2: build type-specific candidates and nested audit paths. A candidate may be null
+        # either because normalized input was null or because conversion failed; the next stage
+        # distinguishes those cases. Default/zero paths travel separately so handled nested changes
+        # remain visible even when no parse error occurred.
         candidate_columns: dict[str, Column] = {}
         for plan in plans:
-            candidate, nested_errors = self._parse_candidate(
+            candidate = self._parse_candidate(
                 _column(plan.normalized_name),
-                plan.normalized_name,
                 plan.config,
             )
-            candidate_columns[plan.candidate_name] = candidate
-            candidate_columns[plan.nested_errors_name] = nested_errors
+            candidate_columns[plan.candidate_name] = candidate.value
+            candidate_columns[plan.nested_errors_name] = candidate.error_paths
+            candidate_columns[plan.nested_defaults_name] = candidate.default_on_null_paths
+            candidate_columns[plan.nested_zeros_name] = candidate.zero_invalidated_paths
         working = working.withColumns(candidate_columns)
         # Stage 3: apply the configured fail/null/default/string-preserve behavior only to non-null
         # input that failed conversion.
@@ -241,14 +315,13 @@ class SparkDataFrameParser:
         parse_results = (F.array(*audit_structs) if audit_structs else F.array()).cast(
             PARSE_RESULT_ARRAY
         )
-        serializer = ParserConfigSerializer()
         working = working.withColumns(
             {
                 parse_results_name: parse_results,
                 config_name: F.struct(
                     F.lit(config.parser_config_id).alias("id"),
                     F.lit(config.version).alias("version"),
-                    F.lit(serializer.content_hash(config)).alias("content_hash"),
+                    F.lit(self._serializer.content_hash(config)).alias("content_hash"),
                 ),
                 engine_version_name: F.lit(__version__),
             }
@@ -321,6 +394,11 @@ class SparkDataFrameParser:
         if key_columns is None:
             # All bronze columns provide a usable default identity for exploratory work. Production
             # callers should normally pass stable business/load keys explicitly.
+            if duplicates:
+                raise SchemaValidationError(
+                    "Input contains duplicate column names, so the default all-column row key is "
+                    f"ambiguous: {duplicates}. Pass explicit, uniquely named key_columns."
+                )
             normalized_keys = tuple(df.columns)
         else:
             if isinstance(key_columns, (str, bytes)):
@@ -366,6 +444,8 @@ class SparkDataFrameParser:
             normalized_name=f"__spark_parser_normalized_{token}",
             candidate_name=f"__spark_parser_candidate_{token}",
             nested_errors_name=f"__spark_parser_nested_errors_{token}",
+            nested_defaults_name=f"__spark_parser_nested_defaults_{token}",
+            nested_zeros_name=f"__spark_parser_nested_zeros_{token}",
             post_parse_name=f"__spark_parser_post_parse_{token}",
             post_zero_name=f"__spark_parser_post_zero_{token}",
             final_name=f"__spark_parser_final_{token}",
@@ -391,9 +471,11 @@ class SparkDataFrameParser:
         empty-to-null and null-marker matches. Keeping the flags separate lets audit construction
         explain exactly why the final value changed.
         """
+        # The compiler resolves outer complex parsers to collapse_whitespace=false. Trust that
+        # invariant here so the rule has one executable source of truth.
         whitespace_normalized = (
             F.regexp_replace(source, _WHITESPACE_PATTERN, " ")
-            if options.collapse_whitespace and options.parser_type not in COMPLEX_PARSER_TYPES
+            if options.collapse_whitespace
             else source
         )
         if options.trim_whitespace:
@@ -479,7 +561,7 @@ class SparkDataFrameParser:
         if not options.is_nullable:
             return F.when(
                 self._default_on_null_applied(plan),
-                self._typed_literal(
+                self._typed_value_literal(
                     options.default_on_null,
                     plan.config.data_type,
                     options,
@@ -516,15 +598,16 @@ class SparkDataFrameParser:
             normalized=_column(plan.normalized_name),
             candidate=_column(plan.candidate_name),
             nested_error_paths=_column(plan.nested_errors_name),
+            nested_default_on_null_paths=_column(plan.nested_defaults_name),
+            nested_zero_invalidated_paths=_column(plan.nested_zeros_name),
         )
 
     def _parse_candidate(
         self,
         normalized: Column,
-        normalized_name: str,
         column_config: ColumnParser,
-    ) -> tuple[Column, Column]:
-        """Build the initial typed candidate and nested-error array for one top-level column."""
+    ) -> _CandidateParse:
+        """Build the initial typed candidate and all nested diagnostic arrays for one column."""
         if column_config.parser.parser_type in COMPLEX_PARSER_TYPES:
             decoded = self._decode_complex(
                 normalized,
@@ -539,34 +622,31 @@ class SparkDataFrameParser:
                 column_config,
             )
             # A malformed outer container is reported at ``$``; recursively handled child failures
-            # already carry more specific paths.
+            # already carry more specific paths. CaseWhen must remain around ``nested.value``:
+            # a descendant map_from_entries can throw DUPLICATED_MAP_KEY and must not be evaluated
+            # after the raw-container validator has already classified the container as invalid.
             container_errors = self._error_paths(decoded.failed, F.lit("$"))
             candidate = F.when(
                 decoded.failed,
                 F.lit(None).cast(column_config.expected_data_type),
             ).otherwise(nested.value)
-            return candidate, F.concat(nested.error_paths, container_errors)
-        if column_config.parser.parser_type in NUMERIC_PARSER_TYPES:
-            # Top-level numerics can use Spark's ANSI-safe try_cast directly. The quoted generated
-            # column name prevents SQL parser ambiguity.
-            candidate = F.expr(
-                "try_cast("
-                f"{_quoted_identifier(normalized_name)} AS {column_config.expected_data_type})"
+            return _CandidateParse(
+                candidate,
+                F.concat(nested.error_paths, container_errors),
+                nested.default_on_null_paths,
+                nested.zero_invalidated_paths,
             )
-            if column_config.parser.parser_type in {ParserType.FLOAT, ParserType.DOUBLE}:
-                # Spark accepts NaN and infinities as floating values, but the parser contract treats
-                # all non-finite values as parse errors for predictable downstream rules.
-                candidate = F.when(
-                    F.isnan(candidate) | (F.abs(candidate) == F.lit(float("inf"))),
-                    F.lit(None).cast(column_config.expected_data_type),
-                ).otherwise(candidate)
-            return candidate, self._empty_error_paths()
-        return (
+        # Top-level and nested leaves deliberately use the same conversion helper. This is a
+        # contract invariant: a token such as ``1d`` must not succeed or fail solely because it is
+        # located at a different nesting depth.
+        return _CandidateParse(
             self._parse_scalar_candidate(
                 normalized,
                 column_config.data_type,
                 column_config.parser,
             ),
+            self._empty_error_paths(),
+            self._empty_error_paths(),
             self._empty_error_paths(),
         )
 
@@ -620,15 +700,13 @@ class SparkDataFrameParser:
                 parsed,
             ).otherwise(F.lit(None).cast(data_type.canonical))
             if parser_type in {ParserType.FLOAT, ParserType.DOUBLE}:
-                return F.when(F.abs(parsed) == F.lit(float("inf")), F.lit(None)).otherwise(parsed)
+                return F.when(
+                    F.isnan(parsed) | (F.abs(parsed) == F.lit(float("inf"))),
+                    F.lit(None).cast(data_type.canonical),
+                ).otherwise(parsed)
             return parsed
         if parser_type is ParserType.BINARY:
-            binary_format = {
-                BinaryEncoding.BASE64: "base64",
-                BinaryEncoding.HEX: "hex",
-                BinaryEncoding.UTF8: "utf-8",
-            }[options.binary_encoding]
-            return F.try_to_binary(normalized, F.lit(binary_format))
+            return F.try_to_binary(normalized, F.lit(_BINARY_FORMATS[options.binary_encoding]))
         if parser_type is ParserType.BOOLEAN:
             # Compiler overlap validation guarantees a token cannot satisfy both branches.
             comparable = normalized if options.boolean_case_sensitive else F.lower(normalized)
@@ -648,24 +726,44 @@ class SparkDataFrameParser:
                 .otherwise(F.lit(None).cast("boolean"))
             )
         if parser_type in {ParserType.DATE, ParserType.TIMESTAMP, ParserType.TIMESTAMP_NTZ}:
-            # Try formats in author-supplied order and select the first successful result. All
-            # functions are tolerant so ANSI mode does not bypass the configured error policy.
+            # Try formats in author-supplied order and select the first successful result. Built-in
+            # formats are shape-guarded so Spark 3.5's EXCEPTION legacy-time-parser policy cannot
+            # turn a harmless format mismatch into a job-level SparkUpgradeException.
             if parser_type is ParserType.TIMESTAMP_NTZ:
                 candidates = [
-                    F.when(
-                        F.try_to_timestamp(normalized, F.lit(datetime_format)).isNotNull(),
-                        F.to_timestamp_ntz(normalized, F.lit(datetime_format)),
-                    ).otherwise(F.lit(None).cast("timestamp_ntz"))
+                    self._timestamp_ntz_candidate(normalized, datetime_format)
                     for datetime_format in options.formats
                 ]
                 return F.coalesce(*candidates)
             candidates = [
-                F.try_to_timestamp(normalized, F.lit(datetime_format))
+                self._timestamp_candidate(normalized, datetime_format)
                 for datetime_format in options.formats
             ]
             parsed = F.coalesce(*candidates)
             return parsed.cast("date") if parser_type is ParserType.DATE else parsed
         raise ValueError(f"Unsupported parser type: {parser_type.value}.")
+
+    @staticmethod
+    def _timestamp_candidate(normalized: Column, datetime_format: str) -> Column:
+        """Parse one timestamp format after any known full-token compatibility guard."""
+        parsed = F.try_to_timestamp(normalized, F.lit(datetime_format))
+        shape = _DATETIME_INPUT_SHAPES.get(datetime_format)
+        if shape is None:
+            # Custom Spark patterns retain native Spark behavior. The compiler cannot safely infer
+            # a complete regex for the entire Spark DateTimeFormatter pattern language.
+            return parsed
+        return F.when(normalized.rlike(shape), parsed).otherwise(F.lit(None).cast("timestamp"))
+
+    @classmethod
+    def _timestamp_ntz_candidate(cls, normalized: Column, datetime_format: str) -> Column:
+        """Parse one local timestamp only after the tolerant timestamp probe succeeds."""
+        probed = cls._timestamp_candidate(normalized, datetime_format)
+        # to_timestamp_ntz is not itself a try-function. CaseWhen short-circuiting keeps it away
+        # from lexically invalid input and invalid calendar values rejected by the probe.
+        return F.when(
+            probed.isNotNull(),
+            F.to_timestamp_ntz(normalized, F.lit(datetime_format)),
+        ).otherwise(F.lit(None).cast("timestamp_ntz"))
 
     def _decode_complex(
         self,
@@ -764,13 +862,23 @@ class SparkDataFrameParser:
                 root_config,
                 child_error_mode,
             )
-            value = self._apply_nested_default(value, nested, path)
+            value, default_applied = self._apply_nested_default(value, nested)
+            # A DROP owner discards a failed child after this function returns. Do not report a
+            # default that was computed only inside that discarded temporary record.
+            default_applied = default_applied & ~(
+                decoded.failed & F.lit(child_error_mode is ChildErrorMode.DROP)
+            )
             # Error paths are diagnostic history, not just unresolved failures. Preserve handled
             # child paths even when the final value becomes a default or the parent later drops it.
             return _NestedParse(
                 value,
                 decoded.failed,
                 F.concat(state.error_paths, self._error_paths(decoded.failed, path)),
+                F.concat(
+                    state.default_on_null_paths,
+                    self._paths_when(default_applied, path),
+                ),
+                state.zero_invalidated_paths,
             )
 
         normalized = self._normalized_value(raw, nested.parser)
@@ -785,15 +893,29 @@ class SparkDataFrameParser:
             root_config,
             child_error_mode,
         )
+        zero_invalidated = F.lit(False)
         if nested.parser.parser_type in NUMERIC_PARSER_TYPES and not nested.parser.zero_is_valid:
             # Child zero invalidation follows the same order as top-level parsing: after immediate
             # parse-error resolution and before the final null default.
-            value = F.when(
+            zero_invalidated = F.coalesce(
                 value == F.lit(0).cast(nested.expected_data_type),
+                F.lit(False),
+            )
+            value = F.when(
+                zero_invalidated,
                 F.lit(None).cast(nested.expected_data_type),
             ).otherwise(value)
-        value = self._apply_nested_default(value, nested, path)
-        return _NestedParse(value, failed, self._error_paths(failed, path))
+        value, default_applied = self._apply_nested_default(value, nested)
+        default_applied = default_applied & ~(
+            failed & F.lit(child_error_mode is ChildErrorMode.DROP)
+        )
+        return _NestedParse(
+            value,
+            failed,
+            self._error_paths(failed, path),
+            self._paths_when(default_applied, path),
+            self._paths_when(zero_invalidated, path),
+        )
 
     def _parse_nested_array(
         self,
@@ -820,6 +942,8 @@ class SparkDataFrameParser:
                 parsed.value.alias("value"),
                 parsed.failed.alias("failed"),
                 parsed.error_paths.alias("error_paths"),
+                parsed.default_on_null_paths.alias("default_on_null_paths"),
+                parsed.zero_invalidated_paths.alias("zero_invalidated_paths"),
             )
 
         records = F.transform(raw, parse_element)
@@ -837,10 +961,18 @@ class SparkDataFrameParser:
         if options.distinct:
             values = F.array_distinct(values)
         error_paths = F.flatten(F.transform(records, lambda record: record.getField("error_paths")))
+        default_paths = F.flatten(
+            F.transform(records, lambda record: record.getField("default_on_null_paths"))
+        )
+        zero_paths = F.flatten(
+            F.transform(records, lambda record: record.getField("zero_invalidated_paths"))
+        )
         return _NestedParse(
             F.when(raw.isNull(), F.lit(None).cast(data_type.canonical)).otherwise(values),
             F.lit(False),
             F.when(raw.isNull(), self._empty_error_paths()).otherwise(error_paths),
+            F.when(raw.isNull(), self._empty_error_paths()).otherwise(default_paths),
+            F.when(raw.isNull(), self._empty_error_paths()).otherwise(zero_paths),
         )
 
     def _parse_nested_struct(
@@ -854,6 +986,8 @@ class SparkDataFrameParser:
         """Parse every configured struct field and emit fields in compiled schema order."""
         parsed_fields: list[Column] = []
         errors: list[Column] = []
+        defaults: list[Column] = []
+        zeros: list[Column] = []
         for field in options.field_parsers:
             field_path = F.concat(path, F.lit("."), F.lit(field.silver_field_name))
             parsed = self._parse_nested_value(
@@ -864,6 +998,8 @@ class SparkDataFrameParser:
             )
             parsed_fields.append(parsed.value.alias(field.silver_field_name))
             errors.append(parsed.error_paths)
+            defaults.append(parsed.default_on_null_paths)
+            zeros.append(parsed.zero_invalidated_paths)
         value = F.struct(*parsed_fields)
         # Spark's struct() itself is non-null even when every child is null. Restore a truly null
         # struct when the decoded raw container was null.
@@ -871,6 +1007,8 @@ class SparkDataFrameParser:
             F.when(raw.isNull(), F.lit(None).cast(data_type.canonical)).otherwise(value),
             F.lit(False),
             F.when(raw.isNull(), self._empty_error_paths()).otherwise(F.concat(*errors)),
+            F.when(raw.isNull(), self._empty_error_paths()).otherwise(F.concat(*defaults)),
+            F.when(raw.isNull(), self._empty_error_paths()).otherwise(F.concat(*zeros)),
         )
 
     def _parse_nested_map(
@@ -887,7 +1025,10 @@ class SparkDataFrameParser:
         def parse_entry(entry: Column) -> Column:
             """Attach the key, parsed value, failure flag, and paths to one temporary entry."""
             key = entry.getField("key")
-            value_path = F.concat(path, F.lit("['"), key, F.lit("']"))
+            # Quote map keys in JSONPath-like diagnostics. Escaping an embedded apostrophe keeps one
+            # key distinguishable from multiple path segments (for example ``a']['b``).
+            escaped_key = F.regexp_replace(key, "'", r"\\'")
+            value_path = F.concat(path, F.lit("['"), escaped_key, F.lit("']"))
             parsed = self._parse_nested_value(
                 entry.getField("value"),
                 options.value_parser,
@@ -900,6 +1041,8 @@ class SparkDataFrameParser:
                 parsed.value.alias("value"),
                 parsed.failed.alias("failed"),
                 parsed.error_paths.alias("error_paths"),
+                parsed.default_on_null_paths.alias("default_on_null_paths"),
+                parsed.zero_invalidated_paths.alias("zero_invalidated_paths"),
             )
 
         records = F.transform(F.map_entries(raw), parse_entry)
@@ -920,10 +1063,18 @@ class SparkDataFrameParser:
         )
         value = F.map_from_entries(entries)
         error_paths = F.flatten(F.transform(records, lambda record: record.getField("error_paths")))
+        default_paths = F.flatten(
+            F.transform(records, lambda record: record.getField("default_on_null_paths"))
+        )
+        zero_paths = F.flatten(
+            F.transform(records, lambda record: record.getField("zero_invalidated_paths"))
+        )
         return _NestedParse(
             F.when(raw.isNull(), F.lit(None).cast(data_type.canonical)).otherwise(value),
             F.lit(False),
             F.when(raw.isNull(), self._empty_error_paths()).otherwise(error_paths),
+            F.when(raw.isNull(), self._empty_error_paths()).otherwise(default_paths),
+            F.when(raw.isNull(), self._empty_error_paths()).otherwise(zero_paths),
         )
 
     def _resolve_nested_parse_error(
@@ -988,22 +1139,20 @@ class SparkDataFrameParser:
         self,
         value: Column,
         nested: NestedValueParser | StructFieldParser,
-        path: Column,
-    ) -> Column:
-        """Apply a nested parser's final nullability/default contract."""
-        # ``path`` is accepted for symmetry and future diagnostics. It currently has no bearing on
-        # the typed literal, so delete it explicitly to document that intentional non-use.
-        del path
+    ) -> tuple[Column, Column]:
+        """Apply a nested final-null default and return both value and null-safe action flag."""
         if nested.parser.is_nullable:
-            return value
-        return F.when(
-            value.isNull(),
+            return value, F.lit(False)
+        applied = F.coalesce(value.isNull(), F.lit(False))
+        resolved = F.when(
+            applied,
             self._typed_value_literal(
                 nested.parser.default_on_null,
                 nested.data_type,
                 nested.parser,
             ),
         ).otherwise(value)
+        return resolved, applied
 
     def _raw_type_ddl(self, data_type: SparkDataType, options: ParserOptions) -> str:
         """Return the permissive intermediate schema used to decode raw child text.
@@ -1031,8 +1180,13 @@ class SparkDataFrameParser:
 
     def _error_paths(self, failed: Column, path: Column) -> Column:
         """Return ``[path]`` when failed, otherwise a typed empty array."""
+        return self._paths_when(failed, path)
+
+    @staticmethod
+    def _paths_when(condition: Column, path: Column) -> Column:
+        """Return one typed path when a null-safe audit condition occurred."""
         return F.filter(
-            F.array(F.when(failed, path)),
+            F.array(F.when(F.coalesce(condition, F.lit(False)), path)),
             lambda item: item.isNotNull(),
         )
 
@@ -1050,7 +1204,7 @@ class SparkDataFrameParser:
         if options.on_parse_error is ParseErrorMode.DEFAULT:
             return F.when(
                 parse_failed,
-                self._typed_literal(
+                self._typed_value_literal(
                     options.default_on_error,
                     column_config.data_type,
                     options,
@@ -1076,15 +1230,6 @@ class SparkDataFrameParser:
             F.raise_error(message).cast(column_config.expected_data_type),
         ).otherwise(candidate)
 
-    def _typed_literal(
-        self,
-        value: Any,
-        data_type: SparkDataType,
-        options: ParserOptions,
-    ) -> Column:
-        """Compatibility wrapper for constructing a recursively typed Spark literal."""
-        return self._typed_value_literal(value, data_type, options)
-
     def _typed_value_literal(
         self,
         value: Any,
@@ -1095,12 +1240,7 @@ class SparkDataFrameParser:
         if value is None:
             return F.lit(None).cast(data_type.canonical)
         if data_type.parser_type is ParserType.BINARY:
-            binary_format = {
-                BinaryEncoding.BASE64: "base64",
-                BinaryEncoding.HEX: "hex",
-                BinaryEncoding.UTF8: "utf-8",
-            }[options.binary_encoding]
-            return F.try_to_binary(F.lit(value), F.lit(binary_format))
+            return F.try_to_binary(F.lit(value), F.lit(_BINARY_FORMATS[options.binary_encoding]))
         if data_type.parser_type is ParserType.ARRAY:
             assert data_type.element_type is not None and options.element_parser is not None
             items = [
@@ -1170,6 +1310,8 @@ class SparkDataFrameParser:
         normalized: Column,
         candidate: Column,
         nested_error_paths: Column,
+        nested_default_on_null_paths: Column,
+        nested_zero_invalidated_paths: Column,
     ) -> Column:
         """Assemble one stable, human-explainable parser audit struct expression."""
         options = column_config.parser
@@ -1181,6 +1323,8 @@ class SparkDataFrameParser:
         # A top-level malformed container is already represented by parse_failed. Only separately
         # label nested resolution when one or more child paths failed inside a valid container.
         nested_failed = (F.size(nested_error_paths) > 0) & ~parse_failed
+        nested_defaulted = F.size(nested_default_on_null_paths) > 0
+        nested_zero_invalidated = F.size(nested_zero_invalidated_paths) > 0
         is_zip = options.string_format is StringFormat.ZIP
         compact_zip = F.regexp_replace(normalized, r"\s+", "")
         zip_digit_count = F.length(F.regexp_replace(compact_zip, r"\D", ""))
@@ -1210,6 +1354,11 @@ class SparkDataFrameParser:
                 F.when(parse_default, F.lit("parse_error_default_applied")),
                 F.when(parse_preserved, F.lit("parse_error_preserved")),
                 F.when(nested_failed, F.lit("nested_parse_errors_resolved")),
+                F.when(nested_zero_invalidated, F.lit("nested_zero_invalidated")),
+                F.when(
+                    nested_defaulted,
+                    F.lit("nested_default_on_null_applied"),
+                ),
                 F.when(zero_invalidated, F.lit("zero_invalidated")),
                 F.when(default_on_null_applied, F.lit("default_on_null_applied")),
                 F.when(zip_padded, F.lit("zip_padded")),
@@ -1227,6 +1376,8 @@ class SparkDataFrameParser:
                 | parse_default
                 | parse_preserved
                 | nested_failed
+                | nested_zero_invalidated
+                | nested_defaulted
                 | zero_invalidated
                 | default_on_null_applied
                 | zip_padded
@@ -1266,11 +1417,13 @@ class SparkDataFrameParser:
             self._options_map(options).alias("options"),
             error.alias("error"),
             nested_error_paths.alias("nested_error_paths"),
+            nested_default_on_null_paths.alias("nested_default_on_null_paths"),
+            nested_zero_invalidated_paths.alias("nested_zero_invalidated_paths"),
         )
 
     def _options_map(self, options: ParserOptions) -> Column:
         """Serialize effective parser options into a Spark ``map<string,string>`` expression."""
-        payload = ParserConfigSerializer().parser_mapping(
+        payload = self._serializer.parser_mapping(
             options,
             include_audit=True,
             include_error_mode=True,

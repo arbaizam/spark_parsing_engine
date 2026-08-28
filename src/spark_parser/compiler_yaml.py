@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import binascii
 import math
+import struct
 from collections.abc import Mapping
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -91,6 +92,21 @@ class _UniqueKeyLoader(yaml.SafeLoader):
     """
 
 
+def _reject_yaml_merge(
+    _loader: _UniqueKeyLoader,
+    _node: yaml.Node,
+) -> None:
+    """Reject YAML's ``<<`` merge operator with an actionable policy explanation.
+
+    PyYAML's ordinary error mentions an internal constructor tag. That fails closed, but it does not
+    tell a configuration author that merge keys are intentionally excluded from reviewable configs.
+    """
+    raise CompilationError(
+        "YAML merge keys (<<) are not supported because they hide inherited keys from review; "
+        "use a plain anchor/alias or repeat the keys explicitly."
+    )
+
+
 def _construct_unique_mapping(
     loader: _UniqueKeyLoader,
     node: yaml.MappingNode,
@@ -111,6 +127,7 @@ _UniqueKeyLoader.add_constructor(
     yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
     _construct_unique_mapping,
 )
+_UniqueKeyLoader.add_constructor("tag:yaml.org,2002:merge", _reject_yaml_merge)
 
 
 class YamlParserConfigCompiler:
@@ -1038,7 +1055,7 @@ class YamlParserConfigCompiler:
         }:
             return self._integer_default(value, parser_type, label)
         if parser_type in {ParserType.FLOAT, ParserType.DOUBLE}:
-            return self._double_default(value, label)
+            return self._floating_default(value, parser_type, label)
         if parser_type is ParserType.DECIMAL:
             return self._decimal_default(value, data_type, label)
         if parser_type is ParserType.BOOLEAN:
@@ -1048,7 +1065,7 @@ class YamlParserConfigCompiler:
         if parser_type is ParserType.DATE:
             return self._date_default(value, label)
         if parser_type in {ParserType.TIMESTAMP, ParserType.TIMESTAMP_NTZ}:
-            return self._timestamp_default(value, label)
+            return self._timestamp_default(value, parser_type, label)
         if parser_type is ParserType.BINARY:
             if not isinstance(value, str):
                 raise CompilationError(f"{label} for binary must be an encoded string.")
@@ -1115,13 +1132,30 @@ class YamlParserConfigCompiler:
         return value
 
     @staticmethod
-    def _double_default(value: Any, label: str) -> float:
-        """Validate a finite floating-point default and normalize it to Python ``float``."""
+    def _floating_default(value: Any, parser_type: ParserType, label: str) -> float:
+        """Validate a finite default that survives conversion to its declared Spark width.
+
+        Python's ``float`` and Spark ``double`` are binary64 values, but Spark ``float`` is binary32.
+        Checking only ``math.isfinite`` would allow a finite Python value to become infinity—or a
+        tiny non-zero value to become zero—when Spark narrows it. The standard-library round trip
+        below exactly models that final binary32 representation before the config is accepted.
+        """
         if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
-            raise CompilationError(f"{label} for double must be numeric.")
+            raise CompilationError(f"{label} for {parser_type.value} must be numeric.")
         converted = float(value)
         if not math.isfinite(converted):
-            raise CompilationError(f"{label} for double must be finite.")
+            raise CompilationError(f"{label} for {parser_type.value} must be finite.")
+        if parser_type is ParserType.FLOAT:
+            try:
+                narrowed = struct.unpack("!f", struct.pack("!f", converted))[0]
+            except OverflowError as exc:
+                raise CompilationError(
+                    f"{label} for float is outside Spark's finite float32 range."
+                ) from exc
+            if not math.isfinite(narrowed):
+                raise CompilationError(f"{label} for float is outside Spark's finite float32 range.")
+            if converted != 0 and narrowed == 0:
+                raise CompilationError(f"{label} for float underflows to zero in Spark float32.")
         return converted
 
     @staticmethod
@@ -1160,16 +1194,23 @@ class YamlParserConfigCompiler:
         raise CompilationError(f"{label} for date must be a date or ISO string.")
 
     @staticmethod
-    def _timestamp_default(value: Any, label: str) -> datetime:
-        """Accept a datetime object or an ISO timestamp string."""
+    def _timestamp_default(value: Any, parser_type: ParserType, label: str) -> datetime:
+        """Accept an ISO datetime and enforce timestamp-vs-wall-clock timezone semantics."""
         if isinstance(value, datetime):
-            return value
-        if isinstance(value, str):
+            parsed = value
+        elif isinstance(value, str):
             try:
-                return datetime.fromisoformat(value)
+                parsed = datetime.fromisoformat(value)
             except ValueError as exc:
                 raise CompilationError(f"{label} for timestamp must be an ISO timestamp.") from exc
-        raise CompilationError(f"{label} for timestamp must be a datetime or ISO string.")
+        else:
+            raise CompilationError(f"{label} for timestamp must be a datetime or ISO string.")
+        if parser_type is ParserType.TIMESTAMP_NTZ and parsed.utcoffset() is not None:
+            raise CompilationError(
+                f"{label} for timestamp_ntz must not include a timezone offset; "
+                "timestamp_ntz represents a local wall-clock value."
+            )
+        return parsed
 
     def _validate_unique_columns(self, columns: tuple[ColumnParser, ...]) -> None:
         """Reject duplicate silver names while intentionally allowing repeated sources."""

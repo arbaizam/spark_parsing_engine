@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools==84.0.0", "wheel==0.47.0"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,15 +8,31 @@ dynamic = ["version"]
 description = "Strict YAML parsing of bronze strings into scalar and complex Spark types."
 readme = "README.md"
 requires-python = ">=3.10"
+authors = [{name = "Matt Arbaiza"}]
+license = "LicenseRef-Proprietary"
+license-files = ["LICENSE"]
+classifiers = [
+    "Private :: Do Not Upload",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
 dependencies = [
-    "pyspark>=3.5",
     "PyYAML>=6.0",
 ]
 
 [project.optional-dependencies]
+spark = [
+    "pyspark>=3.5",
+]
 test = [
     "pytest>=8",
 ]
+
+[project.urls]
+Repository = "https://github.com/arbaizam/spark_parsing_engine"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -27,6 +43,9 @@ version = {attr = "spark_parser.version.__version__"}
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+markers = [
+    "spark: tests that start a local Spark runtime and require Java",
+]
 
 [tool.ruff]
 target-version = "py310"

@@ -336,7 +336,15 @@ class SparkParserService:
         """Describe one parser, or return a fresh complete parser catalog mapping."""
         if parser_type is None:
             return {member.value: parser_description(member) for member in ParserType}
-        normalized = parser_type if isinstance(parser_type, ParserType) else ParserType(parser_type)
+        try:
+            normalized = (
+                parser_type if isinstance(parser_type, ParserType) else ParserType(parser_type)
+            )
+        except ValueError as exc:
+            allowed = ", ".join(member.value for member in ParserType)
+            raise CompilationError(
+                f"Unknown parser type {parser_type!r}; expected one of: {allowed}."
+            ) from exc
         return parser_description(normalized)
 
     @staticmethod

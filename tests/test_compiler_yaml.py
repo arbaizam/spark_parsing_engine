@@ -18,6 +18,11 @@ from spark_parser import (
     YamlParserConfigCompiler,
     parse_spark_data_type,
 )
+from spark_parser.defaults import (
+    DEFAULT_DATE_FORMATS,
+    DEFAULT_TIMESTAMP_FORMATS,
+    DEFAULT_TIMESTAMP_NTZ_FORMATS,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -189,6 +194,16 @@ def test_all_supported_parsers_compile() -> None:
     assert config.columns[3].parser.audit is False
 
 
+def test_reference_example_columns_inherit_global_null_markers() -> None:
+    """Prevent the reference template from silently replacing configured global markers."""
+    example = (ROOT / "examples" / "all_parsers.yaml").read_text(encoding="utf-8")
+    example = example.replace("  null_markers: []", "  null_markers: [NA]", 1)
+
+    config = YamlParserConfigCompiler().compile_text(example)
+
+    assert all(column.parser.null_markers == ("NA",) for column in config.columns)
+
+
 def test_safe_defaults_are_explicit() -> None:
     config = YamlParserConfigCompiler().compile_text(
         """
@@ -213,21 +228,75 @@ columns:
     assert options.on_parse_error is ParseErrorMode.FAIL
     assert options.audit is False
     assert PARSER_DEFAULTS["common"]["collapse_whitespace"] is True
-    assert PARSER_DEFAULTS["date"]["formats"] == [
-        "yyyy-MM-dd",
-        "MM/dd/yyyy hh:mm a",
-        "MM/dd/yyyy hh:mm:ss a",
-    ]
-    assert PARSER_DEFAULTS["timestamp"]["formats"] == [
-        "yyyy-MM-dd HH:mm:ss",
-        "MM/dd/yyyy hh:mm a",
-        "MM/dd/yyyy hh:mm:ss a",
-    ]
-    assert PARSER_DEFAULTS["timestamp_ntz"]["formats"] == [
-        "yyyy-MM-dd HH:mm:ss",
-        "MM/dd/yyyy hh:mm a",
-        "MM/dd/yyyy hh:mm:ss a",
-    ]
+    assert PARSER_DEFAULTS["date"]["formats"] == list(DEFAULT_DATE_FORMATS)
+    assert PARSER_DEFAULTS["timestamp"]["formats"] == list(DEFAULT_TIMESTAMP_FORMATS)
+    assert PARSER_DEFAULTS["timestamp_ntz"]["formats"] == list(
+        DEFAULT_TIMESTAMP_NTZ_FORMATS
+    )
+
+
+@pytest.mark.parametrize("value", ["1.0e+300", "1.0e-100"])
+def test_float_defaults_must_survive_spark_float32_narrowing(value: str) -> None:
+    """Reject authored float defaults that Spark would silently turn into infinity or zero."""
+    with pytest.raises(CompilationError, match="float32"):
+        YamlParserConfigCompiler().compile_text(
+            f"""
+parser_config_id: float_range
+parser_config_name: Float Range
+version: "1"
+columns:
+  - source_column_name: value
+    silver_column_name: Value
+    expected_data_type: float
+    parser:
+      type: float
+      on_parse_error: default
+      default_on_error: {value}
+"""
+        )
+
+    # Spark double uses the same binary64 width as Python float, so the large finite value remains
+    # valid there. This assertion prevents the float32 guard from accidentally narrowing doubles.
+    if value == "1.0e+300":
+        config = YamlParserConfigCompiler().compile_text(
+            f"""
+parser_config_id: double_range
+parser_config_name: Double Range
+version: "1"
+columns:
+  - source_column_name: value
+    silver_column_name: Value
+    expected_data_type: double
+    parser:
+      type: double
+      on_parse_error: default
+      default_on_error: {value}
+"""
+        )
+        assert config.columns[0].parser.default_on_error == 1.0e300
+
+
+def test_timestamp_ntz_defaults_reject_timezone_offsets() -> None:
+    """Keep local wall-clock defaults independent of the Spark session timezone."""
+    invalid = """
+parser_config_id: timestamp_default
+parser_config_name: Timestamp Default
+version: "1"
+columns:
+  - source_column_name: value
+    silver_column_name: Value
+    expected_data_type: timestamp_ntz
+    parser:
+      type: timestamp_ntz
+      is_nullable: false
+      default_on_null: "2026-01-01T00:00:00+05:00"
+"""
+    with pytest.raises(CompilationError, match="must not include a timezone offset"):
+        YamlParserConfigCompiler().compile_text(invalid)
+
+    valid = invalid.replace("timestamp_ntz", "timestamp")
+    config = YamlParserConfigCompiler().compile_text(valid)
+    assert config.columns[0].parser.default_on_null.utcoffset() is not None
 
 
 @pytest.mark.parametrize(
@@ -411,6 +480,26 @@ parser_config_id: duplicate_again
 parser_config_name: Duplicate
 version: "1"
 columns: []
+"""
+        )
+
+
+def test_yaml_merge_keys_fail_with_an_actionable_message() -> None:
+    """Explain the deliberate merge-key restriction instead of leaking a PyYAML tag error."""
+    with pytest.raises(CompilationError, match=r"YAML merge keys \(<<\) are not supported"):
+        YamlParserConfigCompiler().compile_text(
+            """
+parser_config_id: merge_key
+parser_config_name: Merge Key
+version: "1"
+shared: &shared
+  type: string
+columns:
+  - source_column_name: value
+    silver_column_name: Value
+    expected_data_type: string
+    parser:
+      <<: *shared
 """
         )
 

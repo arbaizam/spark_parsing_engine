@@ -2,7 +2,9 @@
 
 from pathlib import Path
 
-from spark_parser import ParserType, SparkParserService, parser
+import pytest
+
+from spark_parser import CompilationError, ParserType, SparkParserService, parser
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -66,6 +68,12 @@ def test_parser_metadata_is_discoverable_and_detached() -> None:
     assert array_collapse["default"] is False
     assert "whole container" in parser.map.describe()["gotchas"][0]
     assert parser.normalize_data_type("ARRAY < INT >") == "array<integer>"
+
+
+def test_unknown_parser_description_uses_the_public_error_hierarchy() -> None:
+    """Keep invalid authoring input catchable through SparkParserError/CompilationError."""
+    with pytest.raises(CompilationError, match="Unknown parser type 'bogus'"):
+        parser.describe("bogus")
 
 
 def test_uat_report_contains_validation_resolved_options_and_markdown(tmp_path: Path) -> None:

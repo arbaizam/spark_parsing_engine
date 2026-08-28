@@ -113,7 +113,11 @@ columns:
           silver_field_name: scores
           parser:
             type: array
-            element_parser: integer
+            element_parser:
+              type: integer
+              zero_is_valid: false
+              is_nullable: false
+              default_on_null: -1
             on_element_error: null
       on_parse_error: default
       default_on_error:

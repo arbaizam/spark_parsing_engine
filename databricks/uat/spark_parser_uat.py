@@ -1,5 +1,4 @@
 # Databricks notebook source
-# ruff: noqa: BLE001, E402, F821
 # MAGIC %md
 # MAGIC # Spark Parser Databricks UAT
 # MAGIC
@@ -8,6 +7,8 @@
 # MAGIC handoff contract. See the adjacent `README.md` for parameters and pass criteria.
 
 # COMMAND ----------
+
+# ruff: noqa: BLE001, E402, F821
 
 # Widgets make the same notebook usable interactively and as a parameterized Databricks job task.
 # Keep artifact and destination values outside source control; UAT operators supply them per run.
@@ -28,10 +29,11 @@ if not wheel_path.endswith(".whl"):
 if not wheel_path.startswith(("/Volumes/", "/Workspace/")):
     raise ValueError("wheel_path must start with /Volumes/ or /Workspace/")
 
-# COMMAND ----------
-
 # ``--no-deps`` protects runtime-owned PySpark libraries from replacement. The UAT compute must
 # already satisfy the package dependencies documented in README.md.
+
+# COMMAND ----------
+
 # MAGIC %pip install --no-deps --force-reinstall "$wheel_path"
 
 # COMMAND ----------
@@ -43,8 +45,10 @@ dbutils.library.restartPython()
 
 import hashlib
 import json
+import os
+import platform
 import re
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from importlib.metadata import distribution
 from pathlib import Path
@@ -76,9 +80,9 @@ def identifier(value: str, *, parameter: str) -> str:
 
 wheel_path = required_widget("wheel_path")
 expected_version = required_widget("expected_version")
-expected_wheel_sha256 = dbutils.widgets.get("expected_wheel_sha256").strip().lower()
+expected_wheel_sha256 = required_widget("expected_wheel_sha256").lower()
 config_path = required_widget("config_path")
-if expected_wheel_sha256 and not re.fullmatch(r"[0-9a-f]{64}", expected_wheel_sha256):
+if not re.fullmatch(r"[0-9a-f]{64}", expected_wheel_sha256):
     raise ValueError("expected_wheel_sha256 must contain exactly 64 lowercase hexadecimal digits")
 if not config_path.startswith(("/Volumes/", "/Workspace/")):
     raise ValueError("config_path must start with /Volumes/ or /Workspace/")
@@ -88,7 +92,9 @@ table_prefix = identifier(required_widget("table_prefix"), parameter="table_pref
 # Prefixing temporarily with ``r_`` lets a timestamp-style run ID pass the identifier validator.
 # The generated object name already has a letter-prefixed table_prefix, so the helper prefix is
 # removed after validation.
-run_id = dbutils.widgets.get("run_id").strip() or datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+run_id = dbutils.widgets.get("run_id").strip() or datetime.now(timezone.utc).strftime(
+    "%Y%m%d_%H%M%S"
+)
 run_id = identifier(f"r_{run_id}", parameter="run_id")[2:]
 
 wheel_file = Path(wheel_path)
@@ -105,18 +111,18 @@ if not config_file.is_file():
 installed_distribution = distribution("spark-parser")
 installed_version = installed_distribution.version
 
-# Hash the staged wheel itself, not installed files. The optional approved digest ties this run to
-# the exact artifact reviewed by release engineering.
+# Hash the staged wheel itself, not installed files. Requiring the approved digest ties this run
+# to the exact artifact reviewed by release engineering and prevents same-version rebuilds from
+# passing against a different binary.
 wheel_sha256 = hashlib.sha256(wheel_file.read_bytes()).hexdigest()
 
 assert installed_version == expected_version, (
     f"Installed spark-parser {installed_version}, expected {expected_version}"
 )
 assert spark_parser.__version__ == expected_version
-if expected_wheel_sha256:
-    assert wheel_sha256 == expected_wheel_sha256, (
-        f"Wheel SHA-256 {wheel_sha256} did not match {expected_wheel_sha256}"
-    )
+assert wheel_sha256 == expected_wheel_sha256, (
+    f"Wheel SHA-256 {wheel_sha256} did not match {expected_wheel_sha256}"
+)
 
 print(
     json.dumps(
@@ -136,7 +142,9 @@ print(
 # ANSI mode is an explicit UAT condition because permissive and ANSI-enabled runtimes can differ in
 # casting behavior. Parser error policies must remain in control under the stricter setting.
 spark.conf.set("spark.sql.ansi.enabled", "true")
+spark.conf.set("spark.sql.legacy.timeParserPolicy", "EXCEPTION")
 assert spark.conf.get("spark.sql.ansi.enabled").lower() == "true"
+assert spark.conf.get("spark.sql.legacy.timeParserPolicy").upper() == "EXCEPTION"
 
 # Review before compilation so the notebook prints the same resolved contract a human approver sees.
 # The warning assertion intentionally fails UAT when ownership/audit metadata is incomplete.
@@ -179,7 +187,7 @@ bronze_rows = [
         "09/30/2026 12:00:00 AM",
         "09/30/2026 12:00:00 AM",
         '[" ally ","ALLY",null]',
-        '{"zip_code":"1234","raw_scores":[1,"bad",3]}',
+        '{"zip_code":"1234","raw_scores":[1,"bad",0]}',
         '{"principal":"10.125","bad":"x","empty":null}',
     ),
     (
@@ -209,12 +217,17 @@ audit_df = parsing.results_df.withColumnRenamed("record_id", "RecordId")
 silver_rows = {
     row.RecordId: row.asDict(recursive=True) for row in silver_df.collect()
 }
+audit_collected_rows = audit_df.collect()
 audit_rows = {
     row.RecordId: {
         result.silver_column_name: result
         for result in row.spark_parser_parse_results
     }
-    for row in audit_df.collect()
+    for row in audit_collected_rows
+}
+ansi_audit_rows = {
+    row.RecordId: row.asDict(recursive=True)["spark_parser_parse_results"]
+    for row in audit_collected_rows
 }
 
 # COMMAND ----------
@@ -232,7 +245,7 @@ assert good["EventTimestamp"].isoformat(sep=" ") == "2026-09-30 00:00:00"
 assert good["EventTimestampNtz"].isoformat(sep=" ") == "2026-09-30 00:00:00"
 assert good["Aliases"] == ["ALLY"]
 assert good["Profile"]["postal_code"] == "01234"
-assert good["Profile"]["scores"] == [1, None, 3]
+assert good["Profile"]["scores"] == [1, -1, -1]
 assert good["Attributes"] == {"principal": Decimal("10.13"), "empty": None}
 
 handled = silver_rows["handled-errors-1"]
@@ -253,8 +266,16 @@ assert handled["Attributes"] is None
 good_audit = audit_rows["good-1"]
 handled_audit = audit_rows["handled-errors-1"]
 assert good_audit["Profile"].nested_error_paths == ["$.scores[1]"]
+assert good_audit["Profile"].nested_default_on_null_paths == [
+    "$.scores[1]",
+    "$.scores[2]",
+]
+assert good_audit["Profile"].nested_zero_invalidated_paths == ["$.scores[2]"]
 assert good_audit["Attributes"].nested_error_paths == ["$['bad']"]
 assert "nested_parse_errors_resolved" in good_audit["Profile"].actions_applied
+assert "nested_default_on_null_applied" in good_audit["Profile"].actions_applied
+assert "nested_zero_invalidated" in good_audit["Profile"].actions_applied
+assert good_audit["Profile"].changed is True
 assert "nested_parse_errors_resolved" in good_audit["Attributes"].actions_applied
 assert handled_audit["CustomerName"].actions_applied == ["null_marker_replaced"]
 assert handled_audit["StateCode"].actions_applied == ["parse_error_preserved"]
@@ -266,6 +287,34 @@ assert handled_audit["Attributes"].actions_applied == ["parse_error_to_null"]
 
 display(silver_df.orderBy("RecordId"))
 display(audit_df.orderBy("RecordId"))
+
+# COMMAND ----------
+
+# Run the same representative rows with ANSI disabled and compare fully materialized outputs. The
+# package must not change business values or handled-error audit records merely because a cluster
+# uses Spark 3.5's permissive default. Restore strict mode before the fail-policy and Delta gates so
+# the primary evidence remains the hardest execution mode.
+spark.conf.set("spark.sql.ansi.enabled", "false")
+try:
+    non_ansi_parsing = parser.parse_dataframe(
+        bronze_df,
+        config,
+        key_columns=["record_id"],
+    )
+    non_ansi_silver_rows = {
+        row.RecordId: row.asDict(recursive=True)
+        for row in non_ansi_parsing.parsed_df.collect()
+    }
+    non_ansi_audit_df = non_ansi_parsing.results_df.withColumnRenamed("record_id", "RecordId")
+    non_ansi_audit_rows = {
+        row.RecordId: row.asDict(recursive=True)["spark_parser_parse_results"]
+        for row in non_ansi_audit_df.collect()
+    }
+    assert non_ansi_silver_rows == silver_rows
+    assert non_ansi_audit_rows == ansi_audit_rows
+finally:
+    spark.conf.set("spark.sql.ansi.enabled", "true")
+assert spark.conf.get("spark.sql.ansi.enabled").lower() == "true"
 
 # COMMAND ----------
 
@@ -320,8 +369,13 @@ def ordered_rows(df, key: str) -> list[dict]:
     return [row.asDict(recursive=True) for row in df.orderBy(key).collect()]
 
 
-assert silver_delta_df.schema.json() == silver_df.schema.json()
-assert audit_delta_df.schema.json() == audit_df.schema.json()
+def schema_signature(df) -> list[tuple[str, str]]:
+    """Return ordered names/types while ignoring Delta's legal nullability normalization."""
+    return [(field.name, field.dataType.simpleString()) for field in df.schema.fields]
+
+
+assert schema_signature(silver_delta_df) == schema_signature(silver_df)
+assert schema_signature(audit_delta_df) == schema_signature(audit_df)
 assert ordered_rows(silver_delta_df, "RecordId") == ordered_rows(silver_df, "RecordId")
 assert ordered_rows(audit_delta_df, "RecordId") == ordered_rows(audit_df, "RecordId")
 
@@ -378,6 +432,8 @@ assert rules_engine_parser_results_df.schema.fieldNames() == [
     "options",
     "error",
     "nested_error_paths",
+    "nested_default_on_null_paths",
+    "nested_zero_invalidated_paths",
 ]
 
 rules_input_view = f"{table_prefix}_{run_id}_rules_input"
@@ -394,8 +450,14 @@ rules_engine_parser_results_df.createOrReplaceTempView(parser_results_view)
 summary = {
     "status": "PASS",
     "ansi_enabled": spark.conf.get("spark.sql.ansi.enabled"),
+    "time_parser_policy": spark.conf.get("spark.sql.legacy.timeParserPolicy"),
+    "databricks_runtime_version": os.environ.get("DATABRICKS_RUNTIME_VERSION", "unknown"),
+    "spark_version": spark.version,
+    "python_version": platform.python_version(),
     "spark_parser_version": installed_version,
+    "wheel_path": wheel_path,
     "wheel_sha256": wheel_sha256,
+    "config_path": config_path,
     "parser_config_id": config.parser_config_id,
     "parser_config_version": config.version,
     "parser_config_content_hash": config_hash,

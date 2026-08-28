@@ -94,6 +94,11 @@ class ParserOptions:
     binary_encoding: BinaryEncoding = DEFAULT_BINARY_ENCODING
     input_format: ComplexInputFormat = DEFAULT_COMPLEX_INPUT_FORMAT
     delimiter: str | None = None
+    # These three references are the edges of the recursive parser tree. Adding another child kind
+    # is a cross-cutting schema change: update compiler recursion, serializer.parser_mapping,
+    # service._walk_parser_options/schema reporting, and Spark runtime nested dispatch together.
+    # Keeping that coordination note beside the model makes the dependency visible at the place a
+    # maintainer is most likely to begin such a change.
     element_parser: NestedValueParser | None = None
     field_parsers: tuple[StructFieldParser, ...] = ()
     value_parser: NestedValueParser | None = None

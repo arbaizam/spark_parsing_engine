@@ -186,13 +186,55 @@ _US_STATE_NAMES = {
     "wyoming": "WY",
     "district of columbia": "DC",
     "washington dc": "DC",
-    "washington d.c.": "DC",
+    "washington d c": "DC",
+}
+
+# Conventional abbreviations still appear in older operational systems and manually entered
+# addresses. They remain an explicit allow-list so punctuation cleanup cannot turn arbitrary
+# three-letter values into states. Periods and commas are removed before lookup, making ``Ill.``
+# resolve through ``ill`` while an unrelated value such as ``Mul`` remains a parse error.
+_US_STATE_CONVENTIONAL_ABBREVIATIONS = {
+    "ala": "AL",
+    "ariz": "AZ",
+    "ark": "AR",
+    "calif": "CA",
+    "colo": "CO",
+    "conn": "CT",
+    "del": "DE",
+    "fla": "FL",
+    "ill": "IL",
+    "ind": "IN",
+    "kan": "KS",
+    "kans": "KS",
+    "mass": "MA",
+    "mich": "MI",
+    "minn": "MN",
+    "miss": "MS",
+    "mont": "MT",
+    "neb": "NE",
+    "nebr": "NE",
+    "nev": "NV",
+    "n mex": "NM",
+    "n dak": "ND",
+    "okla": "OK",
+    "ore": "OR",
+    "oreg": "OR",
+    "s dak": "SD",
+    "tenn": "TN",
+    "tex": "TX",
+    "wash": "WA",
+    "w va": "WV",
+    "wva": "WV",
+    "wis": "WI",
+    "wisc": "WI",
+    "wyo": "WY",
 }
 
 # Full names and already-abbreviated inputs share one lookup. Lowercase keys match the normalized
 # comparison expression; values always use the canonical uppercase two-letter representation.
 _US_STATE_TOKENS = {
     **_US_STATE_NAMES,
+    **_US_STATE_CONVENTIONAL_ABBREVIATIONS,
     **{abbreviation.lower(): abbreviation for abbreviation in _US_STATE_NAMES.values()},
 }
 
@@ -323,10 +365,13 @@ def format_state_us(value: Column) -> Column:
     """Return a canonical two-letter US state/DC abbreviation.
 
     ``value`` is expected to have passed common whitespace normalization. Matching is
-    case-insensitive for full names and abbreviations. Unknown non-null values return null so the
-    ordinary string parser error policy can fail, preserve null, or assign a configured default.
+    case-insensitive for full names, USPS codes, common conventional abbreviations, and harmless
+    periods/commas. Unknown non-null values return null so the ordinary string parser error policy
+    can fail, preserve the raw token, return null, or assign a configured default.
     """
-    return _map_lookup(_US_STATE_TOKENS, F.lower(value))
+    comparable = F.trim(F.regexp_replace(F.lower(value), r"[,.]", ""))
+    comparable = F.regexp_replace(comparable, r"\s+", " ")
+    return _map_lookup(_US_STATE_TOKENS, comparable)
 
 
 def format_zip(value: Column) -> Column:

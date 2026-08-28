@@ -19,6 +19,17 @@ The package provides:
 
 ## Quick start
 
+For local development, install Spark explicitly through the optional extra:
+
+```text
+python -m pip install -e ".[spark,test]"
+```
+
+The production wheel intentionally does not declare PySpark as an install dependency. Databricks
+owns the Spark/Py4J runtime, and allowing pip to resolve another PySpark distribution beside it can
+break that binding. Install the wheel on Databricks with `--no-deps`, as shown in the checked-in
+UAT notebook, and use a runtime that already provides Spark 3.5 or newer and PyYAML 6 or newer.
+
 ```yaml
 parser_config_id: bronze_customer_load
 parser_config_name: Bronze Customer Load
@@ -291,7 +302,7 @@ String supports the common arguments plus `format`.
 | `pascal` | Lowercase, title-case, and remove spaces. Intended for identifiers rather than human names. | `"account status"` → `"AccountStatus"` |
 | `address_us_v1` | Apply deterministic US address display normalization. | `"123 mccormick st. apt 4b"` → `"123 McCormick St Apt 4B"` |
 | `county` | Smart-case a county name and ensure exactly one trailing `County`. | `"mclean county"` → `"McLean County"` |
-| `state_us` | Return the uppercase two-letter abbreviation for a US state or Washington, DC. | `"Illinois"` → `"IL"`; `"il"` → `"IL"` |
+| `state_us` | Return the uppercase two-letter abbreviation for a US state or Washington, DC. | `"Illinois"` → `"IL"`; `"Ill."` → `"IL"`; `"WA."` → `"WA"` |
 | `zip` | Return a canonical ZIP5 or ZIP+4 string. | `"1234"` → `"01234"`; `"123456"` → `"00012-3456"` |
 
 `title` uses Spark's deterministic `initcap` behavior. It is appropriate for ordinary display
@@ -331,10 +342,12 @@ target domain truly requires counties.
 
 #### State profile
 
-`state_us` recognizes the 50 US state names and their two-letter postal abbreviations, plus
-`District of Columbia`, `Washington DC`, `Washington D.C.`, and `DC`. Matching is case-insensitive
-and occurs after common whitespace normalization. Output is always the canonical uppercase
-two-letter abbreviation.
+`state_us` recognizes the 50 US state names, their two-letter postal abbreviations, conventional
+legacy abbreviations such as `Ill.`, `Calif.`, and `Wash.`, plus `District of Columbia`,
+`Washington DC`, `Washington, D.C.`, and `DC`. Matching is case-insensitive after whitespace
+normalization; periods and commas are ignored for lookup. The allow-list remains explicit, so
+punctuation removal does not make arbitrary three-letter values valid. Output is always the
+canonical uppercase two-letter abbreviation.
 
 US territories are intentionally excluded because a field documented as a state should not
 silently broaden its domain. An unknown non-null value is a parse error and follows
@@ -389,8 +402,9 @@ typed defaults with excess scale remain compile-time errors.
 ### Float and double
 
 Float and double accept only finite numeric typed defaults and use Spark's single- and
-double-precision representations. Both support `zero_is_valid`. Use decimal when exact base-10
-representation matters.
+double-precision representations. A float default must also survive conversion to Spark's
+binary32 range: values that would become infinity or silently underflow to zero fail compilation.
+Both support `zero_is_valid`. Use decimal when exact base-10 representation matters.
 
 ### Binary
 
@@ -431,23 +445,34 @@ columns:
 
 | Parser | Argument | Default | Behavior |
 | --- | --- | --- | --- |
-| `date` | `formats` | `[yyyy-MM-dd, MM/dd/yyyy hh:mm a, MM/dd/yyyy hh:mm:ss a]` | Non-empty ordered Spark datetime patterns; first successful parse wins, then casts to date. |
-| `timestamp` | `formats` | `[yyyy-MM-dd HH:mm:ss, MM/dd/yyyy hh:mm a, MM/dd/yyyy hh:mm:ss a]` | Non-empty ordered Spark datetime patterns; first successful parse wins. |
-| `timestamp_ntz` | `formats` | `[yyyy-MM-dd HH:mm:ss, MM/dd/yyyy hh:mm a, MM/dd/yyyy hh:mm:ss a]` | First successful parse wins without applying a session timezone. |
+| `date` | `formats` | `[yyyy-MM-dd, yyyy-MM-dd'T'HH:mm:ss[.SSSSSS], MM/dd/yyyy hh:mm a, MM/dd/yyyy hh:mm:ss a]` | Non-empty ordered Spark datetime patterns; first successful parse wins, then casts to date. Offset-bearing ISO input is deliberately excluded. |
+| `timestamp` | `formats` | `[yyyy-MM-dd'T'HH:mm:ss[.SSSSSS]XXX, yyyy-MM-dd'T'HH:mm:ss[.SSSSSS], yyyy-MM-dd HH:mm:ss[.SSSSSS], MM/dd/yyyy hh:mm a, MM/dd/yyyy hh:mm:ss a]` | First successful parse wins. ISO offsets, local ISO timestamps, optional microseconds, and the two known US exports are built in. |
+| `timestamp_ntz` | `formats` | `[yyyy-MM-dd'T'HH:mm:ss[.SSSSSS], yyyy-MM-dd HH:mm:ss[.SSSSSS], MM/dd/yyyy hh:mm a, MM/dd/yyyy hh:mm:ss a]` | First successful parse wins without applying a session timezone. Offset-bearing input is rejected. |
 
 Formats cascade in declared order. Automatic inference is not performed because ambiguous forms
 such as `MM/dd/yyyy` and `dd/MM/yyyy` can both parse valid but different dates. Patterns are Spark
 datetime patterns, not Python `strptime` patterns. `timestamp` represents an absolute instant and
 its interpretation follows the active Spark SQL session timezone. `timestamp_ntz` represents a
-local wall-clock value and performs no timezone conversion.
+local wall-clock value and performs no timezone conversion. Its typed defaults likewise reject a
+timezone offset at compile time, preventing the same configuration from producing different
+wall-clock values under different session timezones.
 
-The built-in datetime formats accept ISO text and common US bronze exports such as
+The built-in datetime formats accept ISO text (including `T`, optional microseconds, and—for
+ordinary `timestamp`—`Z` or numeric offsets) and common US bronze exports such as
 `09/30/2026 12:00 AM` and `09/30/2026 12:00:00 AM`. The slash-based forms are deliberately defined
 as month/day/year; the parser does not guess locale. The `date` parser discards the successfully
 parsed time component and produces `2026-09-30`. The `timestamp` and `timestamp_ntz` parsers
 preserve midnight as `2026-09-30 00:00:00`, with the timezone behavior described above. Supplying
 `formats` replaces the relevant parser's defaults when a source contract uses a different
-representation.
+representation. A bare slash date such as `09/30/2026` is not built in because accepting bare
+numeric dates would make locale ambiguity easy to miss. Offset-bearing input is also not a date
+default because converting an instant to a calendar date can shift the day with the Spark session
+timezone; configure that behavior explicitly if a source contract truly requires it.
+
+The built-in patterns are full-token shape-guarded before Spark parses them. This prevents Spark
+3.5's `spark.sql.legacy.timeParserPolicy=EXCEPTION` from raising on a harmless mismatch while the
+format cascade is trying its next pattern. A custom `formats` list uses Spark's native pattern
+behavior; test custom patterns under the production session policy as part of load-specific UAT.
 
 ### Array
 
@@ -611,8 +636,10 @@ For a complex column, those modes govern malformed top-level JSON. Struct fields
 their own `on_parse_error`. Arrays use `on_element_error`, and maps use `on_value_error`, each with
 `fail`, `null`, `drop`, or string-child-only `preserve`. Handled child errors are retained in the
 top-level audit's `nested_error_paths` even when the invalid element or entry is preserved or
-dropped. A nested `fail` error identifies the top-level source column, silver column, expected child
-type, and exact nested path.
+dropped. Nested final-null defaults and zero invalidation are independently retained in
+`nested_default_on_null_paths` and `nested_zero_invalidated_paths`, including cases where no parse
+error occurred. A nested `fail` error identifies the top-level source column, silver column,
+expected child type, and exact nested path.
 
 Preservation is deliberately unavailable for integer, decimal, Boolean, date, timestamp, binary,
 and complex outputs: an invalid raw string cannot inhabit those typed silver positions. Quarantine
@@ -661,6 +688,10 @@ expression; a full silver write, `collect()`, or a select that consumes the colu
 | `persist(storage_level=MEMORY_AND_DISK)` | Persist the shared plan and return the same object. Useful before materializing both projections. |
 | `unpersist(blocking=False)` | Release the shared plan and return the same object. |
 
+Row keys are intentionally retained in `results_df`, not automatically copied into `parsed_df`.
+If a downstream join requires the key in both outputs, configure that source as a silver column as
+well (the Databricks UAT does this with `RecordId`) or add it explicitly before the handoff.
+
 `parse_dataframe()` parameters:
 
 | Argument | Required | Default | Behavior |
@@ -688,17 +719,21 @@ Each parse-result struct contains:
 | `expected_data_type` | String | Canonical target Spark datatype. |
 | `original_value` | Nullable string | Unmodified bronze value; null for a missing source. |
 | `parsed_value` | Nullable string | Final scalar rendered as text; complex values rendered as canonical JSON; binary rendered as canonical base64. |
-| `changed` | Boolean | Whether a material null/default/error/missing-source/ZIP action occurred. |
+| `changed` | Boolean | Whether a material null/default/error/missing-source/ZIP action occurred, including nested defaults and zero invalidation. |
 | `effective` | Boolean | False for a missing source; true when the configured source was available. |
 | `actions_applied` | Array of strings | Ordered material actions applied to this row and column. |
 | `options` | Map of string to string | Every fully resolved effective option for this parser. |
 | `error` | Nullable string | Handled parse or missing-source description; fail mode raises for bad values. |
 | `nested_error_paths` | Array of strings | JSONPath-like locations of handled child failures; empty for none. |
+| `nested_default_on_null_paths` | Array of strings | Locations where a nested non-nullable parser supplied `default_on_null`; empty for none. |
+| `nested_zero_invalidated_paths` | Array of strings | Locations where a nested numeric zero was invalidated; empty for none. |
 
 Possible actions are `source_column_missing`, `empty_string_to_null`, `null_marker_replaced`,
 `parse_error_to_null`, `parse_error_default_applied`, `parse_error_preserved`, `zero_invalidated`,
-`default_on_null_applied`, `json_null_to_null`, `nested_parse_errors_resolved`, `zip_padded`, and
-`zip_plus4_formatted`.
+`default_on_null_applied`, `json_null_to_null`, `nested_parse_errors_resolved`,
+`nested_zero_invalidated`, `nested_default_on_null_applied`, `zip_padded`, and
+`zip_plus4_formatted`. This order is contractual: new actions must be added deliberately rather
+than reordering existing entries that downstream rules may inspect.
 
 Routine whitespace normalization, normal successful datatype conversion, and routine title/case/
 address/county/state formatting are visible through `original_value`, `parsed_value`, and the

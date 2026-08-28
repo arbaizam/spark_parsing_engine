@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Python ${{ matrix.python }} / PySpark ${{ matrix.pyspark }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Spark 3.5 is the supported floor and still backs long-lived Databricks runtimes.
+          - python: "3.10"
+            pyspark: "3.5.0"
+          # The newer lane catches compatibility problems before runtime upgrades reach production.
+          - python: "3.12"
+            pyspark: "4.1.1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install test and build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ".[test]" "pyspark==${{ matrix.pyspark }}" build ruff
+
+      - name: Lint
+        run: python -m ruff check src tests databricks/uat/spark_parser_uat.py
+
+      - name: Test with a required Spark runtime
+        env:
+          SPARK_PARSER_REQUIRE_JAVA: "1"
+        run: python -m pytest -q
+
+      - name: Build wheel
+        run: python -m build --wheel
+
+      - name: Verify PySpark is optional in wheel metadata
+        run: >-
+          python -c "import glob, zipfile;
+          p=glob.glob('dist/*.whl'); assert len(p)==1, p;
+          z=zipfile.ZipFile(p[0]); n=next(x for x in z.namelist() if x.endswith('.dist-info/METADATA'));
+          m=z.read(n).decode();
+          r=[x.lower() for x in m.splitlines() if x.lower().startswith('requires-dist: pyspark')];
+          assert r and all('extra == \"spark\"' in x for x in r), r"

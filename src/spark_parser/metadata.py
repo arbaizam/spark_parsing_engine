@@ -310,7 +310,7 @@ _SPECIFIC_BEHAVIORS = {
         "pascal removes spaces after init-capitalization; it is intended for identifiers, not names.",
         "address_us_v1 uses contextual USPS-style suffixes/directionals and smart-cases Mc, apostrophe, and hyphen names.",
         "county smart-cases the name and ensures exactly one trailing 'County'.",
-        "state_us maps US state names and two-letter codes, plus Washington, DC, to uppercase abbreviations.",
+        "state_us maps US state names, postal codes, conventional abbreviations, and Washington, DC to uppercase two-letter codes; periods and commas are ignored for lookup.",
         "zip returns ZIP5 or ZIP+4 as a string and pads short numeric components with leading zeroes.",
     ],
     ParserType.BOOLEAN: [
@@ -320,27 +320,30 @@ _SPECIFIC_BEHAVIORS = {
     ],
     ParserType.DATE: [
         "Formats cascade in order; format inference is not performed.",
-        "The defaults accept an ISO date or a US month-first 12-hour timestamp, with or without seconds, and return only the date.",
+        "The defaults accept an ISO date/local timestamp or a US month-first 12-hour timestamp, with or without seconds, and return only the date.",
     ],
     ParserType.TIMESTAMP: [
         "Formats cascade in order; format inference is not performed.",
-        "The defaults accept an ISO timestamp or a US month-first 12-hour timestamp with or without seconds.",
+        "The defaults accept local or offset-bearing ISO timestamps, optional microseconds, and US month-first 12-hour timestamps with or without seconds.",
     ],
     ParserType.TIMESTAMP_NTZ: [
         "Formats cascade in order without applying the Spark session timezone.",
-        "The defaults accept an ISO timestamp or a US month-first 12-hour timestamp with or without seconds.",
+        "The defaults accept timezone-free ISO timestamps, optional microseconds, and US month-first 12-hour timestamps with or without seconds.",
     ],
     ParserType.ARRAY: [
         "JSON arrays support recursive element types; delimited arrays support scalar elements.",
         "Element failures are reported with zero-based paths such as $[2].",
+        "Nested defaults and invalidated zeros are reported in dedicated top-level audit path arrays.",
     ],
     ParserType.STRUCT: [
         "Every silver struct field must have exactly one source field mapping and recursive parser.",
         "Unknown JSON fields are ignored; configured missing fields become null/default.",
+        "Nested defaults and invalidated zeros are reported in dedicated top-level audit path arrays.",
     ],
     ParserType.MAP: [
         "JSON map keys are strings and values may use any recursively supported datatype.",
         "Value failures are reported with paths such as $['balance'].",
+        "Apostrophes in diagnostic map keys are backslash-escaped so one key remains one path segment.",
     ],
 }
 
@@ -366,6 +369,7 @@ _SPECIFIC_GOTCHAS = {
     ParserType.DATE: [
         "Spark datetime patterns are not Python strptime patterns.",
         "The built-in slash-date fallback is explicitly MM/dd/yyyy, not dd/MM/yyyy.",
+        "Offset-bearing ISO timestamps are not date defaults because their calendar date depends on the Spark session timezone.",
     ],
     ParserType.TIMESTAMP: [
         "Timestamp interpretation follows the active Spark SQL session timezone.",
@@ -373,6 +377,7 @@ _SPECIFIC_GOTCHAS = {
     ],
     ParserType.TIMESTAMP_NTZ: [
         "Use timestamp when the value represents an absolute instant rather than local wall-clock time.",
+        "Offset-bearing inputs and typed defaults are rejected instead of silently discarding timezone information.",
         "The built-in slash-date fallback is explicitly MM/dd/yyyy, not dd/MM/yyyy.",
     ],
     ParserType.ARRAY: [

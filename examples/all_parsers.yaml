@@ -35,8 +35,8 @@ columns:                                   # [required] Non-empty ordered list.
       trim_whitespace: true                # [optional; default: true]
       empty_is_null: true                  # [optional; default: true]
       replace_null_markers: false          # [optional; default: false]
-      null_markers: []                     # [optional; default: inherited globals]
-      null_markers_mode: replace           # [optional; default: replace; replace|extend]
+      # null_markers: [NA]                 # [optional; omitted means inherited globals]
+      # null_markers_mode: extend          # [optional only with null_markers; replace|extend]
       null_marker_case_sensitive: true     # [optional; default: inherited global]
       is_nullable: true                    # [optional; default: true]
       # default_on_null: UNKNOWN           # [conditionally required if is_nullable: false]
@@ -56,8 +56,8 @@ columns:                                   # [required] Non-empty ordered list.
       trim_whitespace: true
       empty_is_null: true
       replace_null_markers: false
-      null_markers: []
-      null_markers_mode: replace
+      # null_markers: [NA]
+      # null_markers_mode: extend
       null_marker_case_sensitive: true
       is_nullable: true
       # default_on_null: 0
@@ -76,8 +76,8 @@ columns:                                   # [required] Non-empty ordered list.
       trim_whitespace: true
       empty_is_null: true
       replace_null_markers: false
-      null_markers: []
-      null_markers_mode: replace
+      # null_markers: [NA]
+      # null_markers_mode: extend
       null_marker_case_sensitive: true
       is_nullable: true
       # default_on_null: 0
@@ -96,8 +96,8 @@ columns:                                   # [required] Non-empty ordered list.
       trim_whitespace: true
       empty_is_null: true
       replace_null_markers: false
-      null_markers: []
-      null_markers_mode: replace
+      # null_markers: [NA]
+      # null_markers_mode: extend
       null_marker_case_sensitive: true
       is_nullable: true
       # default_on_null: 0                 # [conditionally required if is_nullable: false]
@@ -117,8 +117,8 @@ columns:                                   # [required] Non-empty ordered list.
       trim_whitespace: true
       empty_is_null: true
       replace_null_markers: false
-      null_markers: []
-      null_markers_mode: replace
+      # null_markers: [NA]
+      # null_markers_mode: extend
       null_marker_case_sensitive: true
       is_nullable: true
       # default_on_null: 0
@@ -137,8 +137,8 @@ columns:                                   # [required] Non-empty ordered list.
       trim_whitespace: true
       empty_is_null: true
       replace_null_markers: false
-      null_markers: []
-      null_markers_mode: replace
+      # null_markers: [NA]
+      # null_markers_mode: extend
       null_marker_case_sensitive: true
       is_nullable: true
       # default_on_null: 0.0
@@ -157,8 +157,8 @@ columns:                                   # [required] Non-empty ordered list.
       trim_whitespace: true
       empty_is_null: true
       replace_null_markers: false
-      null_markers: []
-      null_markers_mode: replace
+      # null_markers: [NA]
+      # null_markers_mode: extend
       null_marker_case_sensitive: true
       is_nullable: true
       # default_on_null: "0.00"
@@ -177,8 +177,8 @@ columns:                                   # [required] Non-empty ordered list.
       trim_whitespace: true
       empty_is_null: true
       replace_null_markers: false
-      null_markers: []
-      null_markers_mode: replace
+      # null_markers: [NA]
+      # null_markers_mode: extend
       null_marker_case_sensitive: true
       is_nullable: true
       # default_on_null: 0.0
@@ -197,8 +197,8 @@ columns:                                   # [required] Non-empty ordered list.
       trim_whitespace: true
       empty_is_null: true
       replace_null_markers: false
-      null_markers: []
-      null_markers_mode: replace
+      # null_markers: [NA]
+      # null_markers_mode: extend
       null_marker_case_sensitive: true
       is_nullable: true
       # default_on_null: U3BhcmsgUGFyc2Vy
@@ -217,8 +217,8 @@ columns:                                   # [required] Non-empty ordered list.
       trim_whitespace: true
       empty_is_null: true
       replace_null_markers: false
-      null_markers: []
-      null_markers_mode: replace
+      # null_markers: [NA]
+      # null_markers_mode: extend
       null_marker_case_sensitive: true
       is_nullable: true
       # default_on_null: false
@@ -240,8 +240,8 @@ columns:                                   # [required] Non-empty ordered list.
       trim_whitespace: true
       empty_is_null: true
       replace_null_markers: false
-      null_markers: []
-      null_markers_mode: replace
+      # null_markers: [NA]
+      # null_markers_mode: extend
       null_marker_case_sensitive: true
       is_nullable: true
       # default_on_null: 1970-01-01
@@ -261,8 +261,8 @@ columns:                                   # [required] Non-empty ordered list.
       trim_whitespace: true
       empty_is_null: true
       replace_null_markers: false
-      null_markers: []
-      null_markers_mode: replace
+      # null_markers: [NA]
+      # null_markers_mode: extend
       null_marker_case_sensitive: true
       is_nullable: true
       # default_on_null: 1970-01-01T00:00:00
@@ -282,8 +282,8 @@ columns:                                   # [required] Non-empty ordered list.
       trim_whitespace: true
       empty_is_null: true
       replace_null_markers: false
-      null_markers: []
-      null_markers_mode: replace
+      # null_markers: [NA]
+      # null_markers_mode: extend
       null_marker_case_sensitive: true
       is_nullable: true
       # default_on_null: 1970-01-01T00:00:00
@@ -303,8 +303,8 @@ columns:                                   # [required] Non-empty ordered list.
       trim_whitespace: true
       empty_is_null: true
       replace_null_markers: false
-      null_markers: []
-      null_markers_mode: replace
+      # null_markers: [NA]
+      # null_markers_mode: extend
       null_marker_case_sensitive: true
       is_nullable: true
       # default_on_null: []
@@ -330,8 +330,8 @@ columns:                                   # [required] Non-empty ordered list.
       trim_whitespace: true
       empty_is_null: true
       replace_null_markers: false
-      null_markers: []
-      null_markers_mode: replace
+      # null_markers: [NA]
+      # null_markers_mode: extend
       null_marker_case_sensitive: true
       is_nullable: true
       # default_on_null: {name: UNKNOWN, zip: "00000"}
@@ -362,8 +362,8 @@ columns:                                   # [required] Non-empty ordered list.
       trim_whitespace: true
       empty_is_null: true
       replace_null_markers: false
-      null_markers: []
-      null_markers_mode: replace
+      # null_markers: [NA]
+      # null_markers_mode: extend
       null_marker_case_sensitive: true
       is_nullable: true
       # default_on_null: {}

@@ -1,17 +1,20 @@
-"""Small native-Spark smoke test for the first-round runtime contract."""
+"""Native-Spark behavioral tests for the complete runtime contract."""
 
 import os
 import shutil
+import sys
 
 import pytest
 from py4j.protocol import Py4JJavaError
 
-from spark_parser import SparkDataFrameParser, YamlParserConfigCompiler
+from spark_parser import SchemaValidationError, SparkDataFrameParser, YamlParserConfigCompiler
 
 pyspark = pytest.importorskip("pyspark")
 from pyspark.errors import PySparkException  # noqa: E402
 from pyspark.sql import SparkSession  # noqa: E402
 from pyspark.sql import functions as F  # noqa: E402
+
+pytestmark = pytest.mark.spark
 
 
 @pytest.fixture(scope="module")
@@ -22,7 +25,16 @@ def spark():
         yield active
         return
     if shutil.which("java") is None and not os.environ.get("JAVA_HOME"):
+        if os.environ.get("SPARK_PARSER_REQUIRE_JAVA") == "1":
+            pytest.fail(
+                "SPARK_PARSER_REQUIRE_JAVA=1, but no Java runtime was found on PATH or JAVA_HOME"
+            )
         pytest.skip("A Java runtime is required for the Spark execution smoke test.")
+    # Spark defaults to a ``python3`` worker command that is not guaranteed to exist on Windows.
+    # Pinning both sides to the interpreter running pytest makes local and CI execution equivalent
+    # and prevents expression tests from failing for an unrelated process-launch reason.
+    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
+    os.environ.setdefault("PYSPARK_DRIVER_PYTHON", sys.executable)
     session = (
         SparkSession.builder.master("local[1]")
         .appName("spark-parser-test")
@@ -288,15 +300,40 @@ columns:
       audit: true
 """
     )
-    bronze_df = spark.createDataFrame(
-        [
-            (1, "  LOAN   status ", "Illinois"),
-            (2, "mixed CASE", "  new   york "),
-            (3, "account owner", "il"),
-            (4, "district record", "District of Columbia"),
-            (5, "invalid state", "  Mul  "),
-        ],
-        "row_id integer, label string, state string",
+    bronze_df = spark.range(11).select(
+        (F.col("id") + 1).cast("integer").alias("row_id"),
+        F.element_at(
+            F.array(
+                F.lit("  LOAN   status "),
+                F.lit("mixed CASE"),
+                F.lit("account owner"),
+                F.lit("district record"),
+                F.lit("punctuated district"),
+                F.lit("legacy abbreviation"),
+                F.lit("punctuated code"),
+                F.lit("conventional california"),
+                F.lit("conventional north dakota"),
+                F.lit("conventional west virginia"),
+                F.lit("invalid state"),
+            ),
+            (F.col("id") + 1).cast("integer"),
+        ).alias("label"),
+        F.element_at(
+            F.array(
+                F.lit("Illinois"),
+                F.lit("  new   york "),
+                F.lit("il"),
+                F.lit("District of Columbia"),
+                F.lit("Washington, D.C."),
+                F.lit("Ill."),
+                F.lit("WA."),
+                F.lit("Calif."),
+                F.lit("N. Dak."),
+                F.lit("W. Va."),
+                F.lit("  Mul  "),
+            ),
+            (F.col("id") + 1).cast("integer"),
+        ).alias("state"),
     )
 
     parsing = SparkDataFrameParser().parse_dataframe(
@@ -310,14 +347,38 @@ columns:
         "Mixed Case",
         "Account Owner",
         "District Record",
+        "Punctuated District",
+        "Legacy Abbreviation",
+        "Punctuated Code",
+        "Conventional California",
+        "Conventional North Dakota",
+        "Conventional West Virginia",
         "Invalid State",
     ]
-    assert [row.StateCode for row in rows] == ["IL", "NY", "IL", "DC", None]
+    assert [row.StateCode for row in rows] == [
+        "IL",
+        "NY",
+        "IL",
+        "DC",
+        "DC",
+        "IL",
+        "WA",
+        "CA",
+        "ND",
+        "WV",
+        None,
+    ]
     assert [row.RequiredStateCode for row in rows] == [
         "IL",
         "NY",
         "IL",
         "DC",
+        "DC",
+        "IL",
+        "WA",
+        "CA",
+        "ND",
+        "WV",
         "UNKNOWN",
     ]
     assert [row.PreservedStateCode for row in rows] == [
@@ -325,10 +386,16 @@ columns:
         "NY",
         "IL",
         "DC",
+        "DC",
+        "IL",
+        "WA",
+        "CA",
+        "ND",
+        "WV",
         "  Mul  ",
     ]
 
-    invalid_audit = parsing.results_df.collect()[-1].spark_parser_parse_results
+    invalid_audit = parsing.results_df.orderBy("row_id").collect()[-1].spark_parser_parse_results
     assert invalid_audit[0].actions_applied == ["parse_error_to_null"]
     assert invalid_audit[1].actions_applied == ["parse_error_default_applied"]
     assert invalid_audit[2].actions_applied == ["parse_error_preserved"]
@@ -373,16 +440,11 @@ columns:
       audit: true
 """
     )
-    bronze_df = spark.createDataFrame(
-        [
-            (
-                1,
-                '{"state":"Mul"}',
-                '["Illinois","Mul","ny"]',
-                '{"home":"Illinois","other":"Mul"}',
-            )
-        ],
-        "row_id integer, profile string, states string, state_map string",
+    bronze_df = spark.range(1).select(
+        F.lit(1).cast("integer").alias("row_id"),
+        F.lit('{"state":"Mul"}').alias("profile"),
+        F.lit('["Illinois","Mul","ny"]').alias("states"),
+        F.lit('{"home":"Illinois","other":"Mul"}').alias("state_map"),
     )
 
     parsing = SparkDataFrameParser().parse_dataframe(bronze_df, config, key_columns=["row_id"])
@@ -433,16 +495,28 @@ columns:
       on_parse_error: null
 """
     )
-    bronze_df = spark.createDataFrame(
-        [
-            (1, "2026-09-29", "2026-09-29 01:02:03"),
-            (2, "09/30/2026 12:00 AM", "09/30/2026 12:00 AM"),
-            (3, "09/30/2026 12:00:00 AM", "09/30/2026 12:00:00 AM"),
-            # A bare slash date remains invalid. Accepting it would silently guess whether the
-            # source uses month/day or day/month ordering.
-            (4, "09/10/2026", "09/10/2026"),
-        ],
-        "row_id integer, event_date string, event_timestamp string",
+    bronze_df = spark.range(4).select(
+        (F.col("id") + 1).cast("integer").alias("row_id"),
+        F.element_at(
+            F.array(
+                F.lit("2026-09-29"),
+                F.lit("09/30/2026 12:00 AM"),
+                F.lit("09/30/2026 12:00:00 AM"),
+                # A bare slash date remains invalid. Accepting it would silently guess whether the
+                # source uses month/day or day/month ordering.
+                F.lit("09/10/2026"),
+            ),
+            (F.col("id") + 1).cast("integer"),
+        ).alias("event_date"),
+        F.element_at(
+            F.array(
+                F.lit("2026-09-29 01:02:03"),
+                F.lit("09/30/2026 12:00 AM"),
+                F.lit("09/30/2026 12:00:00 AM"),
+                F.lit("09/10/2026"),
+            ),
+            (F.col("id") + 1).cast("integer"),
+        ).alias("event_timestamp"),
     )
 
     rows = (
@@ -463,6 +537,282 @@ columns:
     assert str(rows[1].EventTimestampNtz) == "2026-09-30 00:00:00"
     assert str(rows[2].EventTimestampNtz) == "2026-09-30 00:00:00"
     assert rows[3].EventTimestampNtz is None
+
+
+def test_iso_timestamp_defaults_cover_fractional_and_offset_input(spark: SparkSession) -> None:
+    """Parse modern ISO timestamps while keeping timestamp_ntz strictly timezone-free."""
+    previous_timezone = spark.conf.get("spark.sql.session.timeZone")
+    previous_time_parser_policy = spark.conf.get("spark.sql.legacy.timeParserPolicy")
+    spark.conf.set("spark.sql.session.timeZone", "UTC")
+    spark.conf.set("spark.sql.legacy.timeParserPolicy", "EXCEPTION")
+    try:
+        config = YamlParserConfigCompiler().compile_text(
+            """
+parser_config_id: iso_timestamp_formats
+parser_config_name: ISO Timestamp Formats
+version: "1"
+columns:
+  - source_column_name: value
+    silver_column_name: EventDate
+    expected_data_type: date
+    parser: {type: date, on_parse_error: null}
+  - source_column_name: value
+    silver_column_name: EventTimestamp
+    expected_data_type: timestamp
+    parser: {type: timestamp, on_parse_error: null}
+  - source_column_name: value
+    silver_column_name: EventTimestampNtz
+    expected_data_type: timestamp_ntz
+    parser: {type: timestamp_ntz, on_parse_error: null}
+"""
+        )
+        bronze_df = spark.range(3).select(
+            (F.col("id") + 1).cast("integer").alias("row_id"),
+            F.element_at(
+                F.array(
+                    F.lit("2026-09-30T12:34:56.123456"),
+                    F.lit("2026-09-30T12:34:56Z"),
+                    F.lit("2026-09-30T12:34:56-05:00"),
+                ),
+                (F.col("id") + 1).cast("integer"),
+            ).alias("value"),
+        )
+
+        parsed_df = SparkDataFrameParser().parse_dataframe(
+            bronze_df,
+            config,
+            key_columns=["row_id"],
+        ).parsed_df
+        # Render timestamps inside Spark. Collecting TimestampType as a Python datetime uses the
+        # host process timezone, which is separate from spark.sql.session.timeZone and would make
+        # this assertion test the workstation rather than the parser expression.
+        rows = (
+            parsed_df.orderBy("row_id").select(
+                "EventDate",
+                F.date_format("EventTimestamp", "yyyy-MM-dd HH:mm:ss.SSSSSS").alias(
+                    "EventTimestampText"
+                ),
+                F.date_format("EventTimestampNtz", "yyyy-MM-dd HH:mm:ss.SSSSSS").alias(
+                    "EventTimestampNtzText"
+                ),
+            ).collect()
+        )
+
+        assert rows[0].EventDate.isoformat() == "2026-09-30"
+        # Date intentionally rejects offsets so its calendar day never changes with session zone.
+        assert rows[1].EventDate is None
+        assert rows[2].EventDate is None
+        assert rows[0].EventTimestampText == "2026-09-30 12:34:56.123456"
+        assert rows[1].EventTimestampText == "2026-09-30 12:34:56.000000"
+        assert rows[2].EventTimestampText == "2026-09-30 17:34:56.000000"
+        assert rows[0].EventTimestampNtzText == "2026-09-30 12:34:56.123456"
+        assert rows[1].EventTimestampNtzText is None
+        assert rows[2].EventTimestampNtzText is None
+    finally:
+        spark.conf.set("spark.sql.session.timeZone", previous_timezone)
+        spark.conf.set("spark.sql.legacy.timeParserPolicy", previous_time_parser_policy)
+
+
+def test_top_level_and_nested_double_share_one_numeric_token_contract(
+    spark: SparkSession,
+) -> None:
+    """Ensure a numeric token cannot succeed or fail solely because it appears inside an array."""
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: numeric_parity
+parser_config_name: Numeric Parity
+version: "1"
+columns:
+  - source_column_name: scalar
+    silver_column_name: Scalar
+    expected_data_type: double
+    parser: {type: double, on_parse_error: null}
+  - source_column_name: nested
+    silver_column_name: Nested
+    expected_data_type: array<double>
+    parser:
+      type: array
+      element_parser: double
+      on_element_error: null
+"""
+    )
+    tokens = ["1d", "1f", "0x1p3", "1e5", ".5", "+1.5", "007"]
+    bronze_df = spark.range(len(tokens)).select(
+        F.col("id").cast("integer").alias("row_id"),
+        F.element_at(
+            F.array(*(F.lit(token) for token in tokens)),
+            (F.col("id") + 1).cast("integer"),
+        ).alias("scalar"),
+        F.element_at(
+            F.array(*(F.lit(f'["{token}"]') for token in tokens)),
+            (F.col("id") + 1).cast("integer"),
+        ).alias("nested"),
+    )
+
+    rows = (
+        SparkDataFrameParser()
+        .parse_dataframe(bronze_df, config, key_columns=["row_id"])
+        .parsed_df.orderBy("row_id")
+        .collect()
+    )
+
+    assert [row.Scalar for row in rows] == [None, None, None, 100000.0, 0.5, 1.5, 7.0]
+    assert [row.Nested[0] for row in rows] == [
+        None,
+        None,
+        None,
+        100000.0,
+        0.5,
+        1.5,
+        7.0,
+    ]
+
+
+def test_ansi_and_non_ansi_modes_produce_identical_handled_outputs(
+    spark: SparkSession,
+) -> None:
+    """Keep parser policy—not Spark's global cast mode—in control of representative bad values."""
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: ansi_parity
+parser_config_name: ANSI Parity
+version: "1"
+columns:
+  - source_column_name: integer_value
+    silver_column_name: IntegerValue
+    expected_data_type: integer
+    parser: {type: integer, on_parse_error: null, audit: true}
+  - source_column_name: double_value
+    silver_column_name: DoubleValue
+    expected_data_type: double
+    parser: {type: double, on_parse_error: null, audit: true}
+  - source_column_name: state_value
+    silver_column_name: StateValue
+    expected_data_type: string
+    parser: {type: string, format: state_us, on_parse_error: null, audit: true}
+  - source_column_name: date_value
+    silver_column_name: DateValue
+    expected_data_type: date
+    parser: {type: date, on_parse_error: null, audit: true}
+  - source_column_name: array_value
+    silver_column_name: ArrayValue
+    expected_data_type: array<double>
+    parser:
+      type: array
+      element_parser: double
+      on_element_error: null
+      audit: true
+"""
+    )
+    bronze_df = spark.sql(
+        """
+SELECT
+  '1.9' AS integer_value,
+  '1d' AS double_value,
+  'Ill.' AS state_value,
+  '09/30/2026 12:00 AM' AS date_value,
+  '["1d","2.5"]' AS array_value
+"""
+    )
+    previous_ansi = spark.conf.get("spark.sql.ansi.enabled")
+    snapshots: dict[str, tuple[dict, list[dict]]] = {}
+    try:
+        for ansi_value in ("true", "false"):
+            spark.conf.set("spark.sql.ansi.enabled", ansi_value)
+            parsing = SparkDataFrameParser().parse_dataframe(bronze_df, config)
+            silver = parsing.parsed_df.first().asDict(recursive=True)
+            audit = [
+                item.asDict(recursive=True)
+                for item in parsing.results_df.first().spark_parser_parse_results
+            ]
+            snapshots[ansi_value] = silver, audit
+    finally:
+        spark.conf.set("spark.sql.ansi.enabled", previous_ansi)
+
+    assert snapshots["true"] == snapshots["false"]
+    silver = snapshots["true"][0]
+    assert silver["IntegerValue"] is None
+    assert silver["DoubleValue"] is None
+    assert silver["StateValue"] == "IL"
+    assert silver["DateValue"].isoformat() == "2026-09-30"
+    assert silver["ArrayValue"] == [None, 2.5]
+
+
+def test_nested_defaults_and_zero_invalidation_are_visible_in_audit(
+    spark: SparkSession,
+) -> None:
+    """Record every nested fabricated value so silver data remains explainable downstream."""
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: nested_default_audit
+parser_config_name: Nested Default Audit
+version: "1"
+columns:
+  - source_column_name: values
+    silver_column_name: Values
+    expected_data_type: array<integer>
+    parser:
+      type: array
+      element_parser:
+        type: integer
+        zero_is_valid: false
+        is_nullable: false
+        default_on_null: -1
+      on_element_error: null
+      audit: true
+"""
+    )
+    parsing = SparkDataFrameParser().parse_dataframe(
+        spark.range(1).select(
+            F.lit(1).cast("integer").alias("row_id"),
+            F.lit('[1,"bad",0,null]').alias("values"),
+        ),
+        config,
+        key_columns=["row_id"],
+    )
+
+    assert parsing.parsed_df.first().Values == [1, -1, -1, -1]
+    audit = parsing.results_df.first().spark_parser_parse_results[0]
+    assert audit.nested_error_paths == ["$[1]"]
+    assert audit.nested_default_on_null_paths == ["$[1]", "$[2]", "$[3]"]
+    assert audit.nested_zero_invalidated_paths == ["$[2]"]
+    assert audit.actions_applied == [
+        "nested_parse_errors_resolved",
+        "nested_zero_invalidated",
+        "nested_default_on_null_applied",
+    ]
+    assert audit.changed is True
+
+
+def test_map_error_paths_escape_apostrophes_in_keys(spark: SparkSession) -> None:
+    """Keep a diagnostic map key unambiguous when the source key itself contains an apostrophe."""
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: escaped_map_path
+parser_config_name: Escaped Map Path
+version: "1"
+columns:
+  - source_column_name: values
+    silver_column_name: Values
+    expected_data_type: map<string,integer>
+    parser:
+      type: map
+      value_parser: integer
+      on_value_error: null
+      audit: true
+"""
+    )
+    parsing = SparkDataFrameParser().parse_dataframe(
+        spark.range(1).select(
+            F.lit(1).cast("integer").alias("row_id"),
+            F.lit("{\"a'b\":\"bad\"}").alias("values"),
+        ),
+        config,
+        key_columns=["row_id"],
+    )
+
+    audit = parsing.results_df.first().spark_parser_parse_results[0]
+    assert audit.nested_error_paths == ["$['a\\'b']"]
 
 
 def test_audit_schema_is_stable_with_or_without_audited_columns(spark: SparkSession) -> None:
@@ -507,9 +857,33 @@ columns:
         "options",
         "error",
         "nested_error_paths",
+        "nested_default_on_null_paths",
+        "nested_zero_invalidated_paths",
     ]
     assert audited.results_df.first().spark_parser_parse_results
     assert empty.results_df.first().spark_parser_parse_results == []
+
+
+def test_duplicate_input_names_explain_why_default_keys_are_unavailable(
+    spark: SparkSession,
+) -> None:
+    """Report an ambiguous default row identity without blaming caller-supplied key_columns."""
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: duplicate_default_keys
+parser_config_name: Duplicate Default Keys
+version: "1"
+columns:
+  - source_column_name: value
+    silver_column_name: Value
+    expected_data_type: string
+    parser: string
+"""
+    )
+    df = spark.sql("SELECT 'ok' AS value, 1 AS duplicate, 2 AS duplicate")
+
+    with pytest.raises(SchemaValidationError, match="default all-column row key is ambiguous"):
+        SparkDataFrameParser().parse_dataframe(df, config)
 
 
 def test_fail_default_boolean_trim_and_decimal_runtime_contracts(
