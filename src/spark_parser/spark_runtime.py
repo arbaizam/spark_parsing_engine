@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import warnings as python_warnings
 from collections.abc import Mapping, Sequence
 from typing import Any
 from uuid import uuid4
@@ -11,18 +12,20 @@ from pyspark.sql import Column, DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql import types as T
 
+from spark_parser.address_formats import format_address_us_v1, format_county, format_zip
 from spark_parser.dataframe_parsing import DataFrameParsing
 from spark_parser.enums import NUMERIC_PARSER_TYPES, ParseErrorMode, ParserType, StringFormat
-from spark_parser.exceptions import SchemaValidationError
+from spark_parser.exceptions import SchemaValidationError, SchemaWarning
 from spark_parser.models import ColumnParser, ParserConfig, ParserOptions
 from spark_parser.serializer import ParserConfigSerializer
 from spark_parser.version import __version__
 
 PARSE_RESULT_STRUCT = T.StructType(
     [
-        T.StructField("column_name", T.StringType(), False),
+        T.StructField("source_column_name", T.StringType(), False),
+        T.StructField("silver_column_name", T.StringType(), False),
         T.StructField("parser_type", T.StringType(), False),
-        T.StructField("data_type", T.StringType(), False),
+        T.StructField("expected_data_type", T.StringType(), False),
         T.StructField("original_value", T.StringType(), True),
         T.StructField("parsed_value", T.StringType(), True),
         T.StructField("changed", T.BooleanType(), False),
@@ -57,23 +60,34 @@ class SparkDataFrameParser:
     ) -> DataFrameParsing:
         """Build lazy parsed and row-level audit projections.
 
-        The input contract is deliberately strict: every configured source
-        field must exist exactly once and have Spark ``string`` type. Invalid
-        non-null values raise during the first Spark action unless their parser
-        explicitly selects ``on_parse_error: null`` or ``default``.
+        Existing configured source fields must occur exactly once and have
+        Spark ``string`` type. A missing source emits a recoverable warning and
+        produces a typed null (or ``default_on_null`` for a non-nullable target).
+        Invalid non-null values raise during the first Spark action unless their
+        parser explicitly selects ``on_parse_error: null`` or ``default``.
         """
         if not isinstance(config, ParserConfig):
             raise TypeError("config must be a ParserConfig.")
         if not isinstance(column_prefix, str) or not column_prefix:
             raise ValueError("column_prefix must be a non-empty string.")
-        normalized_keys = self._validate_schema(df, config, key_columns, column_prefix)
+        normalized_keys, schema_warnings = self._validate_schema(
+            df,
+            config,
+            key_columns,
+            column_prefix,
+        )
 
         working = df
         parsed_columns: list[tuple[str, str]] = []
         audit_structs: list[Column] = []
         for column_config in config.columns:
-            working, final_column, audit_struct = self._apply_parser(working, column_config)
-            parsed_columns.append((column_config.column_name, final_column))
+            source_missing = column_config.source_column_name not in df.columns
+            working, final_column, audit_struct = self._apply_parser(
+                working,
+                column_config,
+                source_missing=source_missing,
+            )
+            parsed_columns.append((column_config.silver_column_name, final_column))
             if audit_struct is not None:
                 audit_structs.append(audit_struct)
 
@@ -105,6 +119,7 @@ class SparkDataFrameParser:
             parsed_columns=parsed_columns,
             key_columns=normalized_keys,
             result_columns=(parse_results_name, config_name, engine_version_name),
+            warnings=schema_warnings,
         )
 
     def _validate_schema(
@@ -113,19 +128,25 @@ class SparkDataFrameParser:
         config: ParserConfig,
         key_columns: Sequence[str] | None,
         column_prefix: str,
-    ) -> tuple[str, ...]:
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         duplicates = sorted({name for name in df.columns if df.columns.count(name) > 1})
-        configured_names = {column.column_name for column in config.columns}
+        configured_names = {column.source_column_name for column in config.columns}
         ambiguous = sorted(configured_names & set(duplicates))
         if ambiguous:
             raise SchemaValidationError(f"Configured input columns are ambiguous: {ambiguous}.")
         missing = sorted(configured_names - set(df.columns))
+        schema_warnings: list[str] = []
         if missing:
-            raise SchemaValidationError(f"Configured input columns are missing: {missing}.")
+            message = (
+                "Configured source columns are missing and will produce typed null/default "
+                f"values: {missing}."
+            )
+            schema_warnings.append(message)
+            python_warnings.warn(message, SchemaWarning, stacklevel=3)
         field_types = {field.name: field.dataType for field in df.schema.fields}
         non_string = {
             name: field_types[name].simpleString()
-            for name in sorted(configured_names)
+            for name in sorted(configured_names - set(missing))
             if not isinstance(field_types[name], T.StringType)
         }
         if non_string:
@@ -173,12 +194,14 @@ class SparkDataFrameParser:
             raise SchemaValidationError(
                 f"key_columns conflict with parser result columns: {result_key_conflicts}."
             )
-        return normalized_keys
+        return normalized_keys, tuple(schema_warnings)
 
     def _apply_parser(
         self,
         df: DataFrame,
         column_config: ColumnParser,
+        *,
+        source_missing: bool,
     ) -> tuple[DataFrame, str, Column | None]:
         options = column_config.parser
         token = uuid4().hex
@@ -188,7 +211,11 @@ class SparkDataFrameParser:
         post_zero_name = f"__spark_parser_post_zero_{token}"
         final_name = f"__spark_parser_final_{token}"
 
-        source = _column(column_config.column_name)
+        source = (
+            F.lit(None).cast("string")
+            if source_missing
+            else _column(column_config.source_column_name)
+        )
         whitespace_normalized = (
             F.regexp_replace(source, r"\s+", " ") if options.collapse_whitespace else source
         )
@@ -230,12 +257,12 @@ class SparkDataFrameParser:
         zero_invalidated = F.lit(False)
         if options.parser_type in NUMERIC_PARSER_TYPES and not options.zero_is_valid:
             zero_invalidated = F.coalesce(
-                _column(post_parse_name) == F.lit(0).cast(column_config.data_type),
+                _column(post_parse_name) == F.lit(0).cast(column_config.expected_data_type),
                 F.lit(False),
             )
             post_zero = F.when(
                 zero_invalidated,
-                F.lit(None).cast(column_config.data_type),
+                F.lit(None).cast(column_config.expected_data_type),
             ).otherwise(_column(post_parse_name))
         else:
             post_zero = _column(post_parse_name)
@@ -246,7 +273,10 @@ class SparkDataFrameParser:
             default_on_null_applied = _column(post_zero_name).isNull()
             final_value = F.when(
                 default_on_null_applied,
-                self._typed_literal(options.default_on_null, column_config.data_type),
+                self._typed_literal(
+                    options.default_on_null,
+                    column_config.expected_data_type,
+                ),
             ).otherwise(_column(post_zero_name))
         else:
             final_value = _column(post_zero_name)
@@ -263,6 +293,9 @@ class SparkDataFrameParser:
             parse_failed=parse_failed,
             zero_invalidated=zero_invalidated,
             default_on_null_applied=default_on_null_applied,
+            source_missing=F.lit(source_missing),
+            normalized=_column(normalized_name),
+            candidate=_column(candidate_name),
         )
         return working, final_name, audit_struct
 
@@ -281,10 +314,17 @@ class SparkDataFrameParser:
                 return F.upper(normalized)
             if options.string_format is StringFormat.PASCAL:
                 return F.regexp_replace(F.initcap(F.lower(normalized)), r"\s+", "")
+            if options.string_format is StringFormat.ADDRESS_US_V1:
+                return format_address_us_v1(normalized)
+            if options.string_format is StringFormat.COUNTY:
+                return format_county(normalized)
+            if options.string_format is StringFormat.ZIP:
+                return format_zip(normalized)
             return normalized
         if parser_type in NUMERIC_PARSER_TYPES:
             return F.expr(
-                f"try_cast({_quoted_identifier(normalized_name)} AS {column_config.data_type})"
+                "try_cast("
+                f"{_quoted_identifier(normalized_name)} AS {column_config.expected_data_type})"
             )
         if parser_type is ParserType.BOOLEAN:
             comparable = normalized if options.boolean_case_sensitive else F.lower(normalized)
@@ -325,18 +365,22 @@ class SparkDataFrameParser:
         if options.on_parse_error is ParseErrorMode.DEFAULT:
             return F.when(
                 parse_failed,
-                self._typed_literal(options.default_on_error, column_config.data_type),
+                self._typed_literal(
+                    options.default_on_error,
+                    column_config.expected_data_type,
+                ),
             ).otherwise(candidate)
         message = F.concat(
             F.lit(
-                f"Spark Parser could not parse {column_config.column_name!r} as "
-                f"{column_config.data_type}: "
+                f"Spark Parser could not parse source {column_config.source_column_name!r} "
+                f"into silver column {column_config.silver_column_name!r} as "
+                f"{column_config.expected_data_type}: "
             ),
             source,
         )
         return F.when(
             parse_failed,
-            F.raise_error(message).cast(column_config.data_type),
+            F.raise_error(message).cast(column_config.expected_data_type),
         ).otherwise(candidate)
 
     @staticmethod
@@ -364,44 +408,71 @@ class SparkDataFrameParser:
         parse_failed: Column,
         zero_invalidated: Column,
         default_on_null_applied: Column,
+        source_missing: Column,
+        normalized: Column,
+        candidate: Column,
     ) -> Column:
         options = column_config.parser
         parse_to_null = parse_failed & F.lit(options.on_parse_error is ParseErrorMode.NULL)
         parse_default = parse_failed & F.lit(options.on_parse_error is ParseErrorMode.DEFAULT)
+        is_zip = options.string_format is StringFormat.ZIP
+        compact_zip = F.regexp_replace(normalized, r"\s+", "")
+        zip_digit_count = F.length(F.regexp_replace(compact_zip, r"\D", ""))
+        zip_plus4 = (
+            F.coalesce(candidate.contains("-") & (candidate != compact_zip), F.lit(False))
+            if is_zip
+            else F.lit(False)
+        )
+        zip_padded = (
+            F.coalesce(
+                candidate.isNotNull()
+                & (zip_digit_count < F.when(candidate.contains("-"), F.lit(9)).otherwise(F.lit(5))),
+                F.lit(False),
+            )
+            if is_zip
+            else F.lit(False)
+        )
         actions = F.filter(
             F.array(
+                F.when(source_missing, F.lit("source_column_missing")),
                 F.when(empty_to_null, F.lit("empty_string_to_null")),
                 F.when(marker_replaced, F.lit("null_marker_replaced")),
                 F.when(parse_to_null, F.lit("parse_error_to_null")),
                 F.when(parse_default, F.lit("parse_error_default_applied")),
                 F.when(zero_invalidated, F.lit("zero_invalidated")),
                 F.when(default_on_null_applied, F.lit("default_on_null_applied")),
+                F.when(zip_padded, F.lit("zip_padded")),
+                F.when(zip_plus4, F.lit("zip_plus4_formatted")),
             ),
             lambda item: item.isNotNull(),
         )
         changed = F.coalesce(
             (
-                empty_to_null
+                source_missing
+                | empty_to_null
                 | marker_replaced
                 | parse_to_null
                 | parse_default
                 | zero_invalidated
                 | default_on_null_applied
+                | zip_padded
+                | zip_plus4
             ),
             F.lit(False),
         )
-        error = F.when(
+        error = F.when(source_missing, F.lit("Source column is missing.")).when(
             parse_failed,
-            F.lit(f"Value could not be parsed as {column_config.data_type}."),
+            F.lit(f"Value could not be parsed as {column_config.expected_data_type}."),
         )
         return F.struct(
-            F.lit(column_config.column_name).alias("column_name"),
+            F.lit(column_config.source_column_name).alias("source_column_name"),
+            F.lit(column_config.silver_column_name).alias("silver_column_name"),
             F.lit(options.parser_type.value).alias("parser_type"),
-            F.lit(column_config.data_type).alias("data_type"),
+            F.lit(column_config.expected_data_type).alias("expected_data_type"),
             source.alias("original_value"),
             parsed.cast("string").alias("parsed_value"),
             changed.alias("changed"),
-            F.lit(True).alias("effective"),
+            (~source_missing).alias("effective"),
             actions.alias("actions_applied"),
             self._options_map(options).alias("options"),
             error.alias("error"),
@@ -435,6 +506,7 @@ class SparkDataFrameParser:
                 true_values=list(options.true_values),
                 false_values=list(options.false_values),
                 boolean_case_sensitive=options.boolean_case_sensitive,
+                boolean_values_mode=options.boolean_values_mode.value,
             )
         pairs: list[Column] = []
         for key, value in payload.items():

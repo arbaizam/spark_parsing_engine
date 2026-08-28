@@ -4,10 +4,11 @@
 #   [required]               must be supplied
 #   [optional; default: X]   may be omitted; X is materialized by the compiler
 #   [conditionally required] required only under the condition stated
-# In every column block, column_name, data_type, parser, and mapping-form type
-# are [required]. Every other uncommented parser option is [optional] and is
-# set to its displayed compiler default. Commented default_on_* lines are
-# [conditionally required], have no default, and show an example typed value.
+# In every column block, source_column_name, silver_column_name,
+# expected_data_type, parser, and mapping-form type are [required]. Every other
+# uncommented parser option is [optional] and is set to its displayed compiler
+# default. Commented default_on_* lines are [conditionally required], have no
+# default, and show an example typed value.
 
 parser_config_id: bronze_all_parsers       # [required] Stable configuration ID.
 parser_config_name: All Parser Arguments   # [required] Human-readable name.
@@ -19,11 +20,15 @@ owner_department: Enterprise Data          # [optional; default: null]
 globals:                                   # [optional; default: {}]
   null_markers: []                         # [optional; default: []]
   null_marker_case_sensitive: true         # [optional; default: true]
+  true_values: ["true"]                    # [optional; default: ["true"]]
+  false_values: ["false"]                  # [optional; default: ["false"]]
+  boolean_case_sensitive: false            # [optional; default: false]
 
 columns:                                   # [required] Non-empty ordered list.
   # String parser
-  - column_name: string_value              # [required] Exact bronze/silver name.
-    data_type: string                      # [required] Target Spark datatype.
+  - source_column_name: string_value       # [required] Exact top-level bronze name.
+    silver_column_name: StringValue        # [required] Non-empty, unique silver name.
+    expected_data_type: string             # [required] Exact target Spark datatype.
     parser:                                # [required] Mapping or scalar `string`.
       type: string                         # [required in mapping form]
       collapse_whitespace: true            # [optional; default: true]
@@ -38,11 +43,13 @@ columns:                                   # [required] Non-empty ordered list.
       on_parse_error: fail                 # [optional; default: fail; fail|null|default]
       # default_on_error: UNKNOWN          # [conditionally required for on_parse_error: default]
       audit: false                         # [optional; default: false]
-      format: null                         # [optional; default: null; lower|upper|pascal]
+      # Allowed: null|lower|upper|pascal|address_us_v1|county|zip
+      format: null                         # [optional; default: null]
 
-  # Integer parser (`data_type: int` and `type: int` are accepted aliases).
-  - column_name: integer_value
-    data_type: integer
+  # Integer parser (`expected_data_type: int` and `type: int` are accepted aliases).
+  - source_column_name: integer_value
+    silver_column_name: IntegerValue
+    expected_data_type: integer
     parser:
       type: integer
       collapse_whitespace: true
@@ -59,9 +66,10 @@ columns:                                   # [required] Non-empty ordered list.
       audit: false
       zero_is_valid: true                  # [optional; default: true]
 
-  # Long parser (`data_type: bigint` and `type: bigint` are accepted aliases).
-  - column_name: long_value
-    data_type: long
+  # Long parser (`expected_data_type: bigint` and `type: bigint` are accepted aliases).
+  - source_column_name: long_value
+    silver_column_name: LongValue
+    expected_data_type: long
     parser:
       type: long
       collapse_whitespace: true
@@ -78,9 +86,10 @@ columns:                                   # [required] Non-empty ordered list.
       audit: false
       zero_is_valid: true
 
-  # Decimal parser. Precision and scale are required in data_type; there is no default.
-  - column_name: decimal_value
-    data_type: decimal(18,2)
+  # Decimal parser. Precision and scale are required; there is no datatype default.
+  - source_column_name: decimal_value
+    silver_column_name: DecimalValue
+    expected_data_type: decimal(18,2)
     parser:
       type: decimal
       collapse_whitespace: true
@@ -98,8 +107,9 @@ columns:                                   # [required] Non-empty ordered list.
       zero_is_valid: true
 
   # Double parser
-  - column_name: double_value
-    data_type: double
+  - source_column_name: double_value
+    silver_column_name: DoubleValue
+    expected_data_type: double
     parser:
       type: double
       collapse_whitespace: true
@@ -117,8 +127,9 @@ columns:                                   # [required] Non-empty ordered list.
       zero_is_valid: true
 
   # Boolean parser
-  - column_name: boolean_value
-    data_type: boolean
+  - source_column_name: boolean_value
+    silver_column_name: BooleanValue
+    expected_data_type: boolean
     parser:
       type: boolean
       collapse_whitespace: true
@@ -135,11 +146,13 @@ columns:                                   # [required] Non-empty ordered list.
       audit: false
       true_values: ["true"]                 # [optional; default: ["true"]]
       false_values: ["false"]               # [optional; default: ["false"]]
+      boolean_values_mode: replace           # [optional; default: replace; replace|extend]
       boolean_case_sensitive: false         # [optional; default: false]
 
   # Date parser. Formats cascade in list order; the first successful parse wins.
-  - column_name: date_value
-    data_type: date
+  - source_column_name: date_value
+    silver_column_name: DateValue
+    expected_data_type: date
     parser:
       type: date
       collapse_whitespace: true
@@ -157,8 +170,9 @@ columns:                                   # [required] Non-empty ordered list.
       formats: [yyyy-MM-dd]                 # [optional; default: [yyyy-MM-dd]]
 
   # Timestamp parser. Formats cascade in list order; the first successful parse wins.
-  - column_name: timestamp_value
-    data_type: timestamp
+  - source_column_name: timestamp_value
+    silver_column_name: TimestampValue
+    expected_data_type: timestamp
     parser:
       type: timestamp
       collapse_whitespace: true

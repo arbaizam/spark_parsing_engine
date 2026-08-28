@@ -7,6 +7,7 @@ import pytest
 
 from spark_parser import (
     PARSER_DEFAULTS,
+    BooleanValuesMode,
     CompilationError,
     NullMarkersMode,
     ParseErrorMode,
@@ -23,7 +24,7 @@ def test_repository_example_compiles_with_resolved_options() -> None:
 
     assert config.parser_config_id == "bronze_positions_to_silver"
     assert config.version == "1.0.0"
-    assert [column.data_type for column in config.columns] == [
+    assert [column.expected_data_type for column in config.columns] == [
         "string",
         "integer",
         "decimal(38,32)",
@@ -53,8 +54,9 @@ parser_config_id: simple
 parser_config_name: Simple
 version: "1"
 columns:
-  - column_name: raw_name
-    data_type: string
+  - source_column_name: raw_name
+    silver_column_name: RawName
+    expected_data_type: string
     parser: string
 """
     )
@@ -75,14 +77,15 @@ columns:
 @pytest.mark.parametrize(
     ("fragment", "message"),
     [
-        ("data_type: decimal(18,32)\n    parser: decimal", "Decimal scale"),
-        ("data_type: integer\n    parser: string", "incompatible"),
+        ("expected_data_type: decimal(18,32)\n    parser: decimal", "Decimal scale"),
+        ("expected_data_type: integer\n    parser: string", "incompatible"),
         (
-            "data_type: integer\n    parser:\n      type: integer\n      is_nullable: false",
+            "expected_data_type: integer\n    parser:\n"
+            "      type: integer\n      is_nullable: false",
             "requires default_on_null",
         ),
         (
-            "data_type: integer\n    parser:\n      type: integer\n"
+            "expected_data_type: integer\n    parser:\n      type: integer\n"
             "      is_nullable: false\n      default_on_null: 0\n      zero_is_valid: false",
             "rejects zero",
         ),
@@ -94,7 +97,8 @@ parser_config_id: invalid
 parser_config_name: Invalid
 version: "1"
 columns:
-  - column_name: value
+  - source_column_name: value
+    silver_column_name: Value
     {fragment}
 """
     with pytest.raises(CompilationError, match=message):
@@ -108,8 +112,9 @@ parser_config_id: decimal_default
 parser_config_name: Decimal Default
 version: "1"
 columns:
-  - column_name: amount
-    data_type: decimal(8,2)
+  - source_column_name: amount
+    silver_column_name: Amount
+    expected_data_type: decimal(8,2)
     parser:
       type: decimal
       on_parse_error: default
@@ -129,5 +134,98 @@ parser_config_id: duplicate_again
 parser_config_name: Duplicate
 version: "1"
 columns: []
+"""
+        )
+
+
+def test_silver_names_are_unique_but_sources_may_repeat() -> None:
+    compiler = YamlParserConfigCompiler()
+    config = compiler.compile_text(
+        """
+parser_config_id: repeated_source
+parser_config_name: Repeated Source
+version: "1"
+columns:
+  - source_column_name: raw_value
+    silver_column_name: RawValue
+    expected_data_type: string
+    parser: string
+  - source_column_name: raw_value
+    silver_column_name: RawValueUpper
+    expected_data_type: string
+    parser:
+      type: string
+      format: upper
+"""
+    )
+
+    assert [column.source_column_name for column in config.columns] == [
+        "raw_value",
+        "raw_value",
+    ]
+    with pytest.raises(CompilationError, match="Duplicate silver_column_name"):
+        compiler.compile_text(
+            """
+parser_config_id: duplicate_silver
+parser_config_name: Duplicate Silver
+version: "1"
+columns:
+  - source_column_name: first
+    silver_column_name: Value
+    expected_data_type: string
+    parser: string
+  - source_column_name: second
+    silver_column_name: Value
+    expected_data_type: string
+    parser: string
+"""
+        )
+
+
+def test_boolean_globals_inherit_extend_and_validate_case() -> None:
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: booleans
+parser_config_name: Boolean Vocabularies
+version: "1"
+globals:
+  true_values: ["true", Y]
+  false_values: ["false", N]
+  boolean_case_sensitive: false
+columns:
+  - source_column_name: active
+    silver_column_name: IsActive
+    expected_data_type: boolean
+    parser: boolean
+  - source_column_name: approved
+    silver_column_name: IsApproved
+    expected_data_type: boolean
+    parser:
+      type: boolean
+      true_values: [approved]
+      false_values: [rejected]
+      boolean_values_mode: extend
+"""
+    )
+
+    assert config.columns[0].parser.true_values == ("true", "Y")
+    assert config.columns[1].parser.true_values == ("true", "Y", "approved")
+    assert config.columns[1].parser.boolean_values_mode is BooleanValuesMode.EXTEND
+
+    with pytest.raises(CompilationError, match="overlap"):
+        YamlParserConfigCompiler().compile_text(
+            """
+parser_config_id: overlap
+parser_config_name: Overlap
+version: "1"
+globals:
+  true_values: ["YES"]
+  false_values: ["yes"]
+  boolean_case_sensitive: false
+columns:
+  - source_column_name: value
+    silver_column_name: Value
+    expected_data_type: boolean
+    parser: boolean
 """
         )

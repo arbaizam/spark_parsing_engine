@@ -24,11 +24,13 @@ class DataFrameParsing:
         parsed_columns: Sequence[tuple[str, str]],
         key_columns: Sequence[str],
         result_columns: Sequence[str],
+        warnings: Sequence[str] = (),
     ) -> None:
         self._evaluated = evaluated
         self._parsed_columns = tuple(parsed_columns)
         self._key_columns = tuple(key_columns)
         self._result_columns = tuple(result_columns)
+        self._warnings = tuple(warnings)
 
     @property
     def key_columns(self) -> tuple[str, ...]:
@@ -39,6 +41,11 @@ class DataFrameParsing:
     def result_columns(self) -> tuple[str, ...]:
         """Return parser audit/identity fields in output order."""
         return self._result_columns
+
+    @property
+    def warnings(self) -> tuple[str, ...]:
+        """Return recoverable issues found while binding the input schema."""
+        return self._warnings
 
     @property
     def parsed_df(self) -> DataFrame:

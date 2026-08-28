@@ -2,7 +2,7 @@
 
 from typing import Final
 
-from spark_parser.enums import NullMarkersMode, ParseErrorMode
+from spark_parser.enums import BooleanValuesMode, NullMarkersMode, ParseErrorMode
 
 DEFAULT_NULL_MARKERS: Final[tuple[str, ...]] = ()
 DEFAULT_NULL_MARKER_CASE_SENSITIVE: Final = True
@@ -23,12 +23,16 @@ DEFAULT_TIMESTAMP_FORMATS: Final[tuple[str, ...]] = ("yyyy-MM-dd HH:mm:ss",)
 DEFAULT_BOOLEAN_TRUE_VALUES: Final[tuple[str, ...]] = ("true",)
 DEFAULT_BOOLEAN_FALSE_VALUES: Final[tuple[str, ...]] = ("false",)
 DEFAULT_BOOLEAN_CASE_SENSITIVE: Final = False
+DEFAULT_BOOLEAN_VALUES_MODE: Final = BooleanValuesMode.REPLACE
 
 # JSON-compatible public view used by documentation and authoring clients.
 PARSER_DEFAULTS: Final = {
     "globals": {
         "null_markers": list(DEFAULT_NULL_MARKERS),
         "null_marker_case_sensitive": DEFAULT_NULL_MARKER_CASE_SENSITIVE,
+        "true_values": list(DEFAULT_BOOLEAN_TRUE_VALUES),
+        "false_values": list(DEFAULT_BOOLEAN_FALSE_VALUES),
+        "boolean_case_sensitive": DEFAULT_BOOLEAN_CASE_SENSITIVE,
     },
     "common": {
         "collapse_whitespace": DEFAULT_COLLAPSE_WHITESPACE,
@@ -50,5 +54,6 @@ PARSER_DEFAULTS: Final = {
         "true_values": list(DEFAULT_BOOLEAN_TRUE_VALUES),
         "false_values": list(DEFAULT_BOOLEAN_FALSE_VALUES),
         "boolean_case_sensitive": DEFAULT_BOOLEAN_CASE_SENSITIVE,
+        "boolean_values_mode": DEFAULT_BOOLEAN_VALUES_MODE.value,
     },
 }

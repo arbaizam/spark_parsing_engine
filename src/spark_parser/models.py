@@ -10,6 +10,7 @@ from spark_parser.defaults import (
     DEFAULT_BOOLEAN_CASE_SENSITIVE,
     DEFAULT_BOOLEAN_FALSE_VALUES,
     DEFAULT_BOOLEAN_TRUE_VALUES,
+    DEFAULT_BOOLEAN_VALUES_MODE,
     DEFAULT_COLLAPSE_WHITESPACE,
     DEFAULT_EMPTY_IS_NULL,
     DEFAULT_IS_NULLABLE,
@@ -22,7 +23,13 @@ from spark_parser.defaults import (
     DEFAULT_TRIM_WHITESPACE,
     DEFAULT_ZERO_IS_VALID,
 )
-from spark_parser.enums import NullMarkersMode, ParseErrorMode, ParserType, StringFormat
+from spark_parser.enums import (
+    BooleanValuesMode,
+    NullMarkersMode,
+    ParseErrorMode,
+    ParserType,
+    StringFormat,
+)
 
 
 @dataclass(frozen=True)
@@ -31,6 +38,9 @@ class ParserGlobals:
 
     null_markers: tuple[str, ...] = DEFAULT_NULL_MARKERS
     null_marker_case_sensitive: bool = DEFAULT_NULL_MARKER_CASE_SENSITIVE
+    true_values: tuple[str, ...] = DEFAULT_BOOLEAN_TRUE_VALUES
+    false_values: tuple[str, ...] = DEFAULT_BOOLEAN_FALSE_VALUES
+    boolean_case_sensitive: bool = DEFAULT_BOOLEAN_CASE_SENSITIVE
 
 
 @dataclass(frozen=True)
@@ -56,14 +66,16 @@ class ParserOptions:
     true_values: tuple[str, ...] = DEFAULT_BOOLEAN_TRUE_VALUES
     false_values: tuple[str, ...] = DEFAULT_BOOLEAN_FALSE_VALUES
     boolean_case_sensitive: bool = DEFAULT_BOOLEAN_CASE_SENSITIVE
+    boolean_values_mode: BooleanValuesMode = DEFAULT_BOOLEAN_VALUES_MODE
 
 
 @dataclass(frozen=True)
 class ColumnParser:
     """One source column, target Spark datatype, and parser."""
 
-    column_name: str
-    data_type: str
+    source_column_name: str
+    silver_column_name: str
+    expected_data_type: str
     parser: ParserOptions
 
 

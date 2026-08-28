@@ -11,3 +11,7 @@ class CompilationError(SparkParserError):
 
 class SchemaValidationError(SparkParserError):
     """Raised when an input DataFrame is incompatible with a parser config."""
+
+
+class SchemaWarning(UserWarning):
+    """Warn that parsing can continue with a recoverable schema mismatch."""

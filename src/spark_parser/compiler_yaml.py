@@ -17,6 +17,7 @@ from spark_parser.defaults import (
     DEFAULT_BOOLEAN_CASE_SENSITIVE,
     DEFAULT_BOOLEAN_FALSE_VALUES,
     DEFAULT_BOOLEAN_TRUE_VALUES,
+    DEFAULT_BOOLEAN_VALUES_MODE,
     DEFAULT_COLLAPSE_WHITESPACE,
     DEFAULT_DATE_FORMATS,
     DEFAULT_EMPTY_IS_NULL,
@@ -32,6 +33,7 @@ from spark_parser.defaults import (
 )
 from spark_parser.enums import (
     NUMERIC_PARSER_TYPES,
+    BooleanValuesMode,
     NullMarkersMode,
     ParseErrorMode,
     ParserType,
@@ -137,7 +139,38 @@ class YamlParserConfigCompiler:
         payload = self._ensure_mapping(raw_globals, "globals")
         self._reject_keys(
             payload,
-            {"null_markers", "null_marker_case_sensitive"},
+            {
+                "null_markers",
+                "null_marker_case_sensitive",
+                "true_values",
+                "false_values",
+                "boolean_case_sensitive",
+            },
+            "globals",
+        )
+        true_values = self._string_sequence(
+            payload.get("true_values", list(DEFAULT_BOOLEAN_TRUE_VALUES)),
+            "globals.true_values",
+            allow_empty_values=False,
+        )
+        false_values = self._string_sequence(
+            payload.get("false_values", list(DEFAULT_BOOLEAN_FALSE_VALUES)),
+            "globals.false_values",
+            allow_empty_values=False,
+        )
+        if not true_values or not false_values:
+            raise CompilationError(
+                "globals.true_values and globals.false_values must be non-empty."
+            )
+        boolean_case_sensitive = self._bool(
+            payload,
+            "boolean_case_sensitive",
+            DEFAULT_BOOLEAN_CASE_SENSITIVE,
+        )
+        self._validate_boolean_overlap(
+            true_values,
+            false_values,
+            boolean_case_sensitive,
             "globals",
         )
         return ParserGlobals(
@@ -150,6 +183,9 @@ class YamlParserConfigCompiler:
                 "null_marker_case_sensitive",
                 DEFAULT_NULL_MARKER_CASE_SENSITIVE,
             ),
+            true_values=true_values,
+            false_values=false_values,
+            boolean_case_sensitive=boolean_case_sensitive,
         )
 
     def _compile_column(
@@ -161,23 +197,30 @@ class YamlParserConfigCompiler:
         payload = self._ensure_mapping(raw_column, f"column at index {index}")
         self._reject_keys(
             payload,
-            {"column_name", "data_type", "parser"},
+            {
+                "source_column_name",
+                "silver_column_name",
+                "expected_data_type",
+                "parser",
+            },
             f"Column at index {index}",
         )
-        column_name = self._required_string(payload, "column_name")
-        data_type, expected_parser_type = self._normalize_data_type(
-            self._required_string(payload, "data_type")
+        source_column_name = self._required_string(payload, "source_column_name")
+        silver_column_name = self._required_string(payload, "silver_column_name")
+        expected_data_type, expected_parser_type = self._normalize_data_type(
+            self._required_string(payload, "expected_data_type")
         )
         options = self._compile_parser(
             payload.get("parser", _MISSING),
             globals_config,
             expected_parser_type,
-            data_type,
-            column_name,
+            expected_data_type,
+            silver_column_name,
         )
         return ColumnParser(
-            column_name=column_name,
-            data_type=data_type,
+            source_column_name=source_column_name,
+            silver_column_name=silver_column_name,
+            expected_data_type=expected_data_type,
             parser=options,
         )
 
@@ -186,21 +229,22 @@ class YamlParserConfigCompiler:
         raw_parser: Any,
         globals_config: ParserGlobals,
         expected_type: ParserType,
-        data_type: str,
-        column_name: str,
+        expected_data_type: str,
+        silver_column_name: str,
     ) -> ParserOptions:
         if raw_parser is _MISSING:
-            raise CompilationError(f"parser is required for column {column_name!r}.")
+            raise CompilationError(f"parser is required for column {silver_column_name!r}.")
         if isinstance(raw_parser, str):
             payload: Mapping[str, Any] = {"type": raw_parser}
         else:
-            payload = self._ensure_mapping(raw_parser, f"parser for {column_name!r}")
+            payload = self._ensure_mapping(raw_parser, f"parser for {silver_column_name!r}")
 
         parser_type = self._parser_type(self._required_string(payload, "type"))
         if parser_type is not expected_type:
             raise CompilationError(
-                f"Parser {parser_type.value!r} is incompatible with data_type {data_type!r} "
-                f"for column {column_name!r}; expected {expected_type.value!r}."
+                f"Parser {parser_type.value!r} is incompatible with expected_data_type "
+                f"{expected_data_type!r} for silver column {silver_column_name!r}; "
+                f"expected {expected_type.value!r}."
             )
         allowed_keys = {
             "type",
@@ -224,8 +268,15 @@ class YamlParserConfigCompiler:
         if parser_type in {ParserType.DATE, ParserType.TIMESTAMP}:
             allowed_keys.add("formats")
         if parser_type is ParserType.BOOLEAN:
-            allowed_keys.update({"true_values", "false_values", "boolean_case_sensitive"})
-        self._reject_keys(payload, allowed_keys, f"Parser for {column_name!r}")
+            allowed_keys.update(
+                {
+                    "true_values",
+                    "false_values",
+                    "boolean_case_sensitive",
+                    "boolean_values_mode",
+                }
+            )
+        self._reject_keys(payload, allowed_keys, f"Parser for {silver_column_name!r}")
 
         markers_mode = self._enum_value(
             NullMarkersMode,
@@ -234,7 +285,7 @@ class YamlParserConfigCompiler:
         )
         if "null_markers_mode" in payload and "null_markers" not in payload:
             raise CompilationError(
-                f"null_markers_mode for {column_name!r} requires column null_markers."
+                f"null_markers_mode for {silver_column_name!r} requires column null_markers."
             )
         if "null_markers" in payload:
             column_markers = self._string_sequence(payload["null_markers"], "null_markers")
@@ -252,21 +303,27 @@ class YamlParserConfigCompiler:
         )
         if replace_null_markers and not markers:
             raise CompilationError(
-                f"replace_null_markers is true for {column_name!r}, but no null markers exist."
+                f"replace_null_markers is true for {silver_column_name!r}, "
+                "but no null markers exist."
             )
 
         is_nullable = self._bool(payload, "is_nullable", DEFAULT_IS_NULLABLE)
         raw_default_on_null = payload.get("default_on_null", _MISSING)
         if not is_nullable and raw_default_on_null is _MISSING:
             raise CompilationError(
-                f"Column {column_name!r} is not nullable and requires default_on_null."
+                f"Column {silver_column_name!r} is not nullable and requires default_on_null."
             )
         if is_nullable and raw_default_on_null is not _MISSING:
             raise CompilationError(
-                f"default_on_null for {column_name!r} requires is_nullable: false."
+                f"default_on_null for {silver_column_name!r} requires is_nullable: false."
             )
         default_on_null = (
-            self._typed_default(raw_default_on_null, parser_type, data_type, "default_on_null")
+            self._typed_default(
+                raw_default_on_null,
+                parser_type,
+                expected_data_type,
+                "default_on_null",
+            )
             if raw_default_on_null is not _MISSING
             else None
         )
@@ -284,14 +341,19 @@ class YamlParserConfigCompiler:
         raw_default_on_error = payload.get("default_on_error", _MISSING)
         if on_parse_error is ParseErrorMode.DEFAULT and raw_default_on_error is _MISSING:
             raise CompilationError(
-                f"on_parse_error: default for {column_name!r} requires default_on_error."
+                f"on_parse_error: default for {silver_column_name!r} requires default_on_error."
             )
         if on_parse_error is not ParseErrorMode.DEFAULT and raw_default_on_error is not _MISSING:
             raise CompilationError(
-                f"default_on_error for {column_name!r} requires on_parse_error: default."
+                f"default_on_error for {silver_column_name!r} requires on_parse_error: default."
             )
         default_on_error = (
-            self._typed_default(raw_default_on_error, parser_type, data_type, "default_on_error")
+            self._typed_default(
+                raw_default_on_error,
+                parser_type,
+                expected_data_type,
+                "default_on_error",
+            )
             if raw_default_on_error is not _MISSING
             else None
         )
@@ -304,15 +366,21 @@ class YamlParserConfigCompiler:
             and Decimal(str(default_on_null)) == 0
         ):
             raise CompilationError(
-                f"Column {column_name!r} rejects zero but uses zero as default_on_null."
+                f"Column {silver_column_name!r} rejects zero but uses zero as default_on_null."
             )
 
         string_format = self._compile_string_format(payload, parser_type)
         formats = self._compile_formats(payload, parser_type)
-        true_values, false_values, boolean_case_sensitive = self._compile_boolean_values(
+        (
+            true_values,
+            false_values,
+            boolean_case_sensitive,
+            boolean_values_mode,
+        ) = self._compile_boolean_values(
             payload,
             parser_type,
-            column_name,
+            silver_column_name,
+            globals_config,
         )
         return ParserOptions(
             parser_type=parser_type,
@@ -346,6 +414,7 @@ class YamlParserConfigCompiler:
             true_values=true_values,
             false_values=false_values,
             boolean_case_sensitive=boolean_case_sensitive,
+            boolean_values_mode=boolean_values_mode,
         )
 
     def _compile_string_format(
@@ -382,41 +451,82 @@ class YamlParserConfigCompiler:
         self,
         payload: Mapping[str, Any],
         parser_type: ParserType,
-        column_name: str,
-    ) -> tuple[tuple[str, ...], tuple[str, ...], bool]:
+        silver_column_name: str,
+        globals_config: ParserGlobals,
+    ) -> tuple[tuple[str, ...], tuple[str, ...], bool, BooleanValuesMode]:
         if parser_type is not ParserType.BOOLEAN:
             return (
                 DEFAULT_BOOLEAN_TRUE_VALUES,
                 DEFAULT_BOOLEAN_FALSE_VALUES,
                 DEFAULT_BOOLEAN_CASE_SENSITIVE,
+                DEFAULT_BOOLEAN_VALUES_MODE,
             )
-        true_values = self._string_sequence(
-            payload.get("true_values", list(DEFAULT_BOOLEAN_TRUE_VALUES)),
-            "true_values",
-            allow_empty_values=False,
+        mode = self._enum_value(
+            BooleanValuesMode,
+            payload.get("boolean_values_mode", DEFAULT_BOOLEAN_VALUES_MODE.value),
+            "boolean_values_mode",
         )
-        false_values = self._string_sequence(
-            payload.get("false_values", list(DEFAULT_BOOLEAN_FALSE_VALUES)),
-            "false_values",
-            allow_empty_values=False,
+        supplied_true = "true_values" in payload
+        supplied_false = "false_values" in payload
+        if "boolean_values_mode" in payload and not (supplied_true or supplied_false):
+            raise CompilationError(
+                f"boolean_values_mode for {silver_column_name!r} requires true_values "
+                "or false_values."
+            )
+        column_true = (
+            self._string_sequence(
+                payload["true_values"],
+                "true_values",
+                allow_empty_values=False,
+            )
+            if supplied_true
+            else ()
         )
+        column_false = (
+            self._string_sequence(
+                payload["false_values"],
+                "false_values",
+                allow_empty_values=False,
+            )
+            if supplied_false
+            else ()
+        )
+        if mode is BooleanValuesMode.EXTEND:
+            true_values = self._deduplicate((*globals_config.true_values, *column_true))
+            false_values = self._deduplicate((*globals_config.false_values, *column_false))
+        else:
+            true_values = column_true if supplied_true else globals_config.true_values
+            false_values = column_false if supplied_false else globals_config.false_values
         if not true_values or not false_values:
             raise CompilationError("true_values and false_values must be non-empty.")
         case_sensitive = self._bool(
             payload,
             "boolean_case_sensitive",
-            DEFAULT_BOOLEAN_CASE_SENSITIVE,
+            globals_config.boolean_case_sensitive,
         )
+        self._validate_boolean_overlap(
+            true_values,
+            false_values,
+            case_sensitive,
+            f"silver column {silver_column_name!r}",
+        )
+        return true_values, false_values, case_sensitive, mode
+
+    @staticmethod
+    def _validate_boolean_overlap(
+        true_values: tuple[str, ...],
+        false_values: tuple[str, ...],
+        case_sensitive: bool,
+        label: str,
+    ) -> None:
         normalize = (lambda item: item) if case_sensitive else (lambda item: item.casefold())
         overlap = {normalize(item) for item in true_values} & {
             normalize(item) for item in false_values
         }
         if overlap:
             raise CompilationError(
-                f"Boolean true_values and false_values overlap for {column_name!r}: "
-                f"{sorted(overlap)}."
+                f"Boolean true_values and false_values overlap for {label}: {sorted(overlap)}."
             )
-        return true_values, false_values, case_sensitive
 
     def _normalize_data_type(self, value: str) -> tuple[str, ParserType]:
         normalized = _TYPE_ALIASES.get(value.strip().lower(), value.strip().lower())
@@ -434,7 +544,7 @@ class YamlParserConfigCompiler:
         except ValueError as exc:
             valid = ", ".join(member.value for member in ParserType)
             raise CompilationError(
-                f"Unsupported data_type {value!r}. Valid types: {valid}, decimal(p,s)."
+                f"Unsupported expected_data_type {value!r}. Valid types: {valid}, decimal(p,s)."
             ) from exc
         return parser_type.value, parser_type
 
@@ -541,10 +651,10 @@ class YamlParserConfigCompiler:
         raise CompilationError(f"{label} for timestamp must be a datetime or ISO string.")
 
     def _validate_unique_columns(self, columns: tuple[ColumnParser, ...]) -> None:
-        column_names = [column.column_name for column in columns]
+        column_names = [column.silver_column_name for column in columns]
         duplicate_columns = sorted({name for name in column_names if column_names.count(name) > 1})
         if duplicate_columns:
-            raise CompilationError(f"Duplicate column_name values: {duplicate_columns}.")
+            raise CompilationError(f"Duplicate silver_column_name values: {duplicate_columns}.")
 
     def _string_sequence(
         self,
@@ -589,7 +699,7 @@ class YamlParserConfigCompiler:
     @staticmethod
     def _required_string(payload: Mapping[str, Any], key: str) -> str:
         value = payload.get(key)
-        if not isinstance(value, str) or not value:
+        if not isinstance(value, str) or not value.strip():
             raise CompilationError(f"{key} must be a non-empty string.")
         return value
 

@@ -23,6 +23,13 @@ class NullMarkersMode(str, Enum):
     EXTEND = "extend"
 
 
+class BooleanValuesMode(str, Enum):
+    """How column Boolean tokens relate to global tokens."""
+
+    REPLACE = "replace"
+    EXTEND = "extend"
+
+
 class ParseErrorMode(str, Enum):
     """Allowed outcomes for a non-null value that cannot be parsed."""
 
@@ -32,11 +39,14 @@ class ParseErrorMode(str, Enum):
 
 
 class StringFormat(str, Enum):
-    """Optional string case formatting."""
+    """Optional deterministic string formatting profile."""
 
     LOWER = "lower"
     UPPER = "upper"
     PASCAL = "pascal"
+    ADDRESS_US_V1 = "address_us_v1"
+    COUNTY = "county"
+    ZIP = "zip"
 
 
 NUMERIC_PARSER_TYPES = frozenset(

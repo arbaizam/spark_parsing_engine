@@ -30,13 +30,11 @@ class ParserConfigSerializer:
                 "null_markers_mode": options.null_markers_mode.value,
                 "null_marker_case_sensitive": options.null_marker_case_sensitive,
                 "is_nullable": options.is_nullable,
+                "default_on_null": self._json_value(options.default_on_null),
                 "on_parse_error": options.on_parse_error.value,
+                "default_on_error": self._json_value(options.default_on_error),
                 "audit": options.audit,
             }
-            if options.default_on_null is not None:
-                parser_payload["default_on_null"] = self._json_value(options.default_on_null)
-            if options.default_on_error is not None:
-                parser_payload["default_on_error"] = self._json_value(options.default_on_error)
             if options.parser_type in NUMERIC_PARSER_TYPES:
                 parser_payload["zero_is_valid"] = options.zero_is_valid
             if options.parser_type is ParserType.STRING:
@@ -50,11 +48,13 @@ class ParserConfigSerializer:
                     true_values=list(options.true_values),
                     false_values=list(options.false_values),
                     boolean_case_sensitive=options.boolean_case_sensitive,
+                    boolean_values_mode=options.boolean_values_mode.value,
                 )
             columns.append(
                 {
-                    "column_name": column.column_name,
-                    "data_type": column.data_type,
+                    "source_column_name": column.source_column_name,
+                    "silver_column_name": column.silver_column_name,
+                    "expected_data_type": column.expected_data_type,
                     "parser": parser_payload,
                 }
             )
@@ -68,6 +68,9 @@ class ParserConfigSerializer:
             "globals": {
                 "null_markers": list(config.globals.null_markers),
                 "null_marker_case_sensitive": config.globals.null_marker_case_sensitive,
+                "true_values": list(config.globals.true_values),
+                "false_values": list(config.globals.false_values),
+                "boolean_case_sensitive": config.globals.boolean_case_sensitive,
             },
             "columns": columns,
         }

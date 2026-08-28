@@ -8,10 +8,14 @@ description: Example load-specific parsing configuration.
 globals:
   null_markers: [NA, "Null"]
   null_marker_case_sensitive: true
+  true_values: ["true", Y, "yes"]
+  false_values: ["false", N, "no"]
+  boolean_case_sensitive: false
 
 columns:
-  - column_name: column_name1
-    data_type: string
+  - source_column_name: column_name1
+    silver_column_name: ColumnName1
+    expected_data_type: string
     parser:
       type: string
       format: pascal
@@ -20,8 +24,9 @@ columns:
       null_markers_mode: extend
       audit: true
 
-  - column_name: column_name2
-    data_type: integer
+  - source_column_name: column_name2
+    silver_column_name: ColumnName2
+    expected_data_type: integer
     parser:
       type: integer
       replace_null_markers: true
@@ -30,16 +35,18 @@ columns:
       zero_is_valid: false
       audit: true
 
-  - column_name: column_name3
-    data_type: decimal(38,32)
+  - source_column_name: column_name3
+    silver_column_name: ColumnName3
+    expected_data_type: decimal(38,32)
     parser:
       type: decimal
       replace_null_markers: true
       zero_is_valid: true
       audit: true
 
-  - column_name: column_name5
-    data_type: date
+  - source_column_name: column_name5
+    silver_column_name: ColumnName5
+    expected_data_type: date
     parser:
       type: date
       formats: [yyyy-MM-dd]
