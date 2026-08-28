@@ -16,6 +16,7 @@ from spark_parser.enums import (
     BinaryEncoding,
     ChildErrorMode,
     ComplexInputFormat,
+    ParseErrorMode,
     ParserType,
     StringFormat,
 )
@@ -106,7 +107,10 @@ _COMMON_ARGUMENTS = [
         "on_parse_error",
         default=PARSER_DEFAULTS["common"]["on_parse_error"],
         allowed_values=["fail", "null", "default"],
-        description="Raise at Spark action time, return null, or assign default_on_error.",
+        description=(
+            "Raise at Spark action time, return null, or assign default_on_error. String parsers "
+            "also allow preserve to return the exact raw token."
+        ),
     ),
     _argument(
         "default_on_error",
@@ -219,8 +223,8 @@ _SPECIFIC_ARGUMENTS: dict[ParserType, list[dict[str, Any]]] = {
             default=PARSER_DEFAULTS["array"]["on_element_error"],
             allowed_values=[member.value for member in ChildErrorMode],
             description=(
-                "Fail the row, route null through element final-null handling, or drop an "
-                "element that cannot parse."
+                "Fail the row, route null through element final-null handling, drop an invalid "
+                "element, or preserve its raw token when the element type is string."
             ),
         ),
         _argument(
@@ -264,8 +268,8 @@ _SPECIFIC_ARGUMENTS: dict[ParserType, list[dict[str, Any]]] = {
             default=PARSER_DEFAULTS["map"]["on_value_error"],
             allowed_values=[member.value for member in ChildErrorMode],
             description=(
-                "Fail the row, route null through value final-null handling, or drop an entry "
-                "whose value cannot parse."
+                "Fail the row, route null through value final-null handling, drop an invalid "
+                "entry, or preserve its raw value when the map value type is string."
             ),
         ),
         _argument(
@@ -301,6 +305,7 @@ _SUMMARIES = {
 _SPECIFIC_BEHAVIORS = {
     ParserType.STRING: [
         "format null preserves the whitespace-normalized value.",
+        "on_parse_error preserve returns the exact pre-normalization source token when formatting fails.",
         "title lowercases and capitalizes words while retaining normalized spaces.",
         "pascal removes spaces after init-capitalization; it is intended for identifiers, not names.",
         "address_us_v1 uses contextual USPS-style suffixes/directionals and smart-cases Mc, apostrophe, and hyphen names.",
@@ -405,6 +410,13 @@ def parser_description(parser_type: ParserType) -> dict[str, Any]:
     # Deep copy is part of the public contract: consumers may annotate or reorder metadata locally
     # without changing later calls.
     arguments = deepcopy([*_COMMON_ARGUMENTS, *_SPECIFIC_ARGUMENTS[parser_type]])
+    if parser_type is ParserType.STRING:
+        # Preserve is intentionally absent from non-string parser metadata because the compiler
+        # rejects raw fallback whenever the silver position cannot legally contain a string.
+        for argument in arguments:
+            if argument["name"] == "on_parse_error":
+                argument["allowed_values"] = [member.value for member in ParseErrorMode]
+                break
     if is_complex:
         for argument in arguments:
             if argument["name"] == "collapse_whitespace":

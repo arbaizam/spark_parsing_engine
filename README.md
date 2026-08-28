@@ -259,7 +259,7 @@ These options apply to every parser type.
 | `null_marker_case_sensitive` | No | Inherited global | Override null-token case sensitivity for this column. |
 | `is_nullable` | No | `true` | Allow the final silver value to remain null. |
 | `default_on_null` | Conditional | No default | Required only when `is_nullable: false`; must be non-null and exactly valid for the expected type. |
-| `on_parse_error` | No | `fail` | `fail`, `null`, or `default`; see the error-mode section below. |
+| `on_parse_error` | No | `fail` | `fail`, `null`, `default`, or string-only `preserve`; see the error-mode section below. |
 | `default_on_error` | Conditional | No default | Required only with `on_parse_error: default`; must fit the expected type. |
 | `audit` | No | `false` | Add a row-level audit struct for this column. |
 
@@ -338,7 +338,19 @@ two-letter abbreviation.
 
 US territories are intentionally excluded because a field documented as a state should not
 silently broaden its domain. An unknown non-null value is a parse error and follows
-`on_parse_error`; use `null` or an explicit default when invalid state text should not fail the row.
+`on_parse_error`. Use `preserve` when a nonstandard source value such as `Mul` must remain unchanged,
+or use `null`/an explicit default when invalid state text should not survive into silver data.
+
+```yaml
+- source_column_name: state
+  silver_column_name: StateCode
+  expected_data_type: string
+  parser:
+    type: string
+    format: state_us
+    on_parse_error: preserve
+    audit: true
+```
 
 #### ZIP profile
 
@@ -447,7 +459,7 @@ Array is a recursive first-class parser. The element datatype comes from `array<
 | `input_format` | No | `json` | `json` for any recursive element type, or `delimited` for scalar elements. |
 | `delimiter` | Conditional | — | Required for `delimited`; treated literally rather than as a regular expression. |
 | `element_parser` | Yes | — | Recursive parser matching `T`. Element-level `audit` and `on_parse_error` are owned by the array and therefore rejected here. |
-| `on_element_error` | No | `fail` | `fail` raises lazily, `null` sends a typed null through the element parser's final-null handling, and `drop` removes the bad element. |
+| `on_element_error` | No | `fail` | `fail` raises lazily, `null` sends a typed null through final-null handling, `drop` removes the bad element, and string-only `preserve` retains its raw token. |
 | `drop_null_elements` | No | `false` | Remove both source nulls and values resolved to null. |
 | `distinct` | No | `false` | Remove duplicate parsed elements, preserving first occurrence order; rejected when the element tree contains a non-comparable map. |
 
@@ -525,7 +537,7 @@ Spark strings; values may use any recursively supported datatype.
 | --- | ---: | --- | --- |
 | `input_format` | No | `json` | JSON object input; no inference. |
 | `value_parser` | Yes | — | Recursive parser matching `T`. Its immediate error outcome is owned by `on_value_error`. |
-| `on_value_error` | No | `fail` | `fail` raises, `null` sends a typed null through the value parser's final-null handling, and `drop` removes the entry. |
+| `on_value_error` | No | `fail` | `fail` raises, `null` sends a typed null through final-null handling, `drop` removes the entry, and string-only `preserve` retains its raw value. |
 | `drop_null_values` | No | `false` | Remove entries whose source or resolved value is null. |
 
 ```yaml
@@ -591,17 +603,21 @@ Every column follows this order:
 - `fail` (default) constructs a lazy failure and raises when an action materializes that silver
   expression;
 - `null` returns a typed null; or
-- `default` assigns the required `default_on_error`.
+- `default` assigns the required `default_on_error`; or
+- `preserve` returns the exact, pre-normalization bronze token and is accepted only for a string
+  parser.
 
 For a complex column, those modes govern malformed top-level JSON. Struct fields recursively use
 their own `on_parse_error`. Arrays use `on_element_error`, and maps use `on_value_error`, each with
-`fail`, `null`, or `drop`. Handled child errors are retained in the top-level audit's
-`nested_error_paths` even when the invalid element or entry is dropped. A nested `fail` error
-identifies the top-level source column, silver column, expected child type, and exact nested path.
+`fail`, `null`, `drop`, or string-child-only `preserve`. Handled child errors are retained in the
+top-level audit's `nested_error_paths` even when the invalid element or entry is preserved or
+dropped. A nested `fail` error identifies the top-level source column, silver column, expected child
+type, and exact nested path.
 
-There is no `ignore` mode because an invalid bronze string cannot be retained in a typed silver
-column. Quarantine routing is not included yet; it needs an explicit `quarantine_df` contract
-rather than overloading null/error handling.
+Preservation is deliberately unavailable for integer, decimal, Boolean, date, timestamp, binary,
+and complex outputs: an invalid raw string cannot inhabit those typed silver positions. Quarantine
+routing remains separate because it needs an explicit `quarantine_df` contract rather than
+overloading typed error handling.
 
 ## Compile-time and DataFrame validation
 
@@ -680,7 +696,7 @@ Each parse-result struct contains:
 | `nested_error_paths` | Array of strings | JSONPath-like locations of handled child failures; empty for none. |
 
 Possible actions are `source_column_missing`, `empty_string_to_null`, `null_marker_replaced`,
-`parse_error_to_null`, `parse_error_default_applied`, `zero_invalidated`,
+`parse_error_to_null`, `parse_error_default_applied`, `parse_error_preserved`, `zero_invalidated`,
 `default_on_null_applied`, `json_null_to_null`, `nested_parse_errors_resolved`, `zip_padded`, and
 `zip_plus4_formatted`.
 

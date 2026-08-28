@@ -4,6 +4,8 @@
 
 - Add `title` string formatting for display text that retains normalized spaces.
 - Add `state_us` string formatting for the 50 US states and Washington, DC.
+- Add string-only `preserve` error handling so invalid formatted values can retain their exact raw
+  tokens at top level and inside string struct fields, arrays, and map values.
 - Accept US month-first 12-hour timestamp strings such as `09/30/2026 12:00 AM` and
   `09/30/2026 12:00:00 AM` as built-in fallbacks for date, timestamp, and
   timestamp-without-timezone parsing after their ISO formats.

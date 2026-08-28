@@ -29,6 +29,7 @@ def test_databricks_uat_config_compiles_with_required_coverage() -> None:
     assert options["Quantity"].on_parse_error is ParseErrorMode.DEFAULT
     assert options["LoanStatus"].string_format is StringFormat.TITLE
     assert options["StateCode"].string_format is StringFormat.STATE_US
+    assert options["StateCode"].on_parse_error is ParseErrorMode.PRESERVE
     assert options["EventDate"].formats == (
         "yyyy-MM-dd",
         "MM/dd/yyyy hh:mm a",

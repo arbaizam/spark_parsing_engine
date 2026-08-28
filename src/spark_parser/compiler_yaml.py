@@ -384,6 +384,14 @@ class YamlParserConfigCompiler:
             raw_on_parse_error,
             "on_parse_error",
         )
+        # Preserving an invalid token is type-safe only when the target itself is a string. A raw
+        # value such as ``Mul`` cannot inhabit an integer, date, binary, or complex Spark column.
+        # Enforcing this during compilation keeps runtime expressions schema-stable and gives the
+        # author a useful error before any Spark job starts.
+        if on_parse_error is ParseErrorMode.PRESERVE and parser_type is not ParserType.STRING:
+            raise CompilationError(
+                f"on_parse_error: preserve for {silver_column_name!r} requires a string parser."
+            )
         raw_default_on_error = payload.get("default_on_error", _MISSING)
         if on_parse_error is ParseErrorMode.DEFAULT and raw_default_on_error is _MISSING:
             raise CompilationError(
@@ -769,7 +777,12 @@ class YamlParserConfigCompiler:
                     data_type=data_type.element_type,
                     parser=element_options,
                 ),
-                on_element_error=self._child_error_mode(payload, "on_element_error"),
+                on_element_error=self._child_error_mode(
+                    payload,
+                    "on_element_error",
+                    data_type.element_type,
+                    label,
+                ),
                 drop_null_elements=self._bool(
                     payload,
                     "drop_null_elements",
@@ -868,7 +881,12 @@ class YamlParserConfigCompiler:
                 data_type=data_type.value_type,
                 parser=value_options,
             ),
-            on_value_error=self._child_error_mode(payload, "on_value_error"),
+            on_value_error=self._child_error_mode(
+                payload,
+                "on_value_error",
+                data_type.value_type,
+                label,
+            ),
             drop_null_values=self._bool(
                 payload,
                 "drop_null_values",
@@ -881,12 +899,24 @@ class YamlParserConfigCompiler:
         self,
         payload: Mapping[str, Any],
         key: str,
+        child_data_type: SparkDataType,
+        label: str,
     ) -> ChildErrorMode:
-        """Resolve an array/map child-error policy, including YAML's unquoted null token."""
+        """Resolve and type-check an array/map child-error policy.
+
+        YAML's unquoted null token names the null policy. Preserve is narrower: it may retain a bad
+        child only when that exact position is typed as string, so the raw token remains valid in
+        the final array or map schema.
+        """
         raw_value = payload.get(key, DEFAULT_CHILD_ERROR_MODE.value)
         if key in payload and raw_value is None:
             raw_value = ChildErrorMode.NULL.value
-        return self._enum_value(ChildErrorMode, raw_value, key)
+        mode = self._enum_value(ChildErrorMode, raw_value, key)
+        if mode is ChildErrorMode.PRESERVE and child_data_type.parser_type is not ParserType.STRING:
+            raise CompilationError(
+                f"{key}: preserve for {label!r} requires a string child parser."
+            )
+        return mode
 
     def _compile_boolean_values(
         self,

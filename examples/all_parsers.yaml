@@ -40,7 +40,7 @@ columns:                                   # [required] Non-empty ordered list.
       null_marker_case_sensitive: true     # [optional; default: inherited global]
       is_nullable: true                    # [optional; default: true]
       # default_on_null: UNKNOWN           # [conditionally required if is_nullable: false]
-      on_parse_error: fail                 # [optional; default: fail; fail|null|default]
+      on_parse_error: fail                 # [optional; default: fail; fail|null|default|preserve]
       # default_on_error: UNKNOWN          # [conditionally required for on_parse_error: default]
       audit: false                         # [optional; default: false]
       # Allowed: null|lower|upper|title|pascal|address_us_v1|county|state_us|zip
@@ -316,7 +316,7 @@ columns:                                   # [required] Non-empty ordered list.
       element_parser:                       # [required] Recursive parser matching array<T>.
         type: string
         format: null
-      on_element_error: fail                # [optional; default: fail; fail|null|drop]
+      on_element_error: fail                # [optional; fail|null|drop|preserve for string child]
       drop_null_elements: false             # [optional; default: false]
       distinct: false                       # [optional; default: false]
 
@@ -372,5 +372,5 @@ columns:                                   # [required] Non-empty ordered list.
       audit: false
       input_format: json                    # [optional; default: json; JSON only]
       value_parser: decimal                 # [required] Recursive parser matching map value type.
-      on_value_error: fail                  # [optional; default: fail; fail|null|drop]
+      on_value_error: fail                  # [optional; fail|null|drop|preserve for string child]
       drop_null_values: false               # [optional; default: false]

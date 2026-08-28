@@ -278,6 +278,14 @@ columns:
       on_parse_error: default
       default_on_error: UNKNOWN
       audit: true
+  - source_column_name: state
+    silver_column_name: PreservedStateCode
+    expected_data_type: string
+    parser:
+      type: string
+      format: state_us
+      on_parse_error: preserve
+      audit: true
 """
     )
     bronze_df = spark.createDataFrame(
@@ -286,7 +294,7 @@ columns:
             (2, "mixed CASE", "  new   york "),
             (3, "account owner", "il"),
             (4, "district record", "District of Columbia"),
-            (5, "invalid state", "Puerto Rico"),
+            (5, "invalid state", "  Mul  "),
         ],
         "row_id integer, label string, state string",
     )
@@ -312,10 +320,88 @@ columns:
         "DC",
         "UNKNOWN",
     ]
+    assert [row.PreservedStateCode for row in rows] == [
+        "IL",
+        "NY",
+        "IL",
+        "DC",
+        "  Mul  ",
+    ]
 
     invalid_audit = parsing.results_df.collect()[-1].spark_parser_parse_results
     assert invalid_audit[0].actions_applied == ["parse_error_to_null"]
     assert invalid_audit[1].actions_applied == ["parse_error_default_applied"]
+    assert invalid_audit[2].actions_applied == ["parse_error_preserved"]
+    assert invalid_audit[2].original_value == "  Mul  "
+    assert invalid_audit[2].parsed_value == "  Mul  "
+    assert invalid_audit[2].changed is True
+
+
+def test_nested_string_error_policies_can_preserve_raw_tokens(spark: SparkSession) -> None:
+    """Preserve invalid formatted strings inside structs, arrays, and maps without losing paths."""
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: nested_preserve
+parser_config_name: Nested Preserve
+version: "1"
+columns:
+  - source_column_name: profile
+    silver_column_name: Profile
+    expected_data_type: struct<state:string>
+    parser:
+      type: struct
+      fields:
+        - source_field_name: state
+          silver_field_name: state
+          parser: {type: string, format: state_us, on_parse_error: preserve}
+      audit: true
+  - source_column_name: states
+    silver_column_name: States
+    expected_data_type: array<string>
+    parser:
+      type: array
+      element_parser: {type: string, format: state_us}
+      on_element_error: preserve
+      audit: true
+  - source_column_name: state_map
+    silver_column_name: StateMap
+    expected_data_type: map<string,string>
+    parser:
+      type: map
+      value_parser: {type: string, format: state_us}
+      on_value_error: preserve
+      audit: true
+"""
+    )
+    bronze_df = spark.createDataFrame(
+        [
+            (
+                1,
+                '{"state":"Mul"}',
+                '["Illinois","Mul","ny"]',
+                '{"home":"Illinois","other":"Mul"}',
+            )
+        ],
+        "row_id integer, profile string, states string, state_map string",
+    )
+
+    parsing = SparkDataFrameParser().parse_dataframe(bronze_df, config, key_columns=["row_id"])
+    row = parsing.parsed_df.first()
+    assert row.Profile.state == "Mul"
+    assert row.States == ["IL", "Mul", "NY"]
+    assert row.StateMap == {"home": "IL", "other": "Mul"}
+
+    audits = {
+        item.silver_column_name: item
+        for item in parsing.results_df.first().spark_parser_parse_results
+    }
+    assert audits["Profile"].nested_error_paths == ["$.state"]
+    assert audits["States"].nested_error_paths == ["$[1]"]
+    assert audits["StateMap"].nested_error_paths == ["$['other']"]
+    assert all(
+        item.actions_applied == ["nested_parse_errors_resolved"]
+        for item in audits.values()
+    )
 
 
 def test_datetime_defaults_accept_iso_and_us_12_hour_timestamp(spark: SparkSession) -> None:

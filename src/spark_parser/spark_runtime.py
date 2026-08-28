@@ -164,8 +164,8 @@ class SparkDataFrameParser:
         Existing configured source fields must occur exactly once and have
         Spark ``string`` type. A missing source emits a recoverable warning and
         produces a typed null (or ``default_on_null`` for a non-nullable target).
-        Invalid non-null values raise during the first Spark action unless their
-        parser explicitly selects ``on_parse_error: null`` or ``default``.
+        Invalid non-null values raise during the first Spark action unless their parser explicitly
+        selects ``on_parse_error: null``, ``default``, or string-only ``preserve``.
         """
         if not isinstance(config, ParserConfig):
             raise TypeError("config must be a ParserConfig.")
@@ -211,7 +211,8 @@ class SparkDataFrameParser:
             candidate_columns[plan.candidate_name] = candidate
             candidate_columns[plan.nested_errors_name] = nested_errors
         working = working.withColumns(candidate_columns)
-        # Stage 3: apply fail/null/default behavior only to non-null input that failed conversion.
+        # Stage 3: apply the configured fail/null/default/string-preserve behavior only to non-null
+        # input that failed conversion.
         working = working.withColumns(
             {
                 plan.post_parse_name: self._resolve_parse_error(
@@ -938,7 +939,7 @@ class SparkDataFrameParser:
         """Apply the immediate owner of a nested parse failure.
 
         Array/map child modes override the child's direct parse mode. Struct fields have no parent
-        child mode, so their own fail/null/default policy applies.
+        child mode, so their own fail/null/default/string-preserve policy applies.
         """
         message = F.concat(
             F.lit(
@@ -959,6 +960,10 @@ class SparkDataFrameParser:
             # DROP is performed by the parent container after this method returns. At this level both
             # NULL and DROP retain a typed-null candidate and the failure flag.
             return candidate
+        if child_error_mode is ChildErrorMode.PRESERVE:
+            # Compilation permits this branch only for a string child. Use the original decoded
+            # token—not the normalized value—so "preserve" means an exact raw-value fallback.
+            return F.when(failed, source.cast("string")).otherwise(candidate)
         if nested.parser.on_parse_error is ParseErrorMode.NULL:
             return candidate
         if nested.parser.on_parse_error is ParseErrorMode.DEFAULT:
@@ -970,6 +975,10 @@ class SparkDataFrameParser:
                     nested.parser,
                 ),
             ).otherwise(candidate)
+        if nested.parser.on_parse_error is ParseErrorMode.PRESERVE:
+            # Struct fields own their direct parse policy. As above, the compiler guarantees this
+            # field's target type is string before the raw token can enter the typed struct.
+            return F.when(failed, source.cast("string")).otherwise(candidate)
         return F.when(
             failed,
             F.raise_error(message).cast(nested.expected_data_type),
@@ -1034,7 +1043,7 @@ class SparkDataFrameParser:
         source: Column,
         column_config: ColumnParser,
     ) -> Column:
-        """Resolve a top-level parse failure according to fail/null/default policy."""
+        """Resolve a top-level parse failure according to its compiled error policy."""
         options = column_config.parser
         if options.on_parse_error is ParseErrorMode.NULL:
             return candidate
@@ -1047,6 +1056,11 @@ class SparkDataFrameParser:
                     options,
                 ),
             ).otherwise(candidate)
+        if options.on_parse_error is ParseErrorMode.PRESERVE:
+            # Present configured source columns are schema-validated as strings, and compilation
+            # restricts this mode to string parsers. Returning source therefore preserves the exact
+            # bronze token (including its original whitespace) without weakening the silver schema.
+            return F.when(parse_failed, source.cast("string")).otherwise(candidate)
         message = F.concat(
             F.lit(
                 f"Spark Parser could not parse source {column_config.source_column_name!r} "
@@ -1161,6 +1175,9 @@ class SparkDataFrameParser:
         options = column_config.parser
         parse_to_null = parse_failed & F.lit(options.on_parse_error is ParseErrorMode.NULL)
         parse_default = parse_failed & F.lit(options.on_parse_error is ParseErrorMode.DEFAULT)
+        parse_preserved = parse_failed & F.lit(
+            options.on_parse_error is ParseErrorMode.PRESERVE
+        )
         # A top-level malformed container is already represented by parse_failed. Only separately
         # label nested resolution when one or more child paths failed inside a valid container.
         nested_failed = (F.size(nested_error_paths) > 0) & ~parse_failed
@@ -1191,6 +1208,7 @@ class SparkDataFrameParser:
                 F.when(json_null, F.lit("json_null_to_null")),
                 F.when(parse_to_null, F.lit("parse_error_to_null")),
                 F.when(parse_default, F.lit("parse_error_default_applied")),
+                F.when(parse_preserved, F.lit("parse_error_preserved")),
                 F.when(nested_failed, F.lit("nested_parse_errors_resolved")),
                 F.when(zero_invalidated, F.lit("zero_invalidated")),
                 F.when(default_on_null_applied, F.lit("default_on_null_applied")),
@@ -1207,6 +1225,7 @@ class SparkDataFrameParser:
                 | json_null
                 | parse_to_null
                 | parse_default
+                | parse_preserved
                 | nested_failed
                 | zero_invalidated
                 | default_on_null_applied

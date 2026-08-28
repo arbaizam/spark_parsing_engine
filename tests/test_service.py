@@ -27,6 +27,18 @@ def test_parser_metadata_is_discoverable_and_detached() -> None:
         for argument in description["arguments"]
         if argument["name"] == "format"
     )
+    string_error_modes = next(
+        argument["allowed_values"]
+        for argument in description["arguments"]
+        if argument["name"] == "on_parse_error"
+    )
+    integer_error_modes = next(
+        argument["allowed_values"]
+        for argument in parser.integer.describe()["arguments"]
+        if argument["name"] == "on_parse_error"
+    )
+    assert "preserve" in string_error_modes
+    assert "preserve" not in integer_error_modes
     description["arguments"].clear()
     assert parser.string.describe()["arguments"]
     assert parser.config.describe()["column_arguments"][1]["name"] == "silver_column_name"
@@ -40,6 +52,12 @@ def test_parser_metadata_is_discoverable_and_detached() -> None:
     assert parser.array.describe()["parser_type"] == "array"
     assert parser.struct.describe()["parser_type"] == "struct"
     assert parser.map.describe()["parser_type"] == "map"
+    array_child_modes = next(
+        argument["allowed_values"]
+        for argument in parser.array.describe()["arguments"]
+        if argument["name"] == "on_element_error"
+    )
+    assert "preserve" in array_child_modes
     array_collapse = next(
         argument
         for argument in parser.array.describe()["arguments"]

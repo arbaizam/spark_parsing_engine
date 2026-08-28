@@ -48,6 +48,7 @@ class ParseErrorMode(str, Enum):
     FAIL = "fail"
     NULL = "null"
     DEFAULT = "default"
+    PRESERVE = "preserve"
 
 
 class StringFormat(str, Enum):
@@ -76,6 +77,7 @@ class ChildErrorMode(str, Enum):
     FAIL = "fail"
     NULL = "null"
     DROP = "drop"
+    PRESERVE = "preserve"
 
 
 class BinaryEncoding(str, Enum):

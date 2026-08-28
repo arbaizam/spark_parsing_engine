@@ -41,7 +41,7 @@ columns:
     parser:
       type: string
       format: state_us
-      on_parse_error: null
+      on_parse_error: preserve
       audit: true
 
   - source_column_name: amount

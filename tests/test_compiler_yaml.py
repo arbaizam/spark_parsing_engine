@@ -8,6 +8,7 @@ import pytest
 from spark_parser import (
     PARSER_DEFAULTS,
     BooleanValuesMode,
+    ChildErrorMode,
     CompilationError,
     NullMarkersMode,
     ParseErrorMode,
@@ -259,6 +260,57 @@ columns:
     assert config.columns[0].parser.string_format is expected_format
 
 
+def test_preserve_error_modes_compile_only_for_string_positions() -> None:
+    """Allow exact raw fallback wherever—and only where—the typed result position is string."""
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: preserve_strings
+parser_config_name: Preserve Strings
+version: "1"
+columns:
+  - source_column_name: state
+    silver_column_name: State
+    expected_data_type: string
+    parser: {type: string, format: state_us, on_parse_error: preserve}
+  - source_column_name: profile
+    silver_column_name: Profile
+    expected_data_type: struct<state:string>
+    parser:
+      type: struct
+      fields:
+        - source_field_name: state
+          silver_field_name: state
+          parser: {type: string, format: state_us, on_parse_error: preserve}
+  - source_column_name: states
+    silver_column_name: States
+    expected_data_type: array<string>
+    parser:
+      type: array
+      element_parser: {type: string, format: state_us}
+      on_element_error: preserve
+  - source_column_name: state_map
+    silver_column_name: StateMap
+    expected_data_type: map<string,string>
+    parser:
+      type: map
+      value_parser: {type: string, format: state_us}
+      on_value_error: preserve
+"""
+    )
+
+    assert config.columns[0].parser.on_parse_error is ParseErrorMode.PRESERVE
+    assert (
+        config.columns[1].parser.field_parsers[0].parser.on_parse_error
+        is ParseErrorMode.PRESERVE
+    )
+    assert config.columns[2].parser.on_element_error is ChildErrorMode.PRESERVE
+    assert config.columns[3].parser.on_value_error is ChildErrorMode.PRESERVE
+    canonical = ParserConfigSerializer().to_mapping(config)
+    assert canonical["columns"][0]["parser"]["on_parse_error"] == "preserve"
+    assert canonical["columns"][2]["parser"]["on_element_error"] == "preserve"
+    assert canonical["columns"][3]["parser"]["on_value_error"] == "preserve"
+
+
 @pytest.mark.parametrize(
     ("fragment", "message"),
     [
@@ -279,6 +331,23 @@ columns:
             "      on_parse_error: default\n      default_on_error: 0\n"
             "      zero_is_valid: false",
             "default_on_error",
+        ),
+        (
+            "expected_data_type: integer\n    parser:\n"
+            "      type: integer\n      on_parse_error: preserve",
+            "requires a string parser",
+        ),
+        (
+            "expected_data_type: array<integer>\n    parser:\n"
+            "      type: array\n      element_parser: integer\n"
+            "      on_element_error: preserve",
+            "requires a string child parser",
+        ),
+        (
+            "expected_data_type: map<string,decimal(8,2)>\n    parser:\n"
+            "      type: map\n      value_parser: decimal\n"
+            "      on_value_error: preserve",
+            "requires a string child parser",
         ),
     ],
 )
