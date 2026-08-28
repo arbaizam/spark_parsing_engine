@@ -25,3 +25,5 @@ def test_hash_and_mapping_are_deterministic() -> None:
     assert payload["columns"][0]["parser"]["collapse_whitespace"] is True
     assert payload["columns"][0]["parser"]["empty_is_null"] is True
     assert payload["columns"][0]["parser"]["audit"] is True
+    recompiled = compiler.compile_mapping(payload)
+    assert serializer.canonical_json(recompiled) == serializer.canonical_json(first)

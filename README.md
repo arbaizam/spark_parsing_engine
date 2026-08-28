@@ -115,7 +115,8 @@ config_help = parser.config.describe()
 `review_yaml()` accepts YAML text, a `Path`/path string, or a mapping. A valid report contains:
 
 - config identity, owner metadata, version, and canonical content hash;
-- all compiler validation checks;
+- an evidence-based summary of the compiler validations the config passed, with `N/A` for
+  checks that do not apply;
 - source-to-silver mappings and exact expected datatypes;
 - every fully resolved parser option, including inherited globals and defaults;
 - effective error, nullability, formatting, and audit behavior;
@@ -159,6 +160,8 @@ without raising the compilation exception.
 
 Duplicate YAML keys, non-string metadata keys, and unknown arguments are rejected. Quote
 numeric-looking versions such as `"1"` so YAML retains them as strings.
+YAML merge keys (`<<`) are intentionally unsupported because they can hide inherited keys from
+a strict review; ordinary anchors and aliases remain usable.
 
 ### Global arguments
 
@@ -168,7 +171,7 @@ numeric-looking versions such as `"1"` so YAML retains them as strings.
 | `null_marker_case_sensitive` | No | `true` | Default exact-case null-token matching. |
 | `true_values` | No | `["true"]` | Non-empty global tokens mapped to Boolean true. |
 | `false_values` | No | `["false"]` | Non-empty global tokens mapped to Boolean false. |
-| `boolean_case_sensitive` | No | `false` | Default exact-case Boolean-token matching. |
+| `boolean_case_sensitive` | No | `false` | Whether global Boolean-token matching requires exact case. The default is case-insensitive. |
 
 When null-marker case sensitivity is `true`, `NA` matches only `NA`. When it is `false`, the
 normalized input and all markers are lowercased before comparison, so `NA`, `na`, and `Na`
@@ -217,7 +220,7 @@ These options apply to every parser type.
 | --- | ---: | --- | --- |
 | `type` | Mapping form only | — | Parser implementation matching `expected_data_type`. |
 | `collapse_whitespace` | No | `true` | Replace every run of whitespace—left, right, and internal—with one ordinary space. |
-| `trim_whitespace` | No | `true` | Remove leading and trailing whitespace after collapse. Both defaults together normalize all surrounding and internal whitespace. |
+| `trim_whitespace` | No | `true` | Remove leading and trailing spaces, tabs, line breaks, and non-breaking spaces after collapse. Both defaults together normalize all surrounding and internal whitespace. |
 | `empty_is_null` | No | `true` | Convert an empty normalized string to null. |
 | `replace_null_markers` | No | `false` | Convert effective null-token matches to null. |
 | `null_markers` | No | Inherited globals | Column null-token list. Supplying it does not by itself enable replacement. |
@@ -258,7 +261,12 @@ String supports the common arguments plus `format`.
 - canonicalizes common secondary-unit designators (`apartment` → `Apt`, `suite` → `Ste`);
 - smart-cases `Mc` names (`mccormick` → `McCormick`), common exceptions such as `McLean`,
   apostrophe names, and hyphenated names; and
-- uppercases alphanumeric unit tokens such as `4b` → `4B`.
+- uppercases alphanumeric values following a unit designator and hash-prefixed unit values
+  (`Apt 4b` → `Apt 4B`, `Apt #4b` → `Apt #4B`).
+
+Only the final suffix-like token is treated as the street suffix, preventing names such as
+`123 Center Street` from becoming `123 Ctr St`. Empty punctuation-only tokens are removed before
+joining, so commas do not create doubled spaces. Null input remains null.
 
 Suffix output is deliberately punctuation-free (`St`, not `St.`), consistent with canonical
 USPS abbreviations. The formatter follows [USPS Publication 28 suffix conventions](https://pe.usps.com/text/pub28/28apc_002.htm),
@@ -295,14 +303,17 @@ Their aliases are `int` and `bigint`. Overflow and non-integral input are parse 
 
 Both add `zero_is_valid` (default `true`). When false, a successfully parsed zero becomes null
 before final null handling. If the column is non-nullable, `default_on_null` is then assigned.
-A zero `default_on_null` is rejected when zero is invalid.
+A zero `default_on_null` or `default_on_error` is rejected when zero is invalid because it could
+not survive the subsequent zero-invalidating step.
 
 ### Decimal
 
 `expected_data_type` must be `decimal(p,s)`, with precision from 1 through 38 and scale from zero
 through precision. Typed defaults are checked against that exact precision and scale. Decimal is
 recommended over double for currency and other exact base-10 values. It supports
-`zero_is_valid` with the same behavior as integer and long.
+`zero_is_valid` with the same behavior as integer and long. Spark rounds source values with excess
+scale to the configured scale (for example, `1.239` parsed as `decimal(18,2)` becomes `1.24`);
+typed defaults with excess scale remain compile-time errors.
 
 ### Double
 
@@ -363,7 +374,8 @@ Every column follows this order:
 
 `on_parse_error` controls step 5:
 
-- `fail` (default) constructs a lazy failure and raises during the first Spark action;
+- `fail` (default) constructs a lazy failure and raises when an action materializes that silver
+  expression;
 - `null` returns a typed null; or
 - `default` assigns the required `default_on_error`.
 
@@ -393,7 +405,9 @@ DataFrame binding validates lazily available schema metadata:
 - keys must be existing, unique, unambiguous non-empty names; and
 - `column_prefix` must be non-empty.
 
-Actual bad values in `on_parse_error: fail` columns raise only when Spark evaluates an action.
+Actual bad values in `on_parse_error: fail` columns raise only when Spark materializes the failing
+silver expression. Projection-pruning actions such as `parsed_df.count()` may not evaluate that
+expression; a full silver write, `collect()`, or a select that consumes the column will.
 
 ## DataFrameParsing outputs
 
@@ -422,7 +436,7 @@ Actual bad values in `on_parse_error: fail` columns raise only when Spark evalua
 
 | Column | Definition |
 | --- | --- |
-| `spark_parser_parse_results` | Array containing one struct per column with `audit: true`; empty when no columns are audited. |
+| `spark_parser_parse_results` | Canonically typed array containing one struct per column with `audit: true`; an empty array with the identical nested schema when no columns are audited. |
 | `spark_parser_config` | Struct with configuration `id`, `version`, and resolved canonical `content_hash`. |
 | `spark_parser_engine_version` | Installed package version. |
 
@@ -450,12 +464,28 @@ Routine whitespace normalization, normal successful datatype conversion, and rou
 county formatting are visible through `original_value`, `parsed_value`, and the resolved `options`
 map but do not add noisy action entries or independently set `changed`.
 
+## Migrating from 0.2.x
+
+Version 0.3.0 introduced an intentional breaking column-metadata change:
+
+| 0.2.x | 0.3.x |
+| --- | --- |
+| `column_name` | `source_column_name` plus `silver_column_name` |
+| `data_type` | `expected_data_type` |
+
+The compiler detects legacy column keys and returns a targeted migration error. Canonical payload
+shape also changed, so `content_hash` values from 0.2.x are not comparable with 0.3.x hashes even
+when the logical parsing behavior is equivalent. Fully resolved mappings from
+`ParserConfigSerializer.to_mapping()` are recompilable in 0.3.1. See [CHANGELOG.md](CHANGELOG.md)
+for release details.
+
 ## Defaults and exhaustive YAML reference
 
 Defaults have one code-owned source of truth in
-[`spark_parser.defaults`](src/spark_parser/defaults.py). `PARSER_DEFAULTS` and
-`parser.defaults()` expose detached JSON-compatible views. The compiler resolves inherited and
-omitted values, and serialization/UAT reports materialize those effective values.
+[`spark_parser.defaults`](src/spark_parser/defaults.py). `PARSER_DEFAULTS` is the live public
+module mapping and should be treated as read-only; `parser.defaults()` returns a detached copy for
+safe manipulation. The compiler resolves inherited and omitted values, and serialization/UAT
+reports materialize those effective values.
 
 [`examples/all_parsers.yaml`](examples/all_parsers.yaml) shows every top-level, global, column,
 common, and parser-specific argument with required/default indicators. The repository

@@ -132,14 +132,25 @@ def _clean_token(token: Column) -> Column:
     return F.regexp_replace(F.lower(token), r"[,.]", "")
 
 
-def _smart_token(token: Column, *, address: bool) -> Column:
+def _smart_token(
+    token: Column,
+    *,
+    address: bool,
+    suffix_allowed: Column | None = None,
+    previous_token: Column | None = None,
+) -> Column:
     cleaned = _clean_token(token)
     exception = _map_lookup(_NAME_EXCEPTIONS, cleaned)
-    mapped = (
-        _map_lookup({**_DIRECTIONALS, **_SUFFIXES, **_UNIT_DESIGNATORS}, cleaned)
-        if address
-        else F.lit(None).cast("string")
-    )
+    mapped = F.lit(None).cast("string")
+    if address:
+        suffix = _map_lookup(_SUFFIXES, cleaned)
+        if suffix_allowed is not None:
+            suffix = F.when(suffix_allowed, suffix)
+        mapped = F.coalesce(
+            _map_lookup(_DIRECTIONALS, cleaned),
+            suffix,
+            _map_lookup(_UNIT_DESIGNATORS, cleaned),
+        )
     mc_cased = F.concat(
         F.lit("Mc"),
         F.upper(F.substring(cleaned, 3, 1)),
@@ -155,12 +166,17 @@ def _smart_token(token: Column, *, address: bool) -> Column:
             ),
         ),
     )
+    previous_cleaned = _clean_token(previous_token) if previous_token is not None else F.lit("")
+    alphanumeric = cleaned.rlike(r"^(?=.*\d)(?=.*[a-z])[a-z0-9-]+$")
+    unit_value = previous_cleaned.isin(*_UNIT_DESIGNATORS)
+    hash_unit_value = cleaned.rlike(r"^#(?=.*\d)(?=.*[a-z])[a-z0-9-]+$")
     return (
         F.when(exception.isNotNull(), exception)
         .when(mapped.isNotNull(), mapped)
         .when(cleaned.rlike(r"^mc[a-z].*"), mc_cased)
         .when(cleaned.rlike(r"^(?:\d+(?:st|nd|rd|th))$"), cleaned)
-        .when(cleaned.rlike(r"^(?=.*\d)(?=.*[a-z])[a-z0-9-]+$"), F.upper(cleaned))
+        .when(hash_unit_value, F.concat(F.lit("#"), F.upper(F.substring(cleaned, 2, 1000))))
+        .when(unit_value & alphanumeric, F.upper(cleaned))
         .otherwise(title_cased)
     )
 
@@ -168,7 +184,20 @@ def _smart_token(token: Column, *, address: bool) -> Column:
 def format_address_us_v1(value: Column) -> Column:
     """Return a USPS-oriented display representation without a Python UDF."""
     tokens = F.split(value, " ")
-    return F.concat_ws(" ", F.transform(tokens, lambda token: _smart_token(token, address=True)))
+    suffix_flags = F.transform(tokens, lambda token: _clean_token(token).isin(*_SUFFIXES))
+    last_suffix_index = F.size(tokens) - F.array_position(F.reverse(suffix_flags), True)
+    padded_tokens = F.concat(F.array(F.lit("")), tokens)
+    formatted_tokens = F.transform(
+        tokens,
+        lambda token, index: _smart_token(
+            token,
+            address=True,
+            suffix_allowed=index == last_suffix_index,
+            previous_token=F.element_at(padded_tokens, index + F.lit(1)),
+        ),
+    )
+    formatted = F.concat_ws(" ", F.filter(formatted_tokens, lambda token: token != ""))
+    return F.when(value.isNotNull(), formatted).otherwise(F.lit(None).cast("string"))
 
 
 def format_county(value: Column) -> Column:
@@ -176,11 +205,14 @@ def format_county(value: Column) -> Column:
     core = F.trim(F.regexp_replace(value, r"(?i)(?:^|\s+)county\.?$", ""))
     formatted = F.concat_ws(
         " ",
-        F.transform(F.split(core, " "), lambda token: _smart_token(token, address=False)),
+        F.filter(
+            F.transform(F.split(core, " "), lambda token: _smart_token(token, address=False)),
+            lambda token: token != "",
+        ),
     )
-    return F.when(core != "", F.concat(formatted, F.lit(" County"))).otherwise(
-        F.lit(None).cast("string")
-    )
+    return F.when(
+        (core != "") & (formatted != ""), F.concat(formatted, F.lit(" County"))
+    ).otherwise(F.lit(None).cast("string"))
 
 
 def format_zip(value: Column) -> Column:

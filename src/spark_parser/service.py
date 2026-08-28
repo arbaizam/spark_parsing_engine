@@ -76,11 +76,11 @@ class UatReviewReport:
         ]
         if self.errors:
             lines.extend(["## Errors", ""])
-            lines.extend(f"- {error}" for error in self.errors)
+            lines.extend(f"- {_markdown_text(error)}" for error in self.errors)
             lines.append("")
         if self.warnings:
             lines.extend(["## Warnings", ""])
-            lines.extend(f"- {warning}" for warning in self.warnings)
+            lines.extend(f"- {_markdown_text(warning)}" for warning in self.warnings)
             lines.append("")
         if not self.is_valid:
             return "\n".join(lines)
@@ -300,7 +300,9 @@ class SparkParserService:
         resolved_columns = resolved["columns"]
         for column, resolved_column in zip(config.columns, resolved_columns, strict=True):
             description = parser_description(column.parser.parser_type)
-            parser_options = resolved_column["parser"]
+            resolved_column["parser"].setdefault("default_on_null", None)
+            resolved_column["parser"].setdefault("default_on_error", None)
+            parser_options = deepcopy(resolved_column["parser"])
             format_or_formats = parser_options.get("format", parser_options.get("formats"))
             column_reviews.append(
                 {
@@ -312,37 +314,65 @@ class SparkParserService:
                     "is_nullable": column.parser.is_nullable,
                     "on_parse_error": column.parser.on_parse_error.value,
                     "audit": column.parser.audit,
-                    "resolved_parser_options": deepcopy(parser_options),
+                    "resolved_parser_options": parser_options,
                     "key_behaviors": description["key_behaviors"],
                     "gotchas": description["gotchas"],
                 }
             )
 
+        boolean_columns = [
+            column for column in config.columns if column.parser.parser_type is ParserType.BOOLEAN
+        ]
+        nonnullable_count = sum(not column.parser.is_nullable for column in config.columns)
+        error_default_count = sum(
+            column.parser.on_parse_error.value == "default" for column in config.columns
+        )
+        type_pairs = sorted(
+            {
+                f"{column.parser.parser_type.value} -> {column.expected_data_type}"
+                for column in config.columns
+            }
+        )
         checks = (
             {
                 "check": "YAML and metadata contract",
                 "status": "PASS",
-                "detail": "No duplicate/unknown keys; all required metadata is valid.",
+                "detail": (
+                    f"Compiled config {config.parser_config_id!r} version {config.version!r} "
+                    f"with {len(config.columns)} column mapping(s); no duplicate or unknown "
+                    "keys were accepted."
+                ),
             },
             {
                 "check": "Silver column uniqueness",
                 "status": "PASS",
-                "detail": "Every silver_column_name is non-empty and unique.",
+                "detail": (
+                    f"Validated {len(config.columns)} non-empty silver name(s); all are unique."
+                ),
             },
             {
                 "check": "Parser/type compatibility",
                 "status": "PASS",
-                "detail": "Every parser.type agrees with expected_data_type.",
+                "detail": "Validated effective parser/type pairs: " + ", ".join(type_pairs) + ".",
             },
             {
                 "check": "Defaults and conditional options",
                 "status": "PASS",
-                "detail": "Defaults are resolved and conditional defaults/error modes are valid.",
+                "detail": (
+                    "Resolved every optional value; "
+                    f"{nonnullable_count} non-nullable mapping(s) have typed null defaults and "
+                    f"{error_default_count} mapping(s) use typed parse-error defaults."
+                ),
             },
             {
                 "check": "Boolean vocabularies",
-                "status": "PASS",
-                "detail": "Effective true/false token sets are non-empty and non-overlapping.",
+                "status": "PASS" if boolean_columns else "N/A",
+                "detail": (
+                    f"Validated non-empty, non-overlapping effective token sets for "
+                    f"{len(boolean_columns)} Boolean mapping(s)."
+                    if boolean_columns
+                    else "No Boolean mappings are configured."
+                ),
             },
         )
         summary = {
@@ -385,6 +415,8 @@ class SparkParserService:
                     return self.compile_path(path), str(path)
             except OSError:
                 pass
+            if Path(source).suffix.lower() in {".yaml", ".yml"}:
+                raise CompilationError(f"YAML file does not exist: {source}")
         return self.compile_text(source), "inline YAML"
 
     @staticmethod

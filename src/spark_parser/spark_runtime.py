@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import warnings as python_warnings
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from datetime import date, datetime
 from typing import Any
 from uuid import uuid4
 
@@ -22,19 +24,33 @@ from spark_parser.version import __version__
 
 PARSE_RESULT_STRUCT = T.StructType(
     [
-        T.StructField("source_column_name", T.StringType(), False),
-        T.StructField("silver_column_name", T.StringType(), False),
-        T.StructField("parser_type", T.StringType(), False),
-        T.StructField("expected_data_type", T.StringType(), False),
+        T.StructField("source_column_name", T.StringType(), True),
+        T.StructField("silver_column_name", T.StringType(), True),
+        T.StructField("parser_type", T.StringType(), True),
+        T.StructField("expected_data_type", T.StringType(), True),
         T.StructField("original_value", T.StringType(), True),
         T.StructField("parsed_value", T.StringType(), True),
-        T.StructField("changed", T.BooleanType(), False),
-        T.StructField("effective", T.BooleanType(), False),
-        T.StructField("actions_applied", T.ArrayType(T.StringType(), False), False),
-        T.StructField("options", T.MapType(T.StringType(), T.StringType(), False), False),
+        T.StructField("changed", T.BooleanType(), True),
+        T.StructField("effective", T.BooleanType(), True),
+        T.StructField("actions_applied", T.ArrayType(T.StringType(), True), True),
+        T.StructField("options", T.MapType(T.StringType(), T.StringType(), True), True),
         T.StructField("error", T.StringType(), True),
     ]
 )
+PARSE_RESULT_ARRAY = T.ArrayType(PARSE_RESULT_STRUCT, containsNull=True)
+_WHITESPACE_PATTERN = r"[\s\u00A0]+"
+_EDGE_WHITESPACE_PATTERN = r"^[\s\u00A0]+|[\s\u00A0]+$"
+
+
+@dataclass(frozen=True)
+class _ColumnRuntimePlan:
+    config: ColumnParser
+    source_missing: bool
+    normalized_name: str
+    candidate_name: str
+    post_parse_name: str
+    post_zero_name: str
+    final_name: str
 
 
 def _column(name: str) -> Column:
@@ -77,30 +93,55 @@ class SparkDataFrameParser:
             column_prefix,
         )
 
-        working = df
-        parsed_columns: list[tuple[str, str]] = []
-        audit_structs: list[Column] = []
-        for column_config in config.columns:
-            source_missing = column_config.source_column_name not in df.columns
-            working, final_column, audit_struct = self._apply_parser(
-                working,
+        plans = tuple(
+            self._runtime_plan(
                 column_config,
-                source_missing=source_missing,
+                source_missing=column_config.source_column_name not in df.columns,
             )
-            parsed_columns.append((column_config.silver_column_name, final_column))
-            if audit_struct is not None:
-                audit_structs.append(audit_struct)
+            for column_config in config.columns
+        )
+        working = df.withColumns(
+            {
+                plan.normalized_name: self._normalized_value(
+                    self._source_value(plan),
+                    plan.config.parser,
+                )
+                for plan in plans
+            }
+        )
+        working = working.withColumns(
+            {
+                plan.candidate_name: self._parse_candidate(
+                    _column(plan.normalized_name),
+                    plan.normalized_name,
+                    plan.config,
+                )
+                for plan in plans
+            }
+        )
+        working = working.withColumns(
+            {
+                plan.post_parse_name: self._resolve_parse_error(
+                    _column(plan.candidate_name),
+                    self._parse_failed(plan),
+                    self._source_value(plan),
+                    plan.config,
+                )
+                for plan in plans
+            }
+        )
+        working = working.withColumns(
+            {plan.post_zero_name: self._post_zero_value(plan) for plan in plans}
+        )
+        working = working.withColumns({plan.final_name: self._final_value(plan) for plan in plans})
+        parsed_columns = [(plan.config.silver_column_name, plan.final_name) for plan in plans]
+        audit_structs = [self._audit_for_plan(plan) for plan in plans if plan.config.parser.audit]
 
         parse_results_name = f"{column_prefix}_parse_results"
         config_name = f"{column_prefix}_config"
         engine_version_name = f"{column_prefix}_engine_version"
-        parse_results = (
-            F.array(*audit_structs)
-            if audit_structs
-            else F.from_json(
-                F.lit("[]"),
-                T.ArrayType(PARSE_RESULT_STRUCT, containsNull=False),
-            )
+        parse_results = (F.array(*audit_structs) if audit_structs else F.array()).cast(
+            PARSE_RESULT_ARRAY
         )
         serializer = ParserConfigSerializer()
         working = working.withColumns(
@@ -113,6 +154,13 @@ class SparkDataFrameParser:
                 ),
                 engine_version_name: F.lit(__version__),
             }
+        )
+        working = working.select(
+            *[_column(name) for name in normalized_keys],
+            *[_column(plan.final_name) for plan in plans],
+            _column(parse_results_name),
+            _column(config_name),
+            _column(engine_version_name),
         )
         return DataFrameParsing(
             working,
@@ -196,38 +244,60 @@ class SparkDataFrameParser:
             )
         return normalized_keys, tuple(schema_warnings)
 
-    def _apply_parser(
-        self,
-        df: DataFrame,
+    @staticmethod
+    def _runtime_plan(
         column_config: ColumnParser,
         *,
         source_missing: bool,
-    ) -> tuple[DataFrame, str, Column | None]:
-        options = column_config.parser
+    ) -> _ColumnRuntimePlan:
         token = uuid4().hex
-        normalized_name = f"__spark_parser_normalized_{token}"
-        candidate_name = f"__spark_parser_candidate_{token}"
-        post_parse_name = f"__spark_parser_post_parse_{token}"
-        post_zero_name = f"__spark_parser_post_zero_{token}"
-        final_name = f"__spark_parser_final_{token}"
+        return _ColumnRuntimePlan(
+            config=column_config,
+            source_missing=source_missing,
+            normalized_name=f"__spark_parser_normalized_{token}",
+            candidate_name=f"__spark_parser_candidate_{token}",
+            post_parse_name=f"__spark_parser_post_parse_{token}",
+            post_zero_name=f"__spark_parser_post_zero_{token}",
+            final_name=f"__spark_parser_final_{token}",
+        )
 
-        source = (
+    @staticmethod
+    def _source_value(plan: _ColumnRuntimePlan) -> Column:
+        return (
             F.lit(None).cast("string")
-            if source_missing
-            else _column(column_config.source_column_name)
+            if plan.source_missing
+            else _column(plan.config.source_column_name)
         )
+
+    def _normalization_state(
+        self,
+        source: Column,
+        options: ParserOptions,
+    ) -> tuple[Column, Column, Column]:
         whitespace_normalized = (
-            F.regexp_replace(source, r"\s+", " ") if options.collapse_whitespace else source
+            F.regexp_replace(source, _WHITESPACE_PATTERN, " ")
+            if options.collapse_whitespace
+            else source
         )
-        whitespace_normalized = (
-            F.trim(whitespace_normalized) if options.trim_whitespace else whitespace_normalized
-        )
+        if options.trim_whitespace:
+            whitespace_normalized = F.regexp_replace(
+                whitespace_normalized,
+                _EDGE_WHITESPACE_PATTERN,
+                "",
+            )
         empty_to_null = F.coalesce(
             (whitespace_normalized == "") & F.lit(options.empty_is_null),
             F.lit(False),
         )
         marker_match = self._null_marker_match(whitespace_normalized, options)
-        normalized = (
+        return whitespace_normalized, empty_to_null, marker_match
+
+    def _normalized_value(self, source: Column, options: ParserOptions) -> Column:
+        whitespace_normalized, empty_to_null, marker_match = self._normalization_state(
+            source,
+            options,
+        )
+        return (
             F.when(empty_to_null, F.lit(None).cast("string"))
             .when(
                 marker_match & F.lit(options.replace_null_markers),
@@ -235,69 +305,73 @@ class SparkDataFrameParser:
             )
             .otherwise(whitespace_normalized)
         )
-        working = df.withColumn(normalized_name, normalized)
-        working = working.withColumn(
-            candidate_name,
-            self._parse_candidate(
-                _column(normalized_name),
-                normalized_name,
-                column_config,
-            ),
-        )
 
-        parse_failed = _column(normalized_name).isNotNull() & _column(candidate_name).isNull()
-        post_parse = self._resolve_parse_error(
-            _column(candidate_name),
-            parse_failed,
-            source,
-            column_config,
-        )
-        working = working.withColumn(post_parse_name, post_parse)
+    @staticmethod
+    def _parse_failed(plan: _ColumnRuntimePlan) -> Column:
+        return _column(plan.normalized_name).isNotNull() & _column(plan.candidate_name).isNull()
 
-        zero_invalidated = F.lit(False)
+    @staticmethod
+    def _zero_invalidated(plan: _ColumnRuntimePlan) -> Column:
+        options = plan.config.parser
         if options.parser_type in NUMERIC_PARSER_TYPES and not options.zero_is_valid:
-            zero_invalidated = F.coalesce(
-                _column(post_parse_name) == F.lit(0).cast(column_config.expected_data_type),
+            return F.coalesce(
+                _column(plan.post_parse_name) == F.lit(0).cast(plan.config.expected_data_type),
                 F.lit(False),
             )
-            post_zero = F.when(
-                zero_invalidated,
-                F.lit(None).cast(column_config.expected_data_type),
-            ).otherwise(_column(post_parse_name))
-        else:
-            post_zero = _column(post_parse_name)
-        working = working.withColumn(post_zero_name, post_zero)
+        return F.lit(False)
 
-        default_on_null_applied = F.lit(False)
+    def _post_zero_value(self, plan: _ColumnRuntimePlan) -> Column:
+        if (
+            plan.config.parser.parser_type in NUMERIC_PARSER_TYPES
+            and not plan.config.parser.zero_is_valid
+        ):
+            return F.when(
+                self._zero_invalidated(plan),
+                F.lit(None).cast(plan.config.expected_data_type),
+            ).otherwise(_column(plan.post_parse_name))
+        return _column(plan.post_parse_name)
+
+    @staticmethod
+    def _default_on_null_applied(plan: _ColumnRuntimePlan) -> Column:
+        return (
+            _column(plan.post_zero_name).isNull()
+            if not plan.config.parser.is_nullable
+            else F.lit(False)
+        )
+
+    def _final_value(self, plan: _ColumnRuntimePlan) -> Column:
+        options = plan.config.parser
         if not options.is_nullable:
-            default_on_null_applied = _column(post_zero_name).isNull()
-            final_value = F.when(
-                default_on_null_applied,
+            return F.when(
+                self._default_on_null_applied(plan),
                 self._typed_literal(
                     options.default_on_null,
-                    column_config.expected_data_type,
+                    plan.config.expected_data_type,
                 ),
-            ).otherwise(_column(post_zero_name))
-        else:
-            final_value = _column(post_zero_name)
-        working = working.withColumn(final_name, final_value)
+            ).otherwise(_column(plan.post_zero_name))
+        return _column(plan.post_zero_name)
 
-        if not options.audit:
-            return working, final_name, None
-        audit_struct = self._audit_struct(
-            column_config,
-            source=source,
-            parsed=_column(final_name),
-            empty_to_null=empty_to_null,
-            marker_replaced=(marker_match & F.lit(options.replace_null_markers) & ~empty_to_null),
-            parse_failed=parse_failed,
-            zero_invalidated=zero_invalidated,
-            default_on_null_applied=default_on_null_applied,
-            source_missing=F.lit(source_missing),
-            normalized=_column(normalized_name),
-            candidate=_column(candidate_name),
+    def _audit_for_plan(self, plan: _ColumnRuntimePlan) -> Column:
+        source = self._source_value(plan)
+        _, empty_to_null, marker_match = self._normalization_state(
+            source,
+            plan.config.parser,
         )
-        return working, final_name, audit_struct
+        return self._audit_struct(
+            plan.config,
+            source=source,
+            parsed=_column(plan.final_name),
+            empty_to_null=empty_to_null,
+            marker_replaced=(
+                marker_match & F.lit(plan.config.parser.replace_null_markers) & ~empty_to_null
+            ),
+            parse_failed=self._parse_failed(plan),
+            zero_invalidated=self._zero_invalidated(plan),
+            default_on_null_applied=self._default_on_null_applied(plan),
+            source_missing=F.lit(plan.source_missing),
+            normalized=_column(plan.normalized_name),
+            candidate=_column(plan.candidate_name),
+        )
 
     def _parse_candidate(
         self,
@@ -480,6 +554,7 @@ class SparkDataFrameParser:
 
     def _options_map(self, options: ParserOptions) -> Column:
         payload: dict[str, Any] = {
+            "type": options.parser_type.value,
             "trim_whitespace": options.trim_whitespace,
             "collapse_whitespace": options.collapse_whitespace,
             "empty_is_null": options.empty_is_null,
@@ -521,4 +596,6 @@ class SparkDataFrameParser:
             return str(value).lower()
         if isinstance(value, (list, tuple, Mapping)):
             return json.dumps(value, default=str, ensure_ascii=False, separators=(",", ":"))
+        if isinstance(value, (date, datetime)):
+            return value.isoformat()
         return str(value)

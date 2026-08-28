@@ -30,11 +30,13 @@ class ParserConfigSerializer:
                 "null_markers_mode": options.null_markers_mode.value,
                 "null_marker_case_sensitive": options.null_marker_case_sensitive,
                 "is_nullable": options.is_nullable,
-                "default_on_null": self._json_value(options.default_on_null),
                 "on_parse_error": options.on_parse_error.value,
-                "default_on_error": self._json_value(options.default_on_error),
                 "audit": options.audit,
             }
+            if options.default_on_null is not None:
+                parser_payload["default_on_null"] = self._json_value(options.default_on_null)
+            if options.default_on_error is not None:
+                parser_payload["default_on_error"] = self._json_value(options.default_on_error)
             if options.parser_type in NUMERIC_PARSER_TYPES:
                 parser_payload["zero_is_valid"] = options.zero_is_valid
             if options.parser_type is ParserType.STRING:

@@ -89,6 +89,12 @@ columns:
             "      is_nullable: false\n      default_on_null: 0\n      zero_is_valid: false",
             "rejects zero",
         ),
+        (
+            "expected_data_type: integer\n    parser:\n      type: integer\n"
+            "      on_parse_error: default\n      default_on_error: 0\n"
+            "      zero_is_valid: false",
+            "default_on_error",
+        ),
     ],
 )
 def test_invalid_contracts_fail(fragment: str, message: str) -> None:
@@ -123,6 +129,23 @@ columns:
     )
 
     assert config.columns[0].parser.default_on_error == Decimal("1.25")
+
+
+def test_decimal_type_allows_authoring_whitespace_and_canonicalizes() -> None:
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: spaced_decimal
+parser_config_name: Spaced Decimal
+version: "1"
+columns:
+  - source_column_name: amount
+    silver_column_name: Amount
+    expected_data_type: decimal(18, 2)
+    parser: decimal
+"""
+    )
+
+    assert config.columns[0].expected_data_type == "decimal(18,2)"
 
 
 def test_duplicate_yaml_keys_fail() -> None:
@@ -229,3 +252,86 @@ columns:
     parser: boolean
 """
         )
+
+
+def test_boolean_one_sided_overrides_and_runtime_lower_contract() -> None:
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: one_sided
+parser_config_name: One Sided Boolean
+version: "1"
+globals:
+  true_values: ["true", Y]
+  false_values: ["false", N]
+  boolean_case_sensitive: false
+columns:
+  - source_column_name: replace_value
+    silver_column_name: ReplaceValue
+    expected_data_type: boolean
+    parser:
+      type: boolean
+      true_values: [approved]
+  - source_column_name: extend_value
+    silver_column_name: ExtendValue
+    expected_data_type: boolean
+    parser:
+      type: boolean
+      false_values: [rejected]
+      boolean_values_mode: extend
+  - source_column_name: unicode_value
+    silver_column_name: UnicodeValue
+    expected_data_type: boolean
+    parser:
+      type: boolean
+      true_values: ["ß"]
+      false_values: [SS]
+"""
+    )
+
+    replace = config.columns[0].parser
+    assert replace.true_values == ("approved",)
+    assert replace.false_values == ("false", "N")
+    extend = config.columns[1].parser
+    assert extend.true_values == ("true", "Y")
+    assert extend.false_values == ("false", "N", "rejected")
+    assert config.columns[2].parser.true_values == ("ß",)
+
+
+def test_legacy_keys_and_invalid_mapping_inputs_have_targeted_errors() -> None:
+    compiler = YamlParserConfigCompiler()
+    with pytest.raises(CompilationError, match="0.2.x keys"):
+        compiler.compile_text(
+            """
+parser_config_id: legacy
+parser_config_name: Legacy
+version: "1"
+columns:
+  - column_name: value
+    data_type: string
+    parser: string
+"""
+        )
+    with pytest.raises(CompilationError, match="parser config must be a mapping"):
+        compiler.compile_mapping("not a mapping")  # type: ignore[arg-type]
+    with pytest.raises(CompilationError, match="keys must be strings"):
+        compiler.compile_mapping({1: "invalid"})  # type: ignore[dict-item]
+
+
+def test_required_metadata_is_trimmed() -> None:
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: "  trimmed  "
+parser_config_name: "  Trimmed Name  "
+version: "  1  "
+columns:
+  - source_column_name: "  raw_value  "
+    silver_column_name: "  Value  "
+    expected_data_type: " string "
+    parser: string
+"""
+    )
+
+    assert config.parser_config_id == "trimmed"
+    assert config.version == "1"
+    assert config.columns[0].source_column_name == "raw_value"
+    assert config.columns[0].silver_column_name == "Value"

@@ -43,7 +43,7 @@ from spark_parser.exceptions import CompilationError
 from spark_parser.models import ColumnParser, ParserConfig, ParserGlobals, ParserOptions
 
 _MISSING = object()
-_DECIMAL_PATTERN = re.compile(r"decimal\((\d+),(\d+)\)", re.IGNORECASE)
+_DECIMAL_PATTERN = re.compile(r"decimal\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)", re.IGNORECASE)
 _TYPE_ALIASES = {
     "int": "integer",
     "bigint": "long",
@@ -101,6 +101,7 @@ class YamlParserConfigCompiler:
 
     def compile_mapping(self, payload: Mapping[str, Any]) -> ParserConfig:
         """Compile a parsed YAML mapping."""
+        payload = self._ensure_mapping(payload, "parser config")
         self._reject_keys(
             payload,
             {
@@ -195,6 +196,13 @@ class YamlParserConfigCompiler:
         index: int,
     ) -> ColumnParser:
         payload = self._ensure_mapping(raw_column, f"column at index {index}")
+        legacy_keys = sorted({"column_name", "data_type"} & set(payload))
+        if legacy_keys:
+            raise CompilationError(
+                f"Column at index {index} uses 0.2.x keys {legacy_keys}. In 0.3.0, "
+                "replace column_name with both source_column_name and silver_column_name, "
+                "and replace data_type with expected_data_type."
+            )
         self._reject_keys(
             payload,
             {
@@ -368,6 +376,15 @@ class YamlParserConfigCompiler:
             raise CompilationError(
                 f"Column {silver_column_name!r} rejects zero but uses zero as default_on_null."
             )
+        if (
+            parser_type in NUMERIC_PARSER_TYPES
+            and not zero_is_valid
+            and default_on_error is not None
+            and Decimal(str(default_on_error)) == 0
+        ):
+            raise CompilationError(
+                f"Column {silver_column_name!r} rejects zero but uses zero as default_on_error."
+            )
 
         string_format = self._compile_string_format(payload, parser_type)
         formats = self._compile_formats(payload, parser_type)
@@ -519,7 +536,7 @@ class YamlParserConfigCompiler:
         case_sensitive: bool,
         label: str,
     ) -> None:
-        normalize = (lambda item: item) if case_sensitive else (lambda item: item.casefold())
+        normalize = (lambda item: item) if case_sensitive else (lambda item: item.lower())
         overlap = {normalize(item) for item in true_values} & {
             normalize(item) for item in false_values
         }
@@ -701,7 +718,7 @@ class YamlParserConfigCompiler:
         value = payload.get(key)
         if not isinstance(value, str) or not value.strip():
             raise CompilationError(f"{key} must be a non-empty string.")
-        return value
+        return value.strip()
 
     @staticmethod
     def _optional_string(payload: Mapping[str, Any], key: str) -> str | None:

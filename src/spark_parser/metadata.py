@@ -33,7 +33,7 @@ def _argument(
 _COMMON_ARGUMENTS = [
     _argument(
         "type",
-        required=True,
+        condition="required in parser mapping form; scalar parser form supplies it directly",
         description="Parser implementation; must agree with expected_data_type.",
     ),
     _argument(
@@ -44,7 +44,10 @@ _COMMON_ARGUMENTS = [
     _argument(
         "trim_whitespace",
         default=PARSER_DEFAULTS["common"]["trim_whitespace"],
-        description="Remove leading and trailing whitespace after collapse_whitespace.",
+        description=(
+            "Remove leading and trailing spaces, tabs, line breaks, and non-breaking spaces "
+            "after collapse_whitespace."
+        ),
     ),
     _argument(
         "empty_is_null",
@@ -108,7 +111,7 @@ _SPECIFIC_ARGUMENTS = {
         _argument(
             "format",
             default=PARSER_DEFAULTS["string"]["format"],
-            allowed_values=["none", *(member.value for member in StringFormat)],
+            allowed_values=["null", "none", *(member.value for member in StringFormat)],
             description="Optional deterministic string formatting profile.",
         )
     ],
@@ -187,7 +190,7 @@ _SUMMARIES = {
     ParserType.STRING: "Normalize a string and optionally apply a deterministic display profile.",
     ParserType.INTEGER: "Parse a bronze string as a 32-bit Spark integer.",
     ParserType.LONG: "Parse a bronze string as a 64-bit Spark long.",
-    ParserType.DECIMAL: "Parse a bronze string into the configured decimal(p,s) exactly.",
+    ParserType.DECIMAL: "Parse a bronze string into the configured decimal(p,s).",
     ParserType.DOUBLE: "Parse a bronze string as a Spark double.",
     ParserType.BOOLEAN: "Map configured normalized tokens to true or false.",
     ParserType.DATE: "Cascade through configured Spark datetime patterns and return a date.",
@@ -199,13 +202,13 @@ _SPECIFIC_BEHAVIORS = {
     ParserType.STRING: [
         "format null preserves the whitespace-normalized value.",
         "pascal removes spaces after init-capitalization; it is intended for identifiers, not names.",
-        "address_us_v1 uses USPS-style suffixes/directionals and smart-cases Mc, apostrophe, and hyphen names.",
+        "address_us_v1 uses contextual USPS-style suffixes/directionals and smart-cases Mc, apostrophe, and hyphen names.",
         "county smart-cases the name and ensures exactly one trailing 'County'.",
         "zip returns ZIP5 or ZIP+4 as a string and pads short numeric components with leading zeroes.",
     ],
     ParserType.BOOLEAN: [
         "Matching occurs after whitespace normalization.",
-        "Case-insensitive vocabularies are validated for true/false overlap after case folding.",
+        "Case-insensitive vocabularies are validated for true/false overlap after lowercasing, matching Spark runtime behavior.",
         "Quote YAML tokens such as 'true', 'false', 'yes', 'no', 'on', and 'off' so they remain strings.",
     ],
     ParserType.DATE: ["Formats cascade in order; format inference is not performed."],
@@ -220,7 +223,8 @@ _SPECIFIC_GOTCHAS = {
         "zip rejects non-digits (except one ZIP+4 hyphen) and values containing more than nine digits.",
     ],
     ParserType.DECIMAL: [
-        "expected_data_type must include precision and scale; Spark precision is limited to 38."
+        "expected_data_type must include precision and scale; Spark precision is limited to 38.",
+        "Spark rounds source values with excess scale to the configured decimal scale.",
     ],
     ParserType.DOUBLE: ["Use decimal(p,s) when exact base-10 representation matters."],
     ParserType.BOOLEAN: ["Unknown non-null tokens are parse errors, not false."],
@@ -243,6 +247,7 @@ def parser_description(parser_type: ParserType) -> dict[str, Any]:
             "Whitespace collapse, trim, and empty-to-null run before parser-specific conversion.",
             "Null markers match only when replace_null_markers is true.",
             "Parse errors are resolved before zero and final-null handling.",
+            "fail mode raises only when Spark materializes the failing silver expression; projection pruning can skip it.",
             "All execution uses native Spark expressions; no Python UDF is used.",
             *_SPECIFIC_BEHAVIORS.get(parser_type, []),
         ],
@@ -269,15 +274,23 @@ def config_description() -> dict[str, Any]:
             _argument("null_markers", default=[], description="Default null-token list."),
             _argument(
                 "null_marker_case_sensitive",
-                default=True,
+                default=PARSER_DEFAULTS["globals"]["null_marker_case_sensitive"],
                 description="Default exact-case null matching behavior.",
             ),
-            _argument("true_values", default=["true"], description="Global true-token list."),
-            _argument("false_values", default=["false"], description="Global false-token list."),
+            _argument(
+                "true_values",
+                default=PARSER_DEFAULTS["globals"]["true_values"],
+                description="Global true-token list.",
+            ),
+            _argument(
+                "false_values",
+                default=PARSER_DEFAULTS["globals"]["false_values"],
+                description="Global false-token list.",
+            ),
             _argument(
                 "boolean_case_sensitive",
-                default=False,
-                description="Default exact-case Boolean matching behavior.",
+                default=PARSER_DEFAULTS["globals"]["boolean_case_sensitive"],
+                description="Whether global Boolean-token matching requires exact case.",
             ),
         ],
         "column_arguments": [

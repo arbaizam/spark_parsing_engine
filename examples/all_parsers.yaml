@@ -65,6 +65,7 @@ columns:                                   # [required] Non-empty ordered list.
       # default_on_error: 0                # [conditionally required for on_parse_error: default]
       audit: false
       zero_is_valid: true                  # [optional; default: true]
+      # When zero_is_valid is false, neither default_on_null nor default_on_error may be zero.
 
   # Long parser (`expected_data_type: bigint` and `type: bigint` are accepted aliases).
   - source_column_name: long_value
