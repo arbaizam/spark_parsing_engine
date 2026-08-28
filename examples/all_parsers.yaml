@@ -296,7 +296,7 @@ columns:                                   # [required] Non-empty ordered list.
     expected_data_type: array<string>
     parser:
       type: array
-      collapse_whitespace: true
+      collapse_whitespace: false           # [resolved: false for outer complex containers]
       trim_whitespace: true
       empty_is_null: true
       replace_null_markers: false
@@ -323,7 +323,7 @@ columns:                                   # [required] Non-empty ordered list.
     expected_data_type: struct<name:string,zip:string>
     parser:
       type: struct
-      collapse_whitespace: true
+      collapse_whitespace: false           # [resolved: false for outer complex containers]
       trim_whitespace: true
       empty_is_null: true
       replace_null_markers: false
@@ -355,7 +355,7 @@ columns:                                   # [required] Non-empty ordered list.
     expected_data_type: map<string,decimal(18,2)>
     parser:
       type: map
-      collapse_whitespace: true
+      collapse_whitespace: false           # [resolved: false for outer complex containers]
       trim_whitespace: true
       empty_is_null: true
       replace_null_markers: false

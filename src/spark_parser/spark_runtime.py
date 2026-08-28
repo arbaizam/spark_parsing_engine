@@ -51,13 +51,14 @@ PARSE_RESULT_STRUCT = T.StructType(
         T.StructField("effective", T.BooleanType(), True),
         T.StructField("actions_applied", T.ArrayType(T.StringType(), True), True),
         T.StructField("options", T.MapType(T.StringType(), T.StringType(), True), True),
-        T.StructField("nested_error_paths", T.ArrayType(T.StringType(), True), True),
         T.StructField("error", T.StringType(), True),
+        T.StructField("nested_error_paths", T.ArrayType(T.StringType(), True), True),
     ]
 )
 PARSE_RESULT_ARRAY = T.ArrayType(PARSE_RESULT_STRUCT, containsNull=True)
 _WHITESPACE_PATTERN = r"[\s\u00A0]+"
 _EDGE_WHITESPACE_PATTERN = r"^[\s\u00A0]+|[\s\u00A0]+$"
+_JSON_NUMBER_PATTERN = r"^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$"
 _STRICT_JSON_OPTIONS = {
     "mode": "PERMISSIVE",
     "allowComments": "false",
@@ -90,6 +91,12 @@ class _NestedParse:
     value: Column
     failed: Column
     error_paths: Column
+
+
+@dataclass(frozen=True)
+class _ComplexDecode:
+    value: Column
+    failed: Column
 
 
 def _column(name: str) -> Column:
@@ -351,7 +358,7 @@ class SparkDataFrameParser:
     def _json_null_match(value: Column, options: ParserOptions) -> Column:
         if options.parser_type not in COMPLEX_PARSER_TYPES:
             return F.lit(False)
-        return F.coalesce(F.lower(value) == F.lit("null"), F.lit(False))
+        return F.coalesce(value == F.lit("null"), F.lit(False))
 
     @staticmethod
     def _parse_failed(plan: _ColumnRuntimePlan) -> Column:
@@ -434,20 +441,21 @@ class SparkDataFrameParser:
         column_config: ColumnParser,
     ) -> tuple[Column, Column]:
         if column_config.parser.parser_type in COMPLEX_PARSER_TYPES:
-            raw_value = self._parse_raw_complex(normalized, column_config)
+            decoded = self._decode_complex(
+                normalized,
+                column_config.data_type,
+                column_config.parser,
+            )
             nested = self._parse_nested_complex(
-                raw_value,
+                decoded.value,
                 column_config.data_type,
                 column_config.parser,
                 F.lit("$"),
+                column_config,
             )
-            container_failed = normalized.isNotNull() & ~self._complex_input_valid(
-                normalized,
-                column_config.parser,
-            )
-            container_errors = self._error_paths(container_failed, F.lit("$"))
+            container_errors = self._error_paths(decoded.failed, F.lit("$"))
             candidate = F.when(
-                container_failed,
+                decoded.failed,
                 F.lit(None).cast(column_config.expected_data_type),
             ).otherwise(nested.value)
             return candidate, F.concat(nested.error_paths, container_errors)
@@ -504,6 +512,10 @@ class SparkDataFrameParser:
                 f"struct<value:{data_type.canonical}>",
                 _STRICT_JSON_OPTIONS,
             ).getField("value")
+            parsed = F.when(
+                json_number.rlike(_JSON_NUMBER_PATTERN),
+                parsed,
+            ).otherwise(F.lit(None).cast(data_type.canonical))
             if parser_type in {ParserType.FLOAT, ParserType.DOUBLE}:
                 return F.when(F.abs(parsed) == F.lit(float("inf")), F.lit(None)).otherwise(parsed)
             return parsed
@@ -534,7 +546,10 @@ class SparkDataFrameParser:
         if parser_type in {ParserType.DATE, ParserType.TIMESTAMP, ParserType.TIMESTAMP_NTZ}:
             if parser_type is ParserType.TIMESTAMP_NTZ:
                 candidates = [
-                    F.to_timestamp_ntz(normalized, F.lit(datetime_format))
+                    F.when(
+                        F.try_to_timestamp(normalized, F.lit(datetime_format)).isNotNull(),
+                        F.to_timestamp_ntz(normalized, F.lit(datetime_format)),
+                    ).otherwise(F.lit(None).cast("timestamp_ntz"))
                     for datetime_format in options.formats
                 ]
                 return F.coalesce(*candidates)
@@ -546,30 +561,37 @@ class SparkDataFrameParser:
             return parsed.cast("date") if parser_type is ParserType.DATE else parsed
         raise ValueError(f"Unsupported parser type: {parser_type.value}.")
 
-    def _parse_raw_complex(self, normalized: Column, column_config: ColumnParser) -> Column:
-        options = column_config.parser
+    def _decode_complex(
+        self,
+        normalized: Column,
+        data_type: SparkDataType,
+        options: ParserOptions,
+    ) -> _ComplexDecode:
         if (
             options.parser_type is ParserType.ARRAY
             and options.input_format is ComplexInputFormat.DELIMITED
         ):
             assert options.delimiter is not None
-            return F.split(normalized, re.escape(options.delimiter), -1)
-        return F.from_json(
+            return _ComplexDecode(
+                F.split(normalized, re.escape(options.delimiter), -1),
+                F.lit(False),
+            )
+
+        value = F.from_json(
             normalized,
-            self._raw_type_ddl(column_config.data_type, options),
+            self._raw_type_ddl(data_type, options),
             _STRICT_JSON_OPTIONS,
         )
-
-    @staticmethod
-    def _complex_input_valid(normalized: Column, options: ParserOptions) -> Column:
-        if (
-            options.parser_type is ParserType.ARRAY
-            and options.input_format is ComplexInputFormat.DELIMITED
-        ):
-            return F.lit(True)
-        if options.parser_type is ParserType.ARRAY:
-            return F.json_array_length(normalized).isNotNull()
-        return F.json_object_keys(normalized).isNotNull()
+        validation_type = (
+            "array<string>" if options.parser_type is ParserType.ARRAY else "map<string,string>"
+        )
+        validation = F.from_json(normalized, validation_type, _STRICT_JSON_OPTIONS)
+        invalid = validation.isNull()
+        if options.parser_type is ParserType.MAP:
+            keys = F.map_keys(validation)
+            duplicate_keys = F.size(keys) != F.size(F.array_distinct(keys))
+            invalid = invalid | F.coalesce(duplicate_keys, F.lit(False))
+        return _ComplexDecode(value, normalized.isNotNull() & invalid)
 
     def _parse_nested_complex(
         self,
@@ -577,14 +599,15 @@ class SparkDataFrameParser:
         data_type: SparkDataType,
         options: ParserOptions,
         path: Column,
+        root_config: ColumnParser,
     ) -> _NestedParse:
         parser_type = data_type.parser_type
         if parser_type is ParserType.ARRAY:
-            return self._parse_nested_array(raw, data_type, options, path)
+            return self._parse_nested_array(raw, data_type, options, path, root_config)
         if parser_type is ParserType.STRUCT:
-            return self._parse_nested_struct(raw, data_type, options, path)
+            return self._parse_nested_struct(raw, data_type, options, path, root_config)
         if parser_type is ParserType.MAP:
-            return self._parse_nested_map(raw, data_type, options, path)
+            return self._parse_nested_map(raw, data_type, options, path, root_config)
         raise ValueError(f"Expected a complex parser type, found {parser_type.value}.")
 
     def _parse_nested_value(
@@ -592,43 +615,42 @@ class SparkDataFrameParser:
         raw: Column,
         nested: NestedValueParser | StructFieldParser,
         path: Column,
+        root_config: ColumnParser,
         *,
         child_error_mode: ChildErrorMode | None = None,
     ) -> _NestedParse:
         if nested.data_type.is_complex:
             normalized = self._normalized_value(raw, nested.parser)
-            raw_complex = F.from_json(
+            decoded = self._decode_complex(
                 normalized,
-                self._raw_type_ddl(nested.data_type, nested.parser),
-                _STRICT_JSON_OPTIONS,
-            )
-            failed = normalized.isNotNull() & ~self._complex_input_valid(
-                normalized,
+                nested.data_type,
                 nested.parser,
             )
             state = self._parse_nested_complex(
-                raw_complex,
+                decoded.value,
                 nested.data_type,
                 nested.parser,
                 path,
+                root_config,
             )
             candidate = F.when(
-                failed,
+                decoded.failed,
                 F.lit(None).cast(nested.expected_data_type),
             ).otherwise(state.value)
             value = self._resolve_nested_parse_error(
                 candidate,
-                failed,
+                decoded.failed,
                 raw,
                 nested,
                 path,
+                root_config,
                 child_error_mode,
             )
             value = self._apply_nested_default(value, nested, path)
             return _NestedParse(
                 value,
-                failed,
-                F.concat(state.error_paths, self._error_paths(failed, path)),
+                decoded.failed,
+                F.concat(state.error_paths, self._error_paths(decoded.failed, path)),
             )
 
         normalized = self._normalized_value(raw, nested.parser)
@@ -640,6 +662,7 @@ class SparkDataFrameParser:
             raw,
             nested,
             path,
+            root_config,
             child_error_mode,
         )
         if nested.parser.parser_type in NUMERIC_PARSER_TYPES and not nested.parser.zero_is_valid:
@@ -656,6 +679,7 @@ class SparkDataFrameParser:
         data_type: SparkDataType,
         options: ParserOptions,
         path: Column,
+        root_config: ColumnParser,
     ) -> _NestedParse:
         assert options.element_parser is not None
 
@@ -665,6 +689,7 @@ class SparkDataFrameParser:
                 element,
                 options.element_parser,
                 element_path,
+                root_config,
                 child_error_mode=options.on_element_error,
             )
             return F.struct(
@@ -697,6 +722,7 @@ class SparkDataFrameParser:
         data_type: SparkDataType,
         options: ParserOptions,
         path: Column,
+        root_config: ColumnParser,
     ) -> _NestedParse:
         parsed_fields: list[Column] = []
         errors: list[Column] = []
@@ -706,6 +732,7 @@ class SparkDataFrameParser:
                 raw.getField(field.source_field_name),
                 field,
                 field_path,
+                root_config,
             )
             parsed_fields.append(parsed.value.alias(field.silver_field_name))
             errors.append(parsed.error_paths)
@@ -722,6 +749,7 @@ class SparkDataFrameParser:
         data_type: SparkDataType,
         options: ParserOptions,
         path: Column,
+        root_config: ColumnParser,
     ) -> _NestedParse:
         assert options.value_parser is not None
 
@@ -732,6 +760,7 @@ class SparkDataFrameParser:
                 entry.getField("value"),
                 options.value_parser,
                 value_path,
+                root_config,
                 child_error_mode=options.on_value_error,
             )
             return F.struct(
@@ -771,15 +800,20 @@ class SparkDataFrameParser:
         source: Column,
         nested: NestedValueParser | StructFieldParser,
         path: Column,
+        root_config: ColumnParser,
         child_error_mode: ChildErrorMode | None,
     ) -> Column:
+        message = F.concat(
+            F.lit(
+                "Spark Parser could not parse nested value for source "
+                f"{root_config.source_column_name!r} into silver column "
+                f"{root_config.silver_column_name!r} at "
+            ),
+            path,
+            F.lit(f" as {nested.expected_data_type}: "),
+            source.cast("string"),
+        )
         if child_error_mode is ChildErrorMode.FAIL:
-            message = F.concat(
-                F.lit("Spark Parser could not parse nested value at "),
-                path,
-                F.lit(f" as {nested.expected_data_type}: "),
-                source.cast("string"),
-            )
             return F.when(
                 failed,
                 F.raise_error(message).cast(nested.expected_data_type),
@@ -797,12 +831,6 @@ class SparkDataFrameParser:
                     nested.parser,
                 ),
             ).otherwise(candidate)
-        message = F.concat(
-            F.lit("Spark Parser could not parse nested value at "),
-            path,
-            F.lit(f" as {nested.expected_data_type}: "),
-            source.cast("string"),
-        )
         return F.when(
             failed,
             F.raise_error(message).cast(nested.expected_data_type),
@@ -1050,8 +1078,8 @@ class SparkDataFrameParser:
             (~source_missing).alias("effective"),
             actions.alias("actions_applied"),
             self._options_map(options).alias("options"),
-            nested_error_paths.alias("nested_error_paths"),
             error.alias("error"),
+            nested_error_paths.alias("nested_error_paths"),
         )
 
     def _options_map(self, options: ParserOptions) -> Column:

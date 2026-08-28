@@ -2,6 +2,20 @@
 
 ## 0.4.0
 
+### Pre-release review fixes
+
+- Make malformed `timestamp_ntz` values honor configured error policies under ANSI mode.
+- Reject incomplete nested numeric tokens and non-finite nested floating-point values.
+- Treat strict-JSON failures and duplicate map keys as container parse errors instead of allowing
+  silent null structs or Spark `DUPLICATED_MAP_KEY` failures.
+- Honor `input_format: delimited` for recursively nested arrays.
+- Resolve outer complex-parser `collapse_whitespace` to its effective value of `false` in
+  serialization, UAT reports, parser metadata, and row-level audit options.
+- Preserve the complete 0.3 audit struct field order and append `nested_error_paths` at the end.
+- Include top-level source and silver column identity in nested fail-mode error messages.
+- Treat only lowercase `null` as the JSON null literal; other spellings follow normal null-marker
+  or parse-error behavior.
+
 - Add recursive first-class `array`, `struct`, and string-keyed `map` parsers.
 - Support JSON complex values plus literal-delimited scalar arrays without Python UDFs.
 - Add `fail`, `null`, and `drop` child-error policies with nested audit paths.

@@ -34,6 +34,13 @@ def test_parser_metadata_is_discoverable_and_detached() -> None:
     assert parser.array.describe()["parser_type"] == "array"
     assert parser.struct.describe()["parser_type"] == "struct"
     assert parser.map.describe()["parser_type"] == "map"
+    array_collapse = next(
+        argument
+        for argument in parser.array.describe()["arguments"]
+        if argument["name"] == "collapse_whitespace"
+    )
+    assert array_collapse["default"] is False
+    assert "whole container" in parser.map.describe()["gotchas"][0]
     assert parser.normalize_data_type("ARRAY < INT >") == "array<integer>"
 
 

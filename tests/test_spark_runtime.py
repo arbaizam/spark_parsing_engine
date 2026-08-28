@@ -11,6 +11,7 @@ from spark_parser import SparkDataFrameParser, YamlParserConfigCompiler
 pyspark = pytest.importorskip("pyspark")
 from pyspark.errors import PySparkException  # noqa: E402
 from pyspark.sql import SparkSession  # noqa: E402
+from pyspark.sql import functions as F  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -274,6 +275,20 @@ columns:
     audited_type = audited.results_df.schema["spark_parser_parse_results"].dataType
     empty_type = empty.results_df.schema["spark_parser_parse_results"].dataType
     assert audited_type == empty_type
+    assert audited_type.elementType.fieldNames() == [
+        "source_column_name",
+        "silver_column_name",
+        "parser_type",
+        "expected_data_type",
+        "original_value",
+        "parsed_value",
+        "changed",
+        "effective",
+        "actions_applied",
+        "options",
+        "error",
+        "nested_error_paths",
+    ]
     assert audited.results_df.first().spark_parser_parse_results
     assert empty.results_df.first().spark_parser_parse_results == []
 
@@ -608,8 +623,12 @@ columns:
         key_columns=["values"],
     )
 
-    with pytest.raises((Py4JJavaError, PySparkException)):
+    with pytest.raises((Py4JJavaError, PySparkException)) as exc_info:
         parsing.parsed_df.collect()
+    message = str(exc_info.value)
+    assert "source 'values'" in message
+    assert "silver column 'Values'" in message
+    assert "$[1]" in message
 
 
 def test_arbitrarily_nested_containers_fail_at_the_exact_child_path(
@@ -692,3 +711,235 @@ columns:
     audit = parsing.results_df.first().spark_parser_parse_results[0]
     assert audit.actions_applied == ["json_null_to_null", "default_on_null_applied"]
     assert audit.error is None
+
+
+def test_timestamp_ntz_honors_error_policies_under_ansi(spark: SparkSession) -> None:
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: timestamp_ntz_errors
+parser_config_name: Timestamp NTZ Errors
+version: "1"
+columns:
+  - source_column_name: local_time
+    silver_column_name: LocalTime
+    expected_data_type: timestamp_ntz
+    parser:
+      type: timestamp_ntz
+      formats: [MM/dd/yyyy HH:mm]
+      on_parse_error: null
+      audit: true
+  - source_column_name: local_times
+    silver_column_name: LocalTimes
+    expected_data_type: array<timestamp_ntz>
+    parser:
+      type: array
+      element_parser: {type: timestamp_ntz, formats: [MM/dd/yyyy HH:mm]}
+      on_element_error: null
+      audit: true
+"""
+    )
+    df = spark.range(1).select(
+        F.lit("not-a-time").alias("local_time"),
+        F.lit('["08/27/2026 14:30","bad"]').alias("local_times"),
+    )
+
+    parsing = SparkDataFrameParser().parse_dataframe(df, config, key_columns=["local_time"])
+    row = parsing.parsed_df.first()
+    assert row.LocalTime is None
+    assert str(row.LocalTimes[0]) == "2026-08-27 14:30:00"
+    assert row.LocalTimes[1] is None
+    audits = parsing.results_df.first().spark_parser_parse_results
+    assert audits[0].actions_applied == ["parse_error_to_null"]
+    assert audits[1].nested_error_paths == ["$[1]"]
+
+
+def test_nested_numeric_parser_rejects_json_wrapper_injection(spark: SparkSession) -> None:
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: nested_numeric_guard
+parser_config_name: Nested Numeric Guard
+version: "1"
+columns:
+  - source_column_name: numbers
+    silver_column_name: Numbers
+    expected_data_type: array<integer>
+    parser:
+      type: array
+      element_parser: integer
+      on_element_error: null
+      audit: true
+  - source_column_name: rates
+    silver_column_name: Rates
+    expected_data_type: array<double>
+    parser:
+      type: array
+      input_format: delimited
+      delimiter: ";"
+      element_parser: double
+      on_element_error: drop
+"""
+    )
+    df = spark.range(1).select(
+        F.lit('["1,\\"value\\":2"]').alias("numbers"),
+        F.lit("NaN;Infinity;-Infinity;1.5").alias("rates"),
+    )
+
+    parsing = SparkDataFrameParser().parse_dataframe(df, config, key_columns=["numbers"])
+    row = parsing.parsed_df.first()
+    assert row.Numbers == [None]
+    assert row.Rates == [1.5]
+    audit = parsing.results_df.first().spark_parser_parse_results[0]
+    assert audit.nested_error_paths == ["$[0]"]
+
+
+def test_strict_json_validation_and_duplicate_map_keys_follow_error_policy(
+    spark: SparkSession,
+) -> None:
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: strict_json
+parser_config_name: Strict JSON
+version: "1"
+columns:
+  - source_column_name: object
+    silver_column_name: Object
+    expected_data_type: struct<a:integer>
+    parser:
+      type: struct
+      fields:
+        - {source_field_name: a, silver_field_name: a, parser: integer}
+      on_parse_error: null
+      audit: true
+  - source_column_name: empty_array
+    silver_column_name: EmptyArray
+    expected_data_type: array<string>
+    parser: {type: array, element_parser: string}
+  - source_column_name: empty_map
+    silver_column_name: EmptyMap
+    expected_data_type: map<string,string>
+    parser: {type: map, value_parser: string}
+  - source_column_name: duplicate_map
+    silver_column_name: DuplicateMap
+    expected_data_type: map<string,integer>
+    parser:
+      type: map
+      value_parser: integer
+      on_parse_error: null
+      audit: true
+  - source_column_name: duplicate_map
+    silver_column_name: DefaultedDuplicateMap
+    expected_data_type: map<string,integer>
+    parser:
+      type: map
+      value_parser: integer
+      on_parse_error: default
+      default_on_error: {}
+  - source_column_name: nested_duplicate_map
+    silver_column_name: NestedDuplicateMap
+    expected_data_type: array<map<string,integer>>
+    parser:
+      type: array
+      element_parser: {type: map, value_parser: integer}
+      on_element_error: null
+      audit: true
+"""
+    )
+    df = spark.range(1).select(
+        F.lit("{'a':1}").alias("object"),
+        F.lit("[]").alias("empty_array"),
+        F.lit("{}").alias("empty_map"),
+        F.lit('{"a":1,"a":2}').alias("duplicate_map"),
+        F.lit('[{"a":1,"a":2}]').alias("nested_duplicate_map"),
+    )
+
+    parsing = SparkDataFrameParser().parse_dataframe(df, config, key_columns=["object"])
+    row = parsing.parsed_df.first()
+    assert row.Object is None
+    assert row.EmptyArray == []
+    assert row.EmptyMap == {}
+    assert row.DuplicateMap is None
+    assert row.DefaultedDuplicateMap == {}
+    assert row.NestedDuplicateMap == [None]
+    audits = {
+        item.silver_column_name: item
+        for item in parsing.results_df.first().spark_parser_parse_results
+    }
+    assert audits["Object"].nested_error_paths == ["$"]
+    assert audits["Object"].actions_applied == ["parse_error_to_null"]
+    assert audits["DuplicateMap"].nested_error_paths == ["$"]
+    assert audits["DuplicateMap"].actions_applied == ["parse_error_to_null"]
+    assert audits["NestedDuplicateMap"].nested_error_paths == ["$[0]"]
+
+
+def test_nested_delimited_arrays_honor_their_input_format(spark: SparkSession) -> None:
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: nested_delimited
+parser_config_name: Nested Delimited
+version: "1"
+columns:
+  - source_column_name: payload
+    silver_column_name: Payload
+    expected_data_type: struct<tags:array<string>>
+    parser:
+      type: struct
+      fields:
+        - source_field_name: raw_tags
+          silver_field_name: tags
+          parser:
+            type: array
+            input_format: delimited
+            delimiter: "|"
+            element_parser: {type: string, format: upper}
+      audit: true
+"""
+    )
+    df = spark.range(1).select(F.lit('{"raw_tags":"a|b|c"}').alias("payload"))
+
+    parsing = SparkDataFrameParser().parse_dataframe(df, config, key_columns=["payload"])
+    assert parsing.parsed_df.first().Payload.tags == ["A", "B", "C"]
+    audit = parsing.results_df.first().spark_parser_parse_results[0]
+    assert audit.nested_error_paths == []
+
+
+def test_only_lowercase_json_null_is_the_json_literal(spark: SparkSession) -> None:
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: json_null_case
+parser_config_name: JSON Null Case
+version: "1"
+columns:
+  - source_column_name: payload
+    silver_column_name: Payload
+    expected_data_type: array<string>
+    parser:
+      type: array
+      element_parser: string
+      is_nullable: false
+      default_on_null: [NULL_DEFAULT]
+      on_parse_error: default
+      default_on_error: [ERROR_DEFAULT]
+      audit: true
+"""
+    )
+    df = spark.range(1).select(
+        F.lit(1).alias("id"),
+        F.lit("null").alias("payload"),
+    ).union(
+        spark.range(1).select(
+            F.lit(2).alias("id"),
+            F.lit("NULL").alias("payload"),
+        )
+    )
+
+    parsing = SparkDataFrameParser().parse_dataframe(df, config, key_columns=["id"])
+    assert [row.Payload for row in parsing.parsed_df.collect()] == [
+        ["NULL_DEFAULT"],
+        ["ERROR_DEFAULT"],
+    ]
+    audits = {
+        row.id: row.spark_parser_parse_results[0]
+        for row in parsing.results_df.collect()
+    }
+    assert audits[1].actions_applied == ["json_null_to_null", "default_on_null_applied"]
+    assert audits[2].actions_applied == ["parse_error_default_applied"]

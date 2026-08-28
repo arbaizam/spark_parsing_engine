@@ -7,6 +7,7 @@ from typing import Any
 
 from spark_parser.defaults import PARSER_DEFAULTS
 from spark_parser.enums import (
+    NUMERIC_PARSER_TYPES,
     BinaryEncoding,
     ChildErrorMode,
     ComplexInputFormat,
@@ -112,62 +113,22 @@ _COMMON_ARGUMENTS = [
 ]
 
 
-_SPECIFIC_ARGUMENTS = {
+def _zero_is_valid_argument() -> dict[str, Any]:
+    return _argument(
+        "zero_is_valid",
+        default=PARSER_DEFAULTS["numeric"]["zero_is_valid"],
+        description="Keep zero when true; convert zero to null before default_on_null when false.",
+    )
+
+
+_SPECIFIC_ARGUMENTS: dict[ParserType, list[dict[str, Any]]] = {
+    **{parser_type: [_zero_is_valid_argument()] for parser_type in NUMERIC_PARSER_TYPES},
     ParserType.STRING: [
         _argument(
             "format",
             default=PARSER_DEFAULTS["string"]["format"],
             allowed_values=["null", "none", *(member.value for member in StringFormat)],
             description="Optional deterministic string formatting profile.",
-        )
-    ],
-    ParserType.INTEGER: [
-        _argument(
-            "zero_is_valid",
-            default=PARSER_DEFAULTS["numeric"]["zero_is_valid"],
-            description="Keep zero when true; convert zero to null before default_on_null when false.",
-        )
-    ],
-    ParserType.BYTE: [
-        _argument(
-            "zero_is_valid",
-            default=PARSER_DEFAULTS["numeric"]["zero_is_valid"],
-            description="Keep zero when true; convert zero to null before default_on_null when false.",
-        )
-    ],
-    ParserType.SHORT: [
-        _argument(
-            "zero_is_valid",
-            default=PARSER_DEFAULTS["numeric"]["zero_is_valid"],
-            description="Keep zero when true; convert zero to null before default_on_null when false.",
-        )
-    ],
-    ParserType.LONG: [
-        _argument(
-            "zero_is_valid",
-            default=PARSER_DEFAULTS["numeric"]["zero_is_valid"],
-            description="Keep zero when true; convert zero to null before default_on_null when false.",
-        )
-    ],
-    ParserType.FLOAT: [
-        _argument(
-            "zero_is_valid",
-            default=PARSER_DEFAULTS["numeric"]["zero_is_valid"],
-            description="Keep zero when true; convert zero to null before default_on_null when false.",
-        )
-    ],
-    ParserType.DECIMAL: [
-        _argument(
-            "zero_is_valid",
-            default=PARSER_DEFAULTS["numeric"]["zero_is_valid"],
-            description="Keep zero when true; convert zero to null before default_on_null when false.",
-        )
-    ],
-    ParserType.DOUBLE: [
-        _argument(
-            "zero_is_valid",
-            default=PARSER_DEFAULTS["numeric"]["zero_is_valid"],
-            description="Keep zero when true; convert zero to null before default_on_null when false.",
         )
     ],
     ParserType.BINARY: [
@@ -385,11 +346,10 @@ _SPECIFIC_GOTCHAS = {
         "Delimited input treats the delimiter literally and does not implement CSV quoting.",
         "Nested child audit is consolidated into the top-level column audit entry.",
     ],
-    ParserType.STRUCT: [
-        "A nested JSON value with the wrong container shape can be indistinguishable from a null field after Spark JSON decoding."
-    ],
+    ParserType.STRUCT: ["Duplicate JSON fields follow Spark's last-value-wins behavior."],
     ParserType.MAP: [
-        "Duplicate JSON object keys follow Spark JSON decoding and cannot be audited after decoding."
+        "Duplicate JSON object keys make the whole container a parse error handled by "
+        "on_parse_error or the parent child-error policy."
     ],
 }
 
@@ -402,23 +362,42 @@ def parser_description(parser_type: ParserType) -> dict[str, Any]:
         ParserType.STRUCT: ["struct<field:T,...>"],
         ParserType.MAP: ["map<string,T>"],
     }.get(parser_type, [parser_type.value])
+    is_complex = parser_type in {ParserType.ARRAY, ParserType.STRUCT, ParserType.MAP}
     normalization_behavior = (
-        "Outer complex input is edge-trimmed but never whitespace-collapsed inside JSON; "
-        "recursive leaf parsers perform their own normalization."
-        if parser_type in {ParserType.ARRAY, ParserType.STRUCT, ParserType.MAP}
+        "Outer complex input is edge-trimmed and collapse_whitespace resolves to false because "
+        "collapsing inside JSON would rewrite quoted values; recursive leaf parsers perform "
+        "their own normalization."
+        if is_complex
         else "Whitespace collapse, trim, and empty-to-null run before parser-specific conversion."
     )
+    arguments = deepcopy([*_COMMON_ARGUMENTS, *_SPECIFIC_ARGUMENTS[parser_type]])
+    if is_complex:
+        for argument in arguments:
+            if argument["name"] == "collapse_whitespace":
+                argument["default"] = PARSER_DEFAULTS[parser_type.value][
+                    "collapse_whitespace"
+                ]
+                argument["description"] = (
+                    "Always resolves to false for the outer complex container; recursive leaf "
+                    "parsers control their own whitespace collapse."
+                )
+                break
     return {
         "parser_type": parser_type.value,
         "expected_data_types": expected,
         "summary": _SUMMARIES[parser_type],
-        "arguments": deepcopy([*_COMMON_ARGUMENTS, *_SPECIFIC_ARGUMENTS[parser_type]]),
+        "arguments": arguments,
         "key_behaviors": [
             normalization_behavior,
             "Null markers match only when replace_null_markers is true.",
             "Parse errors are resolved before zero and final-null handling.",
             "fail mode raises only when Spark materializes the failing silver expression; projection pruning can skip it.",
             "All execution uses native Spark expressions; no Python UDF is used.",
+            *(
+                ["Only the exact lowercase JSON literal null is treated as a JSON null token."]
+                if is_complex
+                else []
+            ),
             *_SPECIFIC_BEHAVIORS.get(parser_type, []),
         ],
         "gotchas": deepcopy(_SPECIFIC_GOTCHAS.get(parser_type, [])),

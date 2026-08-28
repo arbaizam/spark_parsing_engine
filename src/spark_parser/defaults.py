@@ -68,13 +68,18 @@ PARSER_DEFAULTS: Final = {
     "timestamp_ntz": {"formats": list(DEFAULT_TIMESTAMP_NTZ_FORMATS)},
     "binary": {"encoding": DEFAULT_BINARY_ENCODING.value},
     "array": {
+        "collapse_whitespace": False,
         "input_format": DEFAULT_COMPLEX_INPUT_FORMAT.value,
         "on_element_error": DEFAULT_CHILD_ERROR_MODE.value,
         "drop_null_elements": DEFAULT_DROP_NULL_ELEMENTS,
         "distinct": DEFAULT_ARRAY_DISTINCT,
     },
-    "struct": {"input_format": DEFAULT_COMPLEX_INPUT_FORMAT.value},
+    "struct": {
+        "collapse_whitespace": False,
+        "input_format": DEFAULT_COMPLEX_INPUT_FORMAT.value,
+    },
     "map": {
+        "collapse_whitespace": False,
         "input_format": DEFAULT_COMPLEX_INPUT_FORMAT.value,
         "on_value_error": DEFAULT_CHILD_ERROR_MODE.value,
         "drop_null_values": DEFAULT_DROP_NULL_VALUES,

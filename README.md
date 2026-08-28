@@ -244,7 +244,7 @@ These options apply to every parser type.
 | Argument | Required | Default | Behavior |
 | --- | ---: | --- | --- |
 | `type` | Mapping form only | — | Parser implementation matching `expected_data_type`. |
-| `collapse_whitespace` | No | `true` | Replace every run of whitespace—left, right, and internal—with one ordinary space. |
+| `collapse_whitespace` | No | `true` for scalar/leaf parsers; resolved `false` for outer complex containers | Replace every run of whitespace—left, right, and internal—with one ordinary space. |
 | `trim_whitespace` | No | `true` | Remove leading and trailing spaces, tabs, line breaks, and non-breaking spaces after collapse. Both defaults together normalize all surrounding and internal whitespace. |
 | `empty_is_null` | No | `true` | Convert an empty normalized string to null. |
 | `replace_null_markers` | No | `false` | Convert effective null-token matches to null. |
@@ -262,11 +262,13 @@ incompatible typed defaults, empty required lists, and contradictory conditional
 
 For complex JSON containers, outer `trim_whitespace`, empty/null-marker handling, nullability,
 defaults, and `on_parse_error` apply to the complete bronze string. `collapse_whitespace` is not
-applied inside raw JSON because doing so could change quoted JSON string values. Each configured
+applied inside raw JSON because doing so could change quoted JSON string values, so it resolves to
+`false` for `array`, `struct`, and `map` parsers. Serialization, UAT reports, `describe()`, and the
+row-level audit options all report that effective value. Each configured
 leaf parser performs its own normal whitespace normalization after JSON decoding. Nested parsers
 cannot enable separate audit entries; their effective options and error paths are consolidated
-under the audited top-level column. A JSON literal `null` is treated as a successful typed null
-and records `json_null_to_null` when audited.
+under the audited top-level column. The exact lowercase JSON literal `null` is treated as a
+successful typed null and records `json_null_to_null` when audited.
 
 ## Parser-specific reference
 
@@ -479,9 +481,9 @@ every silver field exactly once.
 
 Unknown JSON fields are ignored. A configured missing or explicit-null field follows its nested
 parser's `is_nullable`/`default_on_null` behavior. Nested field failures follow that field's
-`on_parse_error` behavior and produce paths such as `$.zip`. A nested value with the wrong
-container shape can become indistinguishable from a JSON null after Spark decoding; this is
-called out by `parser.struct.describe()` and the generated UAT document.
+`on_parse_error` behavior and produce paths such as `$.zip`. Strict container validation occurs
+before leaf parsing, so the wrong JSON container shape and disabled JSON extensions follow the
+appropriate container error policy instead of appearing as a successful all-null struct.
 
 ### Map
 
@@ -508,8 +510,10 @@ Spark strings; values may use any recursively supported datatype.
 ```
 
 Map error paths identify the source key, for example `$['principal']`. Duplicate JSON object keys
-follow Spark's JSON decoder and cannot be distinguished after decoding; canonical bronze JSON
-should therefore contain unique keys.
+cannot produce a valid Spark map, so a duplicated key is treated as a malformed container and
+follows `on_parse_error` or the parent's child-error policy for a nested map. This prevents Spark's
+`DUPLICATED_MAP_KEY` runtime failure. Canonical bronze JSON should contain unique keys. A `struct`
+parser retains Spark's last-value-wins behavior for duplicated fields.
 
 ### Recursive nesting and complex defaults
 
@@ -561,7 +565,8 @@ Every column follows this order:
 For a complex column, those modes govern malformed top-level JSON. Struct fields recursively use
 their own `on_parse_error`. Arrays use `on_element_error`, and maps use `on_value_error`, each with
 `fail`, `null`, or `drop`. Handled child errors are retained in the top-level audit's
-`nested_error_paths` even when the invalid element or entry is dropped.
+`nested_error_paths` even when the invalid element or entry is dropped. A nested `fail` error
+identifies the top-level source column, silver column, expected child type, and exact nested path.
 
 There is no `ignore` mode because an invalid bronze string cannot be retained in a typed silver
 column. Quarantine routing is not included yet; it needs an explicit `quarantine_df` contract
@@ -640,8 +645,8 @@ Each parse-result struct contains:
 | `effective` | Boolean | False for a missing source; true when the configured source was available. |
 | `actions_applied` | Array of strings | Ordered material actions applied to this row and column. |
 | `options` | Map of string to string | Every fully resolved effective option for this parser. |
-| `nested_error_paths` | Array of strings | JSONPath-like locations of handled child failures; empty for none. |
 | `error` | Nullable string | Handled parse or missing-source description; fail mode raises for bad values. |
+| `nested_error_paths` | Array of strings | JSONPath-like locations of handled child failures; empty for none. Appended after all 0.3 fields for positional schema compatibility. |
 
 Possible actions are `source_column_missing`, `empty_string_to_null`, `null_marker_replaced`,
 `parse_error_to_null`, `parse_error_default_applied`, `zero_invalidated`,
@@ -674,8 +679,8 @@ Version 0.4 adds parser types and one audit field rather than renaming existing 
 keys. Two compatibility details matter:
 
 - configurations adopting the new parser types receive their own canonical content hashes; and
-- `spark_parser_parse_results` adds `nested_error_paths`, so consumers that declare its nested
-  schema manually must update that schema.
+- `spark_parser_parse_results` appends `nested_error_paths` after the complete 0.3 field sequence,
+  so consumers that declare its nested schema manually must add that final field.
 
 Use `parser.review_yaml(old_config).to_markdown()` to produce the 0.4 resolved documentation and
 review the new content hash before promotion.

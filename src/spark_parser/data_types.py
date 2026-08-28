@@ -74,6 +74,12 @@ class SparkDataType:
         return self.parser_type.value
 
 
+def canonical_type_name(value: str) -> str:
+    """Return the canonical spelling of one Spark datatype or parser alias."""
+    normalized = value.strip().lower()
+    return _TYPE_ALIASES.get(normalized, normalized)
+
+
 def parse_spark_data_type(value: str) -> SparkDataType:
     """Parse and canonicalize the supported Spark SQL datatype grammar."""
     if not isinstance(value, str) or not value.strip():
@@ -106,8 +112,7 @@ class _DataTypeParser:
             self.position += 1
 
     def parse_type(self) -> SparkDataType:
-        type_name = self.read_identifier("datatype").lower()
-        type_name = _TYPE_ALIASES.get(type_name, type_name)
+        type_name = canonical_type_name(self.read_identifier("datatype"))
         if type_name in {"decimal", "dec", "numeric"}:
             return self.parse_decimal()
         if type_name == "array":

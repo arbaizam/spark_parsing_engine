@@ -5,7 +5,6 @@ from __future__ import annotations
 import base64
 import binascii
 import math
-import re
 from collections.abc import Mapping
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -14,7 +13,7 @@ from typing import Any
 
 import yaml
 
-from spark_parser.data_types import SparkDataType, parse_spark_data_type
+from spark_parser.data_types import SparkDataType, canonical_type_name, parse_spark_data_type
 from spark_parser.defaults import (
     DEFAULT_ARRAY_DISTINCT,
     DEFAULT_AUDIT,
@@ -64,16 +63,6 @@ from spark_parser.models import (
 )
 
 _MISSING = object()
-_DECIMAL_PATTERN = re.compile(r"decimal\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)", re.IGNORECASE)
-_TYPE_ALIASES = {
-    "tinyint": "byte",
-    "smallint": "short",
-    "int": "integer",
-    "bigint": "long",
-    "real": "float",
-    "bool": "boolean",
-    "timestamp_ltz": "timestamp",
-}
 _BYTE_MIN = -(2**7)
 _BYTE_MAX = 2**7 - 1
 _SHORT_MIN = -(2**15)
@@ -394,6 +383,14 @@ class YamlParserConfigCompiler:
                 f"Column {silver_column_name!r} rejects zero but uses zero as default_on_error."
             )
 
+        collapse_whitespace = self._bool(
+            payload,
+            "collapse_whitespace",
+            DEFAULT_COLLAPSE_WHITESPACE,
+        )
+        if parser_type in COMPLEX_PARSER_TYPES:
+            collapse_whitespace = False
+
         string_format = self._compile_string_format(payload, parser_type)
         formats = self._compile_formats(payload, parser_type)
         (
@@ -420,11 +417,7 @@ class YamlParserConfigCompiler:
                 "trim_whitespace",
                 DEFAULT_TRIM_WHITESPACE,
             ),
-            collapse_whitespace=self._bool(
-                payload,
-                "collapse_whitespace",
-                DEFAULT_COLLAPSE_WHITESPACE,
-            ),
+            collapse_whitespace=collapse_whitespace,
             empty_is_null=self._bool(payload, "empty_is_null", DEFAULT_EMPTY_IS_NULL),
             replace_null_markers=replace_null_markers,
             null_markers=markers,
@@ -906,12 +899,8 @@ class YamlParserConfigCompiler:
                 f"Boolean true_values and false_values overlap for {label}: {sorted(overlap)}."
             )
 
-    def _normalize_data_type(self, value: str) -> tuple[str, ParserType]:
-        data_type = parse_spark_data_type(value)
-        return data_type.canonical, data_type.parser_type
-
     def _parser_type(self, value: str) -> ParserType:
-        normalized = _TYPE_ALIASES.get(value.strip().lower(), value.strip().lower())
+        normalized = canonical_type_name(value)
         try:
             return ParserType(normalized)
         except ValueError as exc:
@@ -941,7 +930,7 @@ class YamlParserConfigCompiler:
         if parser_type in {ParserType.FLOAT, ParserType.DOUBLE}:
             return self._double_default(value, label)
         if parser_type is ParserType.DECIMAL:
-            return self._decimal_default(value, data_type.canonical, label)
+            return self._decimal_default(value, data_type, label)
         if parser_type is ParserType.BOOLEAN:
             if not isinstance(value, bool):
                 raise CompilationError(f"{label} for boolean must be true or false.")
@@ -1019,22 +1008,21 @@ class YamlParserConfigCompiler:
         return converted
 
     @staticmethod
-    def _decimal_default(value: Any, data_type: str, label: str) -> Decimal:
+    def _decimal_default(value: Any, data_type: SparkDataType, label: str) -> Decimal:
         try:
             converted = Decimal(str(value))
         except (InvalidOperation, ValueError) as exc:
             raise CompilationError(f"{label} for decimal must be numeric.") from exc
         if not converted.is_finite():
             raise CompilationError(f"{label} for decimal must be finite.")
-        decimal_match = _DECIMAL_PATTERN.fullmatch(data_type)
-        if decimal_match is None:
-            raise CompilationError(f"Invalid canonical decimal type: {data_type}.")
-        precision, scale = (int(part) for part in decimal_match.groups())
+        precision = data_type.precision
+        scale = data_type.scale
+        assert precision is not None and scale is not None
         _, digits, exponent = converted.as_tuple()
         integral_digits = max(len(digits) + exponent, 0)
         fractional_digits = max(-exponent, 0)
         if integral_digits > precision - scale or fractional_digits > scale:
-            raise CompilationError(f"{label} does not fit {data_type}.")
+            raise CompilationError(f"{label} does not fit {data_type.canonical}.")
         return converted
 
     @staticmethod

@@ -476,3 +476,82 @@ columns:
     assert config.version == "1"
     assert config.columns[0].source_column_name == "raw_value"
     assert config.columns[0].silver_column_name == "Value"
+
+
+def test_complex_parsers_resolve_collapse_whitespace_to_false() -> None:
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: complex_normalization
+parser_config_name: Complex Normalization
+version: "1"
+columns:
+  - source_column_name: names
+    silver_column_name: Names
+    expected_data_type: array<string>
+    parser:
+      type: array
+      collapse_whitespace: true
+      element_parser: string
+  - source_column_name: object
+    silver_column_name: Object
+    expected_data_type: struct<name:string>
+    parser:
+      type: struct
+      fields:
+        - {source_field_name: name, silver_field_name: name, parser: string}
+  - source_column_name: attributes
+    silver_column_name: Attributes
+    expected_data_type: map<string,string>
+    parser: {type: map, value_parser: string}
+  - source_column_name: label
+    silver_column_name: Label
+    expected_data_type: string
+    parser: string
+"""
+    )
+
+    array_options, struct_options, map_options, string_options = (
+        column.parser for column in config.columns
+    )
+    assert array_options.collapse_whitespace is False
+    assert struct_options.collapse_whitespace is False
+    assert map_options.collapse_whitespace is False
+    assert array_options.element_parser is not None
+    assert array_options.element_parser.parser.collapse_whitespace is True
+    assert struct_options.field_parsers[0].parser.collapse_whitespace is True
+    assert string_options.collapse_whitespace is True
+
+    payload = ParserConfigSerializer().to_mapping(config)
+    assert payload["columns"][0]["parser"]["collapse_whitespace"] is False
+    assert payload["columns"][3]["parser"]["collapse_whitespace"] is True
+
+
+@pytest.mark.parametrize(
+    ("alias", "canonical"),
+    [
+        ("tinyint", "byte"),
+        ("smallint", "short"),
+        ("int", "integer"),
+        ("bigint", "long"),
+        ("real", "float"),
+        ("bool", "boolean"),
+        ("timestamp_ltz", "timestamp"),
+    ],
+)
+def test_datatype_and_parser_aliases_share_one_table(alias: str, canonical: str) -> None:
+    assert parse_spark_data_type(alias).parser_type.value == canonical
+    config = YamlParserConfigCompiler().compile_text(
+        f"""
+parser_config_id: alias
+parser_config_name: Alias
+version: "1"
+columns:
+  - source_column_name: value
+    silver_column_name: Value
+    expected_data_type: {alias}
+    parser: {alias}
+"""
+    )
+
+    assert config.columns[0].expected_data_type == canonical
+    assert config.columns[0].parser.parser_type.value == canonical
