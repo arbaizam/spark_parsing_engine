@@ -216,6 +216,36 @@ columns:
 
 
 @pytest.mark.parametrize(
+    ("format_name", "expected_format"),
+    [
+        ("title", StringFormat.TITLE),
+        ("state_us", StringFormat.STATE_US),
+    ],
+)
+def test_display_string_formats_compile(
+    format_name: str,
+    expected_format: StringFormat,
+) -> None:
+    """Keep display-oriented formats distinct from identifier-oriented Pascal casing."""
+    config = YamlParserConfigCompiler().compile_text(
+        f"""
+parser_config_id: display_format
+parser_config_name: Display Format
+version: "1"
+columns:
+  - source_column_name: raw_value
+    silver_column_name: DisplayValue
+    expected_data_type: string
+    parser:
+      type: string
+      format: {format_name}
+"""
+    )
+
+    assert config.columns[0].parser.string_format is expected_format
+
+
+@pytest.mark.parametrize(
     ("fragment", "message"),
     [
         ("expected_data_type: decimal(18,32)\n    parser: decimal", "Decimal scale"),

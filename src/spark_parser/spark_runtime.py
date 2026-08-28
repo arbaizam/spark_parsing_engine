@@ -21,7 +21,12 @@ from pyspark.sql import Column, DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql import types as T
 
-from spark_parser.address_formats import format_address_us_v1, format_county, format_zip
+from spark_parser.address_formats import (
+    format_address_us_v1,
+    format_county,
+    format_state_us,
+    format_zip,
+)
 from spark_parser.data_types import SparkDataType
 from spark_parser.dataframe_parsing import DataFrameParsing
 from spark_parser.enums import (
@@ -577,12 +582,18 @@ class SparkDataFrameParser:
                 return F.lower(normalized)
             if options.string_format is StringFormat.UPPER:
                 return F.upper(normalized)
+            if options.string_format is StringFormat.TITLE:
+                # Unlike Pascal casing, title casing intentionally retains the normalized spaces.
+                # Lowercasing first makes output deterministic for mixed-case bronze values.
+                return F.initcap(F.lower(normalized))
             if options.string_format is StringFormat.PASCAL:
                 return F.regexp_replace(F.initcap(F.lower(normalized)), r"\s+", "")
             if options.string_format is StringFormat.ADDRESS_US_V1:
                 return format_address_us_v1(normalized)
             if options.string_format is StringFormat.COUNTY:
                 return format_county(normalized)
+            if options.string_format is StringFormat.STATE_US:
+                return format_state_us(normalized)
             if options.string_format is StringFormat.ZIP:
                 return format_zip(normalized)
             return normalized

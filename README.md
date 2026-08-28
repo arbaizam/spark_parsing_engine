@@ -287,10 +287,16 @@ String supports the common arguments plus `format`.
 | `null` or `none` | Preserve case after whitespace normalization. | `"  Acme   LLC "` → `"Acme LLC"` |
 | `lower` | Lowercase the normalized value. | `"Acme LLC"` → `"acme llc"` |
 | `upper` | Uppercase the normalized value. | `"Acme LLC"` → `"ACME LLC"` |
+| `title` | Lowercase and capitalize words while retaining normalized spaces. | `"  LOAN   status "` → `"Loan Status"` |
 | `pascal` | Lowercase, title-case, and remove spaces. Intended for identifiers rather than human names. | `"account status"` → `"AccountStatus"` |
 | `address_us_v1` | Apply deterministic US address display normalization. | `"123 mccormick st. apt 4b"` → `"123 McCormick St Apt 4B"` |
 | `county` | Smart-case a county name and ensure exactly one trailing `County`. | `"mclean county"` → `"McLean County"` |
+| `state_us` | Return the uppercase two-letter abbreviation for a US state or Washington, DC. | `"Illinois"` → `"IL"`; `"il"` → `"IL"` |
 | `zip` | Return a canonical ZIP5 or ZIP+4 string. | `"1234"` → `"01234"`; `"123456"` → `"00012-3456"` |
+
+`title` uses Spark's deterministic `initcap` behavior. It is appropriate for ordinary display
+labels whose words should retain spaces; it does not apply the specialized `Mc`, apostrophe,
+hyphen, suffix, or unit rules in `address_us_v1` and `county`.
 
 #### Address profile
 
@@ -322,6 +328,17 @@ a Python UDF or a large external postal model.
 and appends exactly one ` County`. A value containing only `County` is a parse error. It does not
 convert or infer Parish, Borough, Municipality, or Census Area; select this profile only when the
 target domain truly requires counties.
+
+#### State profile
+
+`state_us` recognizes the 50 US state names and their two-letter postal abbreviations, plus
+`District of Columbia`, `Washington DC`, `Washington D.C.`, and `DC`. Matching is case-insensitive
+and occurs after common whitespace normalization. Output is always the canonical uppercase
+two-letter abbreviation.
+
+US territories are intentionally excluded because a field documented as a state should not
+silently broaden its domain. An unknown non-null value is a parse error and follows
+`on_parse_error`; use `null` or an explicit default when invalid state text should not fail the row.
 
 #### ZIP profile
 
@@ -659,9 +676,9 @@ Possible actions are `source_column_missing`, `empty_string_to_null`, `null_mark
 `default_on_null_applied`, `json_null_to_null`, `nested_parse_errors_resolved`, `zip_padded`, and
 `zip_plus4_formatted`.
 
-Routine whitespace normalization, normal successful datatype conversion, and routine case/address/
-county formatting are visible through `original_value`, `parsed_value`, and the resolved `options`
-map but do not add noisy action entries or independently set `changed`.
+Routine whitespace normalization, normal successful datatype conversion, and routine title/case/
+address/county/state formatting are visible through `original_value`, `parsed_value`, and the
+resolved `options` map but do not add noisy action entries or independently set `changed`.
 
 ## Defaults and exhaustive YAML reference
 

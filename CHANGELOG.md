@@ -2,6 +2,8 @@
 
 ## 0.4.0
 
+- Add `title` string formatting for display text that retains normalized spaces.
+- Add `state_us` string formatting for the 50 US states and Washington, DC.
 - Make malformed `timestamp_ntz` values honor configured error policies under ANSI mode.
 - Reject incomplete nested numeric tokens and non-finite nested floating-point values.
 - Treat strict-JSON failures and duplicate map keys as container parse errors instead of allowing

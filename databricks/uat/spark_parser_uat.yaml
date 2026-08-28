@@ -27,6 +27,23 @@ columns:
       replace_null_markers: true
       audit: true
 
+  - source_column_name: loan_status
+    silver_column_name: LoanStatus
+    expected_data_type: string
+    parser:
+      type: string
+      format: title
+      audit: true
+
+  - source_column_name: state
+    silver_column_name: StateCode
+    expected_data_type: string
+    parser:
+      type: string
+      format: state_us
+      on_parse_error: null
+      audit: true
+
   - source_column_name: amount
     silver_column_name: Amount
     expected_data_type: decimal(10,2)

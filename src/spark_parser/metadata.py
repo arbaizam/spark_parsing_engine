@@ -301,9 +301,11 @@ _SUMMARIES = {
 _SPECIFIC_BEHAVIORS = {
     ParserType.STRING: [
         "format null preserves the whitespace-normalized value.",
+        "title lowercases and capitalizes words while retaining normalized spaces.",
         "pascal removes spaces after init-capitalization; it is intended for identifiers, not names.",
         "address_us_v1 uses contextual USPS-style suffixes/directionals and smart-cases Mc, apostrophe, and hyphen names.",
         "county smart-cases the name and ensures exactly one trailing 'County'.",
+        "state_us maps US state names and two-letter codes, plus Washington, DC, to uppercase abbreviations.",
         "zip returns ZIP5 or ZIP+4 as a string and pads short numeric components with leading zeroes.",
     ],
     ParserType.BOOLEAN: [
@@ -334,7 +336,9 @@ _SPECIFIC_BEHAVIORS = {
 _SPECIFIC_GOTCHAS = {
     ParserType.STRING: [
         "address_us_v1 is deterministic display normalization, not postal validation or deliverability verification.",
+        "title uses Spark initcap semantics; it does not apply address/name exceptions such as McLean.",
         "county is for jurisdictions named County; it does not infer Parish, Borough, or Census Area.",
+        "state_us excludes US territories and treats unknown non-null values as parse errors.",
         "zip rejects non-digits (except one ZIP+4 hyphen) and values containing more than nine digits.",
     ],
     ParserType.DECIMAL: [

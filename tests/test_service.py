@@ -16,6 +16,12 @@ def test_parser_metadata_is_discoverable_and_detached() -> None:
         for argument in description["arguments"]
         if argument["name"] == "format"
     )
+    format_values = next(
+        argument["allowed_values"]
+        for argument in description["arguments"]
+        if argument["name"] == "format"
+    )
+    assert {"title", "state_us"} <= set(format_values)
     assert "null" in next(
         argument["allowed_values"]
         for argument in description["arguments"]

@@ -55,9 +55,11 @@ class StringFormat(str, Enum):
 
     LOWER = "lower"
     UPPER = "upper"
+    TITLE = "title"
     PASCAL = "pascal"
     ADDRESS_US_V1 = "address_us_v1"
     COUNTY = "county"
+    STATE_US = "state_us"
     ZIP = "zip"
 
 

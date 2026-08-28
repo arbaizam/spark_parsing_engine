@@ -156,6 +156,8 @@ print(review.to_markdown())
 bronze_schema = """
 record_id string,
 customer_name string,
+loan_status string,
+state string,
 amount string,
 quantity string,
 event_date string,
@@ -169,6 +171,8 @@ bronze_rows = [
     (
         "good-1",
         "  Alice   Smith  ",
+        "  ACTIVE   loan ",
+        "Illinois",
         "12.345",
         "7",
         "2026-08-27",
@@ -179,6 +183,8 @@ bronze_rows = [
     (
         "handled-errors-1",
         "n/a",
+        "charged OFF",
+        "not-a-state",
         "not-a-decimal",
         "not-an-integer",
         "2026-08-28",
@@ -214,6 +220,8 @@ audit_rows = {
 # integration contract; exhaustive edge cases remain in the repository's runtime test suite.
 good = silver_rows["good-1"]
 assert good["CustomerName"] == "ALICE SMITH"
+assert good["LoanStatus"] == "Active Loan"
+assert good["StateCode"] == "IL"
 assert good["Amount"] == Decimal("12.35")
 assert good["Quantity"] == 7
 assert good["EventDate"].isoformat() == "2026-08-27"
@@ -224,6 +232,8 @@ assert good["Attributes"] == {"principal": Decimal("10.13"), "empty": None}
 
 handled = silver_rows["handled-errors-1"]
 assert handled["CustomerName"] is None
+assert handled["LoanStatus"] == "Charged Off"
+assert handled["StateCode"] is None
 assert handled["Amount"] is None
 assert handled["Quantity"] == 0
 assert handled["EventDate"].isoformat() == "2026-08-28"
@@ -240,6 +250,7 @@ assert good_audit["Attributes"].nested_error_paths == ["$['bad']"]
 assert "nested_parse_errors_resolved" in good_audit["Profile"].actions_applied
 assert "nested_parse_errors_resolved" in good_audit["Attributes"].actions_applied
 assert handled_audit["CustomerName"].actions_applied == ["null_marker_replaced"]
+assert handled_audit["StateCode"].actions_applied == ["parse_error_to_null"]
 assert handled_audit["Amount"].actions_applied == ["parse_error_to_null"]
 assert handled_audit["Quantity"].actions_applied == ["parse_error_default_applied"]
 assert handled_audit["Aliases"].actions_applied == ["parse_error_default_applied"]

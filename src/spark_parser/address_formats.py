@@ -129,6 +129,73 @@ _NAME_EXCEPTIONS = {
     "mclean": "McLean",
 }
 
+# Canonical USPS abbreviations for the 50 states. Washington, DC is included because it appears in
+# the same address field in real US source data, even though it is not a state. Territories are
+# intentionally excluded: adding them should be an explicit domain decision rather than an
+# accidental expansion of a field documented as a state code.
+_US_STATE_NAMES = {
+    "alabama": "AL",
+    "alaska": "AK",
+    "arizona": "AZ",
+    "arkansas": "AR",
+    "california": "CA",
+    "colorado": "CO",
+    "connecticut": "CT",
+    "delaware": "DE",
+    "florida": "FL",
+    "georgia": "GA",
+    "hawaii": "HI",
+    "idaho": "ID",
+    "illinois": "IL",
+    "indiana": "IN",
+    "iowa": "IA",
+    "kansas": "KS",
+    "kentucky": "KY",
+    "louisiana": "LA",
+    "maine": "ME",
+    "maryland": "MD",
+    "massachusetts": "MA",
+    "michigan": "MI",
+    "minnesota": "MN",
+    "mississippi": "MS",
+    "missouri": "MO",
+    "montana": "MT",
+    "nebraska": "NE",
+    "nevada": "NV",
+    "new hampshire": "NH",
+    "new jersey": "NJ",
+    "new mexico": "NM",
+    "new york": "NY",
+    "north carolina": "NC",
+    "north dakota": "ND",
+    "ohio": "OH",
+    "oklahoma": "OK",
+    "oregon": "OR",
+    "pennsylvania": "PA",
+    "rhode island": "RI",
+    "south carolina": "SC",
+    "south dakota": "SD",
+    "tennessee": "TN",
+    "texas": "TX",
+    "utah": "UT",
+    "vermont": "VT",
+    "virginia": "VA",
+    "washington": "WA",
+    "west virginia": "WV",
+    "wisconsin": "WI",
+    "wyoming": "WY",
+    "district of columbia": "DC",
+    "washington dc": "DC",
+    "washington d.c.": "DC",
+}
+
+# Full names and already-abbreviated inputs share one lookup. Lowercase keys match the normalized
+# comparison expression; values always use the canonical uppercase two-letter representation.
+_US_STATE_TOKENS = {
+    **_US_STATE_NAMES,
+    **{abbreviation.lower(): abbreviation for abbreviation in _US_STATE_NAMES.values()},
+}
+
 
 def _map_lookup(mapping: dict[str, str], key: Column) -> Column:
     """Build a native Spark map lookup from a small code-owned Python dictionary."""
@@ -250,6 +317,16 @@ def format_county(value: Column) -> Column:
     return F.when(
         (core != "") & (formatted != ""), F.concat(formatted, F.lit(" County"))
     ).otherwise(F.lit(None).cast("string"))
+
+
+def format_state_us(value: Column) -> Column:
+    """Return a canonical two-letter US state/DC abbreviation.
+
+    ``value`` is expected to have passed common whitespace normalization. Matching is
+    case-insensitive for full names and abbreviations. Unknown non-null values return null so the
+    ordinary string parser error policy can fail, preserve null, or assign a configured default.
+    """
+    return _map_lookup(_US_STATE_TOKENS, F.lower(value))
 
 
 def format_zip(value: Column) -> Column:

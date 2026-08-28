@@ -246,6 +246,78 @@ SELECT 3, 'route66 road', 'smith-jones county', '123-45'
     assert audits[2][1].actions_applied == ["zip_padded", "zip_plus4_formatted"]
 
 
+def test_title_and_state_us_formats_under_ansi(spark: SparkSession) -> None:
+    """Validate space-preserving title case and strict state-code normalization."""
+    assert spark.conf.get("spark.sql.ansi.enabled") == "true"
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: display_and_state
+parser_config_name: Display and State Formats
+version: "1"
+columns:
+  - source_column_name: label
+    silver_column_name: DisplayLabel
+    expected_data_type: string
+    parser:
+      type: string
+      format: title
+  - source_column_name: state
+    silver_column_name: StateCode
+    expected_data_type: string
+    parser:
+      type: string
+      format: state_us
+      on_parse_error: null
+      audit: true
+  - source_column_name: state
+    silver_column_name: RequiredStateCode
+    expected_data_type: string
+    parser:
+      type: string
+      format: state_us
+      on_parse_error: default
+      default_on_error: UNKNOWN
+      audit: true
+"""
+    )
+    bronze_df = spark.createDataFrame(
+        [
+            (1, "  LOAN   status ", "Illinois"),
+            (2, "mixed CASE", "  new   york "),
+            (3, "account owner", "il"),
+            (4, "district record", "District of Columbia"),
+            (5, "invalid state", "Puerto Rico"),
+        ],
+        "row_id integer, label string, state string",
+    )
+
+    parsing = SparkDataFrameParser().parse_dataframe(
+        bronze_df,
+        config,
+        key_columns=["row_id"],
+    )
+    rows = parsing.parsed_df.collect()
+    assert [row.DisplayLabel for row in rows] == [
+        "Loan Status",
+        "Mixed Case",
+        "Account Owner",
+        "District Record",
+        "Invalid State",
+    ]
+    assert [row.StateCode for row in rows] == ["IL", "NY", "IL", "DC", None]
+    assert [row.RequiredStateCode for row in rows] == [
+        "IL",
+        "NY",
+        "IL",
+        "DC",
+        "UNKNOWN",
+    ]
+
+    invalid_audit = parsing.results_df.collect()[-1].spark_parser_parse_results
+    assert invalid_audit[0].actions_applied == ["parse_error_to_null"]
+    assert invalid_audit[1].actions_applied == ["parse_error_default_applied"]
+
+
 def test_audit_schema_is_stable_with_or_without_audited_columns(spark: SparkSession) -> None:
     template = """
 parser_config_id: audit_schema

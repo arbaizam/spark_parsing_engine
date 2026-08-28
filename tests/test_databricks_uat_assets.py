@@ -2,7 +2,13 @@
 
 from pathlib import Path
 
-from spark_parser import ChildErrorMode, ParseErrorMode, ParserType, YamlParserConfigCompiler
+from spark_parser import (
+    ChildErrorMode,
+    ParseErrorMode,
+    ParserType,
+    StringFormat,
+    YamlParserConfigCompiler,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 UAT_ROOT = ROOT / "databricks" / "uat"
@@ -21,6 +27,8 @@ def test_databricks_uat_config_compiles_with_required_coverage() -> None:
     }
     assert options["Amount"].on_parse_error is ParseErrorMode.NULL
     assert options["Quantity"].on_parse_error is ParseErrorMode.DEFAULT
+    assert options["LoanStatus"].string_format is StringFormat.TITLE
+    assert options["StateCode"].string_format is StringFormat.STATE_US
     assert options["Aliases"].on_element_error is ChildErrorMode.DROP
     assert options["Profile"].field_parsers[1].parser.on_element_error is ChildErrorMode.NULL
     assert options["Attributes"].on_value_error is ChildErrorMode.DROP
