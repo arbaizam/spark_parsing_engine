@@ -2,8 +2,8 @@
 # MAGIC %md
 # MAGIC # Spark Parser Databricks UAT
 # MAGIC
-# MAGIC Installs one wheel, validates representative bronze-to-silver behavior under ANSI mode,
-# MAGIC round-trips silver and parser-audit data through Delta, and publishes a rules-engine
+# MAGIC Installs one wheel, validates representative bronze-to-target behavior under ANSI mode,
+# MAGIC round-trips target and parser-audit data through Delta, and publishes a rules-engine
 # MAGIC handoff contract. See the adjacent `README.md` for parameters and pass criteria.
 
 # COMMAND ----------
@@ -206,21 +206,21 @@ bronze_rows = [
 ]
 bronze_df = spark.createDataFrame(bronze_rows, schema=bronze_schema)
 
-# Persist the shared lazy plan because both silver and audit projections are materialized below.
+# Persist the shared lazy plan because both target and audit projections are materialized below.
 # Without this call, Spark could evaluate every parser expression twice.
 parsing = parser.parse_dataframe(bronze_df, config, key_columns=["record_id"]).persist()
-silver_df = parsing.parsed_df
+target_df = parsing.parsed_df
 audit_df = parsing.results_df.withColumnRenamed("record_id", "RecordId")
 
 # Collecting is appropriate here only because this is a fixed two-row UAT fixture. Production loads
 # must validate aggregations or write distributed DataFrames instead of collecting arbitrary data.
-silver_rows = {
-    row.RecordId: row.asDict(recursive=True) for row in silver_df.collect()
+target_rows = {
+    row.RecordId: row.asDict(recursive=True) for row in target_df.collect()
 }
 audit_collected_rows = audit_df.collect()
 audit_rows = {
     row.RecordId: {
-        result.silver_column_name: result
+        result.target_column_name: result
         for result in row.spark_parser_parse_results
     }
     for row in audit_collected_rows
@@ -234,7 +234,7 @@ ansi_audit_rows = {
 
 # Assert exact typed Python values after Spark materialization. These checks cover the representative
 # integration contract; exhaustive edge cases remain in the repository's runtime test suite.
-good = silver_rows["good-1"]
+good = target_rows["good-1"]
 assert good["CustomerName"] == "ALICE SMITH"
 assert good["LoanStatus"] == "Active Loan"
 assert good["StateCode"] == "IL"
@@ -248,7 +248,7 @@ assert good["Profile"]["postal_code"] == "01234"
 assert good["Profile"]["scores"] == [1, -1, -1]
 assert good["Attributes"] == {"principal": Decimal("10.13"), "empty": None}
 
-handled = silver_rows["handled-errors-1"]
+handled = target_rows["handled-errors-1"]
 assert handled["CustomerName"] is None
 assert handled["LoanStatus"] == "Charged Off"
 assert handled["StateCode"] == "Mul"
@@ -262,7 +262,7 @@ assert handled["Profile"] == {"postal_code": "00000", "scores": []}
 assert handled["Attributes"] is None
 
 # Audit assertions prove handled failures remain explainable even when a bad child is dropped or
-# replaced in the final silver value.
+# replaced in the final target value.
 good_audit = audit_rows["good-1"]
 handled_audit = audit_rows["handled-errors-1"]
 assert good_audit["Profile"].nested_error_paths == ["$.scores[1]"]
@@ -285,7 +285,7 @@ assert handled_audit["Aliases"].actions_applied == ["parse_error_default_applied
 assert handled_audit["Profile"].actions_applied == ["parse_error_default_applied"]
 assert handled_audit["Attributes"].actions_applied == ["parse_error_to_null"]
 
-display(silver_df.orderBy("RecordId"))
+display(target_df.orderBy("RecordId"))
 display(audit_df.orderBy("RecordId"))
 
 # COMMAND ----------
@@ -301,7 +301,7 @@ try:
         config,
         key_columns=["record_id"],
     )
-    non_ansi_silver_rows = {
+    non_ansi_target_rows = {
         row.RecordId: row.asDict(recursive=True)
         for row in non_ansi_parsing.parsed_df.collect()
     }
@@ -310,7 +310,7 @@ try:
         row.RecordId: row.asDict(recursive=True)["spark_parser_parse_results"]
         for row in non_ansi_audit_df.collect()
     }
-    assert non_ansi_silver_rows == silver_rows
+    assert non_ansi_target_rows == target_rows
     assert non_ansi_audit_rows == ansi_audit_rows
 finally:
     spark.conf.set("spark.sql.ansi.enabled", "true")
@@ -328,7 +328,7 @@ parser_config_name: Databricks Fail Policy UAT
 version: "1"
 columns:
   - source_column_name: raw_value
-    silver_column_name: FailValue
+    target_column_name: FailValue
     expected_data_type: integer
     parser: integer
 """
@@ -354,13 +354,13 @@ spark.sql(f"DESCRIBE SCHEMA `{target_catalog}`.`{target_schema}`").collect()
 
 # Unique run-scoped names plus errorifexists provide a fail-closed write policy. The notebook never
 # overwrites evidence from another attempt and never creates or drops the containing schema.
-silver_table = f"{target_catalog}.{target_schema}.{table_prefix}_{run_id}_silver"
+target_table = f"{target_catalog}.{target_schema}.{table_prefix}_{run_id}_target"
 audit_table = f"{target_catalog}.{target_schema}.{table_prefix}_{run_id}_audit"
 
-silver_df.write.format("delta").mode("errorifexists").saveAsTable(silver_table)
+target_df.write.format("delta").mode("errorifexists").saveAsTable(target_table)
 audit_df.write.format("delta").mode("errorifexists").saveAsTable(audit_table)
 
-silver_delta_df = spark.table(silver_table)
+target_delta_df = spark.table(target_table)
 audit_delta_df = spark.table(audit_table)
 
 
@@ -374,17 +374,17 @@ def schema_signature(df) -> list[tuple[str, str]]:
     return [(field.name, field.dataType.simpleString()) for field in df.schema.fields]
 
 
-assert schema_signature(silver_delta_df) == schema_signature(silver_df)
+assert schema_signature(target_delta_df) == schema_signature(target_df)
 assert schema_signature(audit_delta_df) == schema_signature(audit_df)
-assert ordered_rows(silver_delta_df, "RecordId") == ordered_rows(silver_df, "RecordId")
+assert ordered_rows(target_delta_df, "RecordId") == ordered_rows(target_df, "RecordId")
 assert ordered_rows(audit_delta_df, "RecordId") == ordered_rows(audit_df, "RecordId")
 
 # COMMAND ----------
 
-# Rules-engine handoff: typed silver rows stay separate from flattened parser diagnostics. Rules
+# Rules-engine handoff: typed target rows stay separate from flattened parser diagnostics. Rules
 # consume domain values from the first DataFrame and may use the second for parser lineage, handled
 # errors, and routing decisions without forcing audit structs into the business schema.
-rules_engine_input_df = silver_delta_df
+rules_engine_input_df = target_delta_df
 rules_engine_parser_results_df = audit_delta_df.select(
     "RecordId",
     F.col("spark_parser_config.id").alias("parser_config_id"),
@@ -421,7 +421,7 @@ assert rules_engine_parser_results_df.schema.fieldNames() == [
     "parser_config_content_hash",
     "spark_parser_engine_version",
     "source_column_name",
-    "silver_column_name",
+    "target_column_name",
     "parser_type",
     "expected_data_type",
     "original_value",
@@ -462,7 +462,7 @@ summary = {
     "parser_config_version": config.version,
     "parser_config_content_hash": config_hash,
     "bronze_row_count": bronze_df.count(),
-    "silver_table": silver_table,
+    "target_table": target_table,
     "audit_table": audit_table,
     "rules_engine_input_view": rules_input_view,
     "rules_engine_parser_results_view": parser_results_view,

@@ -82,7 +82,7 @@ class SparkDataType:
 
     @property
     def canonical(self) -> str:
-        """Render stable Spark DDL used in schemas, reports, and configuration hashes."""
+        """Render canonical Spark DDL used in schemas, reports, and configuration hashes."""
         if self.parser_type is ParserType.DECIMAL:
             return f"decimal({self.precision},{self.scale})"
         if self.parser_type is ParserType.ARRAY:

@@ -30,7 +30,7 @@ _DIRECTIONALS = {
     "southwest": "SW",
 }
 
-# Common Publication 28 suffix names and aliases. Changes to this table alter canonical silver
+# Common Publication 28 suffix names and aliases. Changes to this table alter canonical target
 # output, so additions should be accompanied by focused runtime examples and UAT review.
 _SUFFIXES = {
     "alley": "Aly",

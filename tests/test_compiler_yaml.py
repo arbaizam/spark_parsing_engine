@@ -47,7 +47,7 @@ parser_config_name: Complex
 version: "1"
 columns:
   - source_column_name: names
-    silver_column_name: Names
+    target_column_name: Names
     expected_data_type: array<string>
     parser:
       type: array
@@ -55,17 +55,17 @@ columns:
       on_element_error: drop
       distinct: true
   - source_column_name: object
-    silver_column_name: Object
+    target_column_name: Object
     expected_data_type: struct<name:string,scores:array<integer>>
     parser:
       type: struct
       fields:
-        - {source_field_name: raw_name, silver_field_name: name, parser: string}
+        - {source_field_name: raw_name, target_field_name: name, parser: string}
         - source_field_name: raw_scores
-          silver_field_name: scores
+          target_field_name: scores
           parser: {type: array, element_parser: integer, on_element_error: null}
   - source_column_name: attributes
-    silver_column_name: Attributes
+    target_column_name: Attributes
     expected_data_type: map<string,decimal(8,2)>
     parser: {type: map, value_parser: decimal, on_value_error: drop}
 """
@@ -101,7 +101,7 @@ columns:
         ),
         (
             "struct<a:string,b:string>",
-            "{type: struct, fields: [{source_field_name: a, silver_field_name: a, parser: string}]}",
+            "{type: struct, fields: [{source_field_name: a, target_field_name: a, parser: string}]}",
             "missing field",
         ),
         (
@@ -125,7 +125,7 @@ parser_config_name: Invalid
 version: "1"
 columns:
   - source_column_name: value
-    silver_column_name: Value
+    target_column_name: Value
     expected_data_type: {expected_data_type}
     parser: {parser_yaml}
 """
@@ -155,7 +155,7 @@ parser_config_name: Invalid Default
 version: "1"
 columns:
   - source_column_name: value
-    silver_column_name: Value
+    target_column_name: Value
     expected_data_type: {data_type}
     parser:
       type: {data_type}
@@ -169,7 +169,7 @@ columns:
 def test_repository_example_compiles_with_resolved_options() -> None:
     config = YamlParserConfigCompiler().compile_path(ROOT / "test_config.yaml")
 
-    assert config.parser_config_id == "bronze_positions_to_silver"
+    assert config.parser_config_id == "bronze_positions_to_target"
     assert config.version == "1.0.0"
     assert [column.expected_data_type for column in config.columns] == [
         "string",
@@ -212,7 +212,7 @@ parser_config_name: Simple
 version: "1"
 columns:
   - source_column_name: raw_name
-    silver_column_name: RawName
+    target_column_name: RawName
     expected_data_type: string
     parser: string
 """
@@ -246,7 +246,7 @@ parser_config_name: Float Range
 version: "1"
 columns:
   - source_column_name: value
-    silver_column_name: Value
+    target_column_name: Value
     expected_data_type: float
     parser:
       type: float
@@ -265,7 +265,7 @@ parser_config_name: Double Range
 version: "1"
 columns:
   - source_column_name: value
-    silver_column_name: Value
+    target_column_name: Value
     expected_data_type: double
     parser:
       type: double
@@ -284,7 +284,7 @@ parser_config_name: Timestamp Default
 version: "1"
 columns:
   - source_column_name: value
-    silver_column_name: Value
+    target_column_name: Value
     expected_data_type: timestamp_ntz
     parser:
       type: timestamp_ntz
@@ -318,7 +318,7 @@ parser_config_name: Display Format
 version: "1"
 columns:
   - source_column_name: raw_value
-    silver_column_name: DisplayValue
+    target_column_name: DisplayValue
     expected_data_type: string
     parser:
       type: string
@@ -338,27 +338,27 @@ parser_config_name: Preserve Strings
 version: "1"
 columns:
   - source_column_name: state
-    silver_column_name: State
+    target_column_name: State
     expected_data_type: string
     parser: {type: string, format: state_us, on_parse_error: preserve}
   - source_column_name: profile
-    silver_column_name: Profile
+    target_column_name: Profile
     expected_data_type: struct<state:string>
     parser:
       type: struct
       fields:
         - source_field_name: state
-          silver_field_name: state
+          target_field_name: state
           parser: {type: string, format: state_us, on_parse_error: preserve}
   - source_column_name: states
-    silver_column_name: States
+    target_column_name: States
     expected_data_type: array<string>
     parser:
       type: array
       element_parser: {type: string, format: state_us}
       on_element_error: preserve
   - source_column_name: state_map
-    silver_column_name: StateMap
+    target_column_name: StateMap
     expected_data_type: map<string,string>
     parser:
       type: map
@@ -427,7 +427,7 @@ parser_config_name: Invalid
 version: "1"
 columns:
   - source_column_name: value
-    silver_column_name: Value
+    target_column_name: Value
     {fragment}
 """
     with pytest.raises(CompilationError, match=message):
@@ -442,7 +442,7 @@ parser_config_name: Decimal Default
 version: "1"
 columns:
   - source_column_name: amount
-    silver_column_name: Amount
+    target_column_name: Amount
     expected_data_type: decimal(8,2)
     parser:
       type: decimal
@@ -462,7 +462,7 @@ parser_config_name: Spaced Decimal
 version: "1"
 columns:
   - source_column_name: amount
-    silver_column_name: Amount
+    target_column_name: Amount
     expected_data_type: decimal(18, 2)
     parser: decimal
 """
@@ -496,7 +496,7 @@ shared: &shared
   type: string
 columns:
   - source_column_name: value
-    silver_column_name: Value
+    target_column_name: Value
     expected_data_type: string
     parser:
       <<: *shared
@@ -504,7 +504,7 @@ columns:
         )
 
 
-def test_silver_names_are_unique_but_sources_may_repeat() -> None:
+def test_target_names_are_unique_but_sources_may_repeat() -> None:
     compiler = YamlParserConfigCompiler()
     config = compiler.compile_text(
         """
@@ -513,11 +513,11 @@ parser_config_name: Repeated Source
 version: "1"
 columns:
   - source_column_name: raw_value
-    silver_column_name: RawValue
+    target_column_name: RawValue
     expected_data_type: string
     parser: string
   - source_column_name: raw_value
-    silver_column_name: RawValueUpper
+    target_column_name: RawValueUpper
     expected_data_type: string
     parser:
       type: string
@@ -529,19 +529,19 @@ columns:
         "raw_value",
         "raw_value",
     ]
-    with pytest.raises(CompilationError, match="Duplicate silver_column_name"):
+    with pytest.raises(CompilationError, match="Duplicate target_column_name"):
         compiler.compile_text(
             """
-parser_config_id: duplicate_silver
-parser_config_name: Duplicate Silver
+parser_config_id: duplicate_target
+parser_config_name: Duplicate Target
 version: "1"
 columns:
   - source_column_name: first
-    silver_column_name: Value
+    target_column_name: Value
     expected_data_type: string
     parser: string
   - source_column_name: second
-    silver_column_name: Value
+    target_column_name: Value
     expected_data_type: string
     parser: string
 """
@@ -560,11 +560,11 @@ globals:
   boolean_case_sensitive: false
 columns:
   - source_column_name: active
-    silver_column_name: IsActive
+    target_column_name: IsActive
     expected_data_type: boolean
     parser: boolean
   - source_column_name: approved
-    silver_column_name: IsApproved
+    target_column_name: IsApproved
     expected_data_type: boolean
     parser:
       type: boolean
@@ -590,7 +590,7 @@ globals:
   boolean_case_sensitive: false
 columns:
   - source_column_name: value
-    silver_column_name: Value
+    target_column_name: Value
     expected_data_type: boolean
     parser: boolean
 """
@@ -609,20 +609,20 @@ globals:
   boolean_case_sensitive: false
 columns:
   - source_column_name: replace_value
-    silver_column_name: ReplaceValue
+    target_column_name: ReplaceValue
     expected_data_type: boolean
     parser:
       type: boolean
       true_values: [approved]
   - source_column_name: extend_value
-    silver_column_name: ExtendValue
+    target_column_name: ExtendValue
     expected_data_type: boolean
     parser:
       type: boolean
       false_values: [rejected]
       boolean_values_mode: extend
   - source_column_name: unicode_value
-    silver_column_name: UnicodeValue
+    target_column_name: UnicodeValue
     expected_data_type: boolean
     parser:
       type: boolean
@@ -649,9 +649,11 @@ parser_config_id: unknown_keys
 parser_config_name: Unknown Keys
 version: "1"
 columns:
-  - column_name: value
-    data_type: string
+  - source_column_name: value
+    target_column_name: Value
+    expected_data_type: string
     parser: string
+    unexpected_option: true
 """
         )
     with pytest.raises(CompilationError, match="parser config must be a mapping"):
@@ -668,7 +670,7 @@ parser_config_name: "  Trimmed Name  "
 version: "  1  "
 columns:
   - source_column_name: "  raw_value  "
-    silver_column_name: "  Value  "
+    target_column_name: "  Value  "
     expected_data_type: " string "
     parser: string
 """
@@ -677,7 +679,7 @@ columns:
     assert config.parser_config_id == "trimmed"
     assert config.version == "1"
     assert config.columns[0].source_column_name == "raw_value"
-    assert config.columns[0].silver_column_name == "Value"
+    assert config.columns[0].target_column_name == "Value"
 
 
 def test_complex_parsers_resolve_collapse_whitespace_to_false() -> None:
@@ -688,25 +690,25 @@ parser_config_name: Complex Normalization
 version: "1"
 columns:
   - source_column_name: names
-    silver_column_name: Names
+    target_column_name: Names
     expected_data_type: array<string>
     parser:
       type: array
       collapse_whitespace: true
       element_parser: string
   - source_column_name: object
-    silver_column_name: Object
+    target_column_name: Object
     expected_data_type: struct<name:string>
     parser:
       type: struct
       fields:
-        - {source_field_name: name, silver_field_name: name, parser: string}
+        - {source_field_name: name, target_field_name: name, parser: string}
   - source_column_name: attributes
-    silver_column_name: Attributes
+    target_column_name: Attributes
     expected_data_type: map<string,string>
     parser: {type: map, value_parser: string}
   - source_column_name: label
-    silver_column_name: Label
+    target_column_name: Label
     expected_data_type: string
     parser: string
 """
@@ -749,7 +751,7 @@ parser_config_name: Alias
 version: "1"
 columns:
   - source_column_name: value
-    silver_column_name: Value
+    target_column_name: Value
     expected_data_type: {alias}
     parser: {alias}
 """

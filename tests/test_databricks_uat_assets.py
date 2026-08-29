@@ -22,7 +22,7 @@ UAT_ROOT = ROOT / "databricks" / "uat"
 def test_databricks_uat_config_compiles_with_required_coverage() -> None:
     """Keep the checked-in UAT fixture aligned with the parser behaviors it promises to validate."""
     config = YamlParserConfigCompiler().compile_path(UAT_ROOT / "spark_parser_uat.yaml")
-    options = {column.silver_column_name: column.parser for column in config.columns}
+    options = {column.target_column_name: column.parser for column in config.columns}
 
     assert config.owner == "Data Engineering"
     assert {option.parser_type for option in options.values()} >= {

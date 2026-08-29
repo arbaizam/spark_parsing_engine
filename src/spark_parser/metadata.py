@@ -96,7 +96,7 @@ _COMMON_ARGUMENTS = [
     _argument(
         "is_nullable",
         default=PARSER_DEFAULTS["common"]["is_nullable"],
-        description="Allow the final silver value to remain null.",
+        description="Allow the final target value to remain null.",
     ),
     _argument(
         "default_on_null",
@@ -248,7 +248,7 @@ _SPECIFIC_ARGUMENTS: dict[ParserType, list[dict[str, Any]]] = {
         _argument(
             "fields",
             required=True,
-            description="Complete ordered source-to-silver field mapping with recursive parsers.",
+            description="Complete ordered source-to-target field mapping with recursive parsers.",
         ),
     ],
     ParserType.MAP: [
@@ -297,7 +297,7 @@ _SUMMARIES = {
     ParserType.TIMESTAMP: "Cascade through configured Spark datetime patterns and return a timestamp.",
     ParserType.TIMESTAMP_NTZ: "Parse a wall-clock timestamp without timezone interpretation.",
     ParserType.ARRAY: "Parse a JSON or delimited array and recursively parse every element.",
-    ParserType.STRUCT: "Parse a JSON object into configured, recursively parsed silver fields.",
+    ParserType.STRUCT: "Parse a JSON object into configured, recursively parsed target fields.",
     ParserType.MAP: "Parse a JSON object into a string-keyed map with recursively parsed values.",
 }
 
@@ -336,7 +336,7 @@ _SPECIFIC_BEHAVIORS = {
         "Nested defaults and invalidated zeros are reported in dedicated top-level audit path arrays.",
     ],
     ParserType.STRUCT: [
-        "Every silver struct field must have exactly one source field mapping and recursive parser.",
+        "Every target struct field must have exactly one source field mapping and recursive parser.",
         "Unknown JSON fields are ignored; configured missing fields become null/default.",
         "Nested defaults and invalidated zeros are reported in dedicated top-level audit path arrays.",
     ],
@@ -417,7 +417,7 @@ def parser_description(parser_type: ParserType) -> dict[str, Any]:
     arguments = deepcopy([*_COMMON_ARGUMENTS, *_SPECIFIC_ARGUMENTS[parser_type]])
     if parser_type is ParserType.STRING:
         # Preserve is intentionally absent from non-string parser metadata because the compiler
-        # rejects raw fallback whenever the silver position cannot legally contain a string.
+        # rejects raw fallback whenever the target position cannot legally contain a string.
         for argument in arguments:
             if argument["name"] == "on_parse_error":
                 argument["allowed_values"] = [member.value for member in ParseErrorMode]
@@ -442,7 +442,7 @@ def parser_description(parser_type: ParserType) -> dict[str, Any]:
             normalization_behavior,
             "Null markers match only when replace_null_markers is true.",
             "Parse errors are resolved before zero and final-null handling.",
-            "fail mode raises only when Spark materializes the failing silver expression; projection pruning can skip it.",
+            "fail mode raises only when Spark materializes the failing target expression; projection pruning can skip it.",
             "All execution uses native Spark expressions; no Python UDF is used.",
             *(
                 ["Only the exact lowercase JSON literal null is treated as a JSON null token."]
@@ -500,7 +500,7 @@ def config_description() -> dict[str, Any]:
                 description="Exact top-level bronze source name; missing input warns and yields null/default.",
             ),
             _argument(
-                "silver_column_name",
+                "target_column_name",
                 required=True,
                 description="Required, unique output name in parsed_df.",
             ),

@@ -261,20 +261,20 @@ class YamlParserConfigCompiler:
         globals_config: ParserGlobals,
         index: int,
     ) -> ColumnParser:
-        """Compile one top-level source-to-silver mapping and its recursive parser tree."""
+        """Compile one top-level source-to-target mapping and its recursive parser tree."""
         payload = self._ensure_mapping(raw_column, f"column at index {index}")
         self._reject_keys(
             payload,
             {
                 "source_column_name",
-                "silver_column_name",
+                "target_column_name",
                 "expected_data_type",
                 "parser",
             },
             f"Column at index {index}",
         )
         source_column_name = self._required_string(payload, "source_column_name")
-        silver_column_name = self._required_string(payload, "silver_column_name")
+        target_column_name = self._required_string(payload, "target_column_name")
         # Parse DDL once and carry both the recursive model and its canonical text. Re-parsing in
         # nested validation or runtime code would create opportunities for inconsistent behavior.
         data_type = parse_spark_data_type(self._required_string(payload, "expected_data_type"))
@@ -283,12 +283,12 @@ class YamlParserConfigCompiler:
             payload.get("parser", _MISSING),
             globals_config,
             data_type,
-            silver_column_name,
+            target_column_name,
             allow_audit=True,
         )
         return ColumnParser(
             source_column_name=source_column_name,
-            silver_column_name=silver_column_name,
+            target_column_name=target_column_name,
             expected_data_type=expected_data_type,
             data_type=data_type,
             parser=options,
@@ -299,7 +299,7 @@ class YamlParserConfigCompiler:
         raw_parser: Any,
         globals_config: ParserGlobals,
         data_type: SparkDataType,
-        silver_column_name: str,
+        target_column_name: str,
         *,
         allow_audit: bool,
         child_error_owned_by_parent: bool = False,
@@ -311,30 +311,30 @@ class YamlParserConfigCompiler:
         child-error policy. Struct fields instead own normal parse-error settings.
         """
         if raw_parser is _MISSING:
-            raise CompilationError(f"parser is required for column {silver_column_name!r}.")
+            raise CompilationError(f"parser is required for column {target_column_name!r}.")
         # Scalar shorthand such as ``parser: date`` is normalized into the same mapping path as
         # long-form options. From this point onward there is only one validation implementation.
         if isinstance(raw_parser, str):
             payload: Mapping[str, Any] = {"type": raw_parser}
         else:
-            payload = self._ensure_mapping(raw_parser, f"parser for {silver_column_name!r}")
+            payload = self._ensure_mapping(raw_parser, f"parser for {target_column_name!r}")
 
         parser_type = self._parser_type(self._required_string(payload, "type"))
         expected_data_type = data_type.canonical
         if parser_type is not data_type.parser_type:
             raise CompilationError(
                 f"Parser {parser_type.value!r} is incompatible with expected_data_type "
-                f"{expected_data_type!r} for silver column {silver_column_name!r}; "
+                f"{expected_data_type!r} for target column {target_column_name!r}; "
                 f"expected {data_type.parser_type.value!r}."
             )
         self._validate_nested_parser_contract(
             payload,
-            silver_column_name,
+            target_column_name,
             allow_audit=allow_audit,
             child_error_owned_by_parent=child_error_owned_by_parent,
         )
         allowed_keys = self._parser_allowed_keys(parser_type, allow_audit=allow_audit)
-        self._reject_keys(payload, allowed_keys, f"Parser for {silver_column_name!r}")
+        self._reject_keys(payload, allowed_keys, f"Parser for {target_column_name!r}")
 
         # Resolve marker inheritance before validating ``replace_null_markers``. A column can use
         # global markers, replace them, or append its own markers while preserving first-seen order.
@@ -345,7 +345,7 @@ class YamlParserConfigCompiler:
         )
         if "null_markers_mode" in payload and "null_markers" not in payload:
             raise CompilationError(
-                f"null_markers_mode for {silver_column_name!r} requires column null_markers."
+                f"null_markers_mode for {target_column_name!r} requires column null_markers."
             )
         if "null_markers" in payload:
             column_markers = self._string_sequence(payload["null_markers"], "null_markers")
@@ -363,7 +363,7 @@ class YamlParserConfigCompiler:
         )
         if replace_null_markers and not markers:
             raise CompilationError(
-                f"replace_null_markers is true for {silver_column_name!r}, "
+                f"replace_null_markers is true for {target_column_name!r}, "
                 "but no null markers exist."
             )
 
@@ -373,11 +373,11 @@ class YamlParserConfigCompiler:
         raw_default_on_null = payload.get("default_on_null", _MISSING)
         if not is_nullable and raw_default_on_null is _MISSING:
             raise CompilationError(
-                f"Column {silver_column_name!r} is not nullable and requires default_on_null."
+                f"Column {target_column_name!r} is not nullable and requires default_on_null."
             )
         if is_nullable and raw_default_on_null is not _MISSING:
             raise CompilationError(
-                f"default_on_null for {silver_column_name!r} requires is_nullable: false."
+                f"default_on_null for {target_column_name!r} requires is_nullable: false."
             )
         default_on_null = (
             self._typed_default(
@@ -403,20 +403,20 @@ class YamlParserConfigCompiler:
         )
         # Preserving an invalid token is type-safe only when the target itself is a string. A raw
         # value such as ``Mul`` cannot inhabit an integer, date, binary, or complex Spark column.
-        # Enforcing this during compilation keeps runtime expressions schema-stable and gives the
+        # Enforcing this during compilation keeps runtime expressions schema-consistent and gives the
         # author a useful error before any Spark job starts.
         if on_parse_error is ParseErrorMode.PRESERVE and parser_type is not ParserType.STRING:
             raise CompilationError(
-                f"on_parse_error: preserve for {silver_column_name!r} requires a string parser."
+                f"on_parse_error: preserve for {target_column_name!r} requires a string parser."
             )
         raw_default_on_error = payload.get("default_on_error", _MISSING)
         if on_parse_error is ParseErrorMode.DEFAULT and raw_default_on_error is _MISSING:
             raise CompilationError(
-                f"on_parse_error: default for {silver_column_name!r} requires default_on_error."
+                f"on_parse_error: default for {target_column_name!r} requires default_on_error."
             )
         if on_parse_error is not ParseErrorMode.DEFAULT and raw_default_on_error is not _MISSING:
             raise CompilationError(
-                f"default_on_error for {silver_column_name!r} requires on_parse_error: default."
+                f"default_on_error for {target_column_name!r} requires on_parse_error: default."
             )
         default_on_error = (
             self._typed_default(
@@ -438,7 +438,7 @@ class YamlParserConfigCompiler:
             and Decimal(str(default_on_null)) == 0
         ):
             raise CompilationError(
-                f"Column {silver_column_name!r} rejects zero but uses zero as default_on_null."
+                f"Column {target_column_name!r} rejects zero but uses zero as default_on_null."
             )
         if (
             parser_type in NUMERIC_PARSER_TYPES
@@ -447,7 +447,7 @@ class YamlParserConfigCompiler:
             and Decimal(str(default_on_error)) == 0
         ):
             raise CompilationError(
-                f"Column {silver_column_name!r} rejects zero but uses zero as default_on_error."
+                f"Column {target_column_name!r} rejects zero but uses zero as default_on_error."
             )
 
         collapse_whitespace = self._bool(
@@ -471,14 +471,14 @@ class YamlParserConfigCompiler:
         ) = self._compile_boolean_values(
             payload,
             parser_type,
-            silver_column_name,
+            target_column_name,
             globals_config,
         )
         complex_options = self._compile_complex_options(
             payload,
             data_type,
             globals_config,
-            silver_column_name,
+            target_column_name,
         )
         # Construct one fully resolved immutable node only after every conditional relationship has
         # passed. Runtime code may safely branch on parser_type without looking back at raw YAML.
@@ -580,10 +580,10 @@ class YamlParserConfigCompiler:
         if data_type.parser_type is ParserType.STRUCT:
             for field in options.field_parsers:
                 self._validate_binary_value(
-                    value[field.silver_field_name],
+                    value[field.target_field_name],
                     field.data_type,
                     field.parser,
-                    f"{label}.{field.silver_field_name}",
+                    f"{label}.{field.target_field_name}",
                 )
             return
         if data_type.parser_type is ParserType.MAP:
@@ -823,31 +823,31 @@ class YamlParserConfigCompiler:
                 )
                 self._reject_keys(
                     field_payload,
-                    {"source_field_name", "silver_field_name", "parser"},
+                    {"source_field_name", "target_field_name", "parser"},
                     f"Field {index} for struct parser {label!r}",
                 )
                 source_name = self._required_string(field_payload, "source_field_name")
-                silver_name = self._required_string(field_payload, "silver_field_name")
-                if silver_name not in expected_fields:
+                target_name = self._required_string(field_payload, "target_field_name")
+                if target_name not in expected_fields:
                     raise CompilationError(
-                        f"Struct parser {label!r} configures unknown silver field "
-                        f"{silver_name!r}; expected {sorted(expected_fields)}."
+                        f"Struct parser {label!r} configures unknown target field "
+                        f"{target_name!r}; expected {sorted(expected_fields)}."
                     )
-                if silver_name in compiled_by_name:
+                if target_name in compiled_by_name:
                     raise CompilationError(
-                        f"Struct parser {label!r} has duplicate silver field {silver_name!r}."
+                        f"Struct parser {label!r} has duplicate target field {target_name!r}."
                     )
-                field_type = expected_fields[silver_name]
+                field_type = expected_fields[target_name]
                 field_options = self._compile_parser(
                     field_payload.get("parser", _MISSING),
                     globals_config,
                     field_type,
-                    f"{label}.{silver_name}",
+                    f"{label}.{target_name}",
                     allow_audit=False,
                 )
-                compiled_by_name[silver_name] = StructFieldParser(
+                compiled_by_name[target_name] = StructFieldParser(
                     source_field_name=source_name,
-                    silver_field_name=silver_name,
+                    target_field_name=target_name,
                     expected_data_type=field_type.canonical,
                     data_type=field_type,
                     parser=field_options,
@@ -939,7 +939,7 @@ class YamlParserConfigCompiler:
         self,
         payload: Mapping[str, Any],
         parser_type: ParserType,
-        silver_column_name: str,
+        target_column_name: str,
         globals_config: ParserGlobals,
     ) -> tuple[tuple[str, ...], tuple[str, ...], bool, BooleanValuesMode]:
         """Resolve inherited or extended Boolean tokens for one Boolean parser."""
@@ -959,7 +959,7 @@ class YamlParserConfigCompiler:
         supplied_false = "false_values" in payload
         if "boolean_values_mode" in payload and not (supplied_true or supplied_false):
             raise CompilationError(
-                f"boolean_values_mode for {silver_column_name!r} requires true_values "
+                f"boolean_values_mode for {target_column_name!r} requires true_values "
                 "or false_values."
             )
         column_true = (
@@ -981,7 +981,7 @@ class YamlParserConfigCompiler:
             else ()
         )
         if mode is BooleanValuesMode.EXTEND:
-            # Ordered de-duplication keeps serialized output stable and gives author-supplied tokens
+            # Ordered de-duplication keeps serialized output deterministic and gives author-supplied tokens
             # predictable precedence in reports without changing membership behavior.
             true_values = self._deduplicate((*globals_config.true_values, *column_true))
             false_values = self._deduplicate((*globals_config.false_values, *column_false))
@@ -999,7 +999,7 @@ class YamlParserConfigCompiler:
             true_values,
             false_values,
             case_sensitive,
-            f"silver column {silver_column_name!r}",
+            f"target column {target_column_name!r}",
         )
         return true_values, false_values, case_sensitive, mode
 
@@ -1084,7 +1084,7 @@ class YamlParserConfigCompiler:
             mapping = self._ensure_mapping(value, f"{label} for struct")
             expected = {field.name: field.data_type for field in data_type.fields}
             # Exact field coverage prevents a default struct from silently diverging from the
-            # configured silver schema.
+            # configured target schema.
             unknown = sorted(set(mapping) - set(expected))
             missing = sorted(set(expected) - set(mapping))
             if unknown or missing:
@@ -1213,11 +1213,11 @@ class YamlParserConfigCompiler:
         return parsed
 
     def _validate_unique_columns(self, columns: tuple[ColumnParser, ...]) -> None:
-        """Reject duplicate silver names while intentionally allowing repeated sources."""
-        column_names = [column.silver_column_name for column in columns]
+        """Reject duplicate target names while intentionally allowing repeated sources."""
+        column_names = [column.target_column_name for column in columns]
         duplicate_columns = sorted({name for name in column_names if column_names.count(name) > 1})
         if duplicate_columns:
-            raise CompilationError(f"Duplicate silver_column_name values: {duplicate_columns}.")
+            raise CompilationError(f"Duplicate target_column_name values: {duplicate_columns}.")
 
     def _string_sequence(
         self,

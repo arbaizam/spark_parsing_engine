@@ -1,4 +1,4 @@
-"""Build native Spark expressions that turn bronze strings into typed silver values.
+"""Build native Spark expressions that turn bronze strings into typed target values.
 
 This module constructs a lazy logical plan; it does not collect rows or use Python/pandas UDFs.
 Keeping transformations inside Spark SQL lets Catalyst optimize the plan and allows the same code
@@ -57,11 +57,11 @@ from spark_parser.serializer import ParserConfigSerializer
 from spark_parser.version import __version__
 
 # Public audit schema. Define it explicitly so an empty audit array has exactly the same type as a
-# populated one. Field order is contractual for consumers that persist or flatten parser results.
+# populated one.
 PARSE_RESULT_STRUCT = T.StructType(
     [
         T.StructField("source_column_name", T.StringType(), True),
-        T.StructField("silver_column_name", T.StringType(), True),
+        T.StructField("target_column_name", T.StringType(), True),
         T.StructField("parser_type", T.StringType(), True),
         T.StructField("expected_data_type", T.StringType(), True),
         T.StructField("original_value", T.StringType(), True),
@@ -96,7 +96,7 @@ _EDGE_WHITESPACE_PATTERN = r"^[\s\u00A0]+|[\s\u00A0]+$"
 _JSON_NUMBER_PATTERN = r"^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$"
 
 # Spark 3.5's ``try_to_timestamp`` can still raise SparkUpgradeException under the default
-# ``spark.sql.legacy.timeParserPolicy=EXCEPTION`` when the legacy parser accepts a prefix that the
+# ``spark.sql.legacy.timeParserPolicy=EXCEPTION`` when Spark accepts a prefix that the
 # corrected parser rejects (for example, trying ``yyyy-MM-dd`` against an ISO timestamp). Full-token
 # shape guards keep known built-in formats away from the wrong formatter. Calendar validity remains
 # Spark's responsibility, while lexical mismatches safely become null and follow parser policy.
@@ -212,7 +212,7 @@ def _quoted_identifier(name: str) -> str:
 
 
 class SparkDataFrameParser:
-    """Build lazy silver and audit projections using only native Spark expressions.
+    """Build lazy target and audit projections using only native Spark expressions.
 
     The compiler guarantees option consistency. This class binds that contract to a concrete input
     schema, creates collision-resistant internal columns, and exposes the final projections through
@@ -304,7 +304,7 @@ class SparkDataFrameParser:
         )
         # Stage 5: enforce final nullability and apply default_on_null where required.
         working = working.withColumns({plan.final_name: self._final_value(plan) for plan in plans})
-        parsed_columns = [(plan.config.silver_column_name, plan.final_name) for plan in plans]
+        parsed_columns = [(plan.config.target_column_name, plan.final_name) for plan in plans]
         audit_structs = [self._audit_for_plan(plan) for plan in plans if plan.config.parser.audit]
 
         parse_results_name = f"{column_prefix}_parse_results"
@@ -327,7 +327,7 @@ class SparkDataFrameParser:
             }
         )
         # Drop bronze and temporary staging columns from the shared plan. Row keys are retained only
-        # for results_df; parsed_df later selects the silver internal names and restores aliases.
+        # for results_df; parsed_df later selects the target internal names and restores aliases.
         working = working.select(
             *[_column(name) for name in normalized_keys],
             *[_column(plan.final_name) for plan in plans],
@@ -727,7 +727,7 @@ class SparkDataFrameParser:
             )
         if parser_type in {ParserType.DATE, ParserType.TIMESTAMP, ParserType.TIMESTAMP_NTZ}:
             # Try formats in author-supplied order and select the first successful result. Built-in
-            # formats are shape-guarded so Spark 3.5's EXCEPTION legacy-time-parser policy cannot
+            # formats are shape-guarded so Spark 3.5's EXCEPTION time-parser policy cannot
             # turn a harmless format mismatch into a job-level SparkUpgradeException.
             if parser_type is ParserType.TIMESTAMP_NTZ:
                 candidates = [
@@ -745,7 +745,7 @@ class SparkDataFrameParser:
 
     @staticmethod
     def _timestamp_candidate(normalized: Column, datetime_format: str) -> Column:
-        """Parse one timestamp format after any known full-token compatibility guard."""
+        """Parse one timestamp format after any known full-token safety guard."""
         parsed = F.try_to_timestamp(normalized, F.lit(datetime_format))
         shape = _DATETIME_INPUT_SHAPES.get(datetime_format)
         if shape is None:
@@ -989,14 +989,14 @@ class SparkDataFrameParser:
         defaults: list[Column] = []
         zeros: list[Column] = []
         for field in options.field_parsers:
-            field_path = F.concat(path, F.lit("."), F.lit(field.silver_field_name))
+            field_path = F.concat(path, F.lit("."), F.lit(field.target_field_name))
             parsed = self._parse_nested_value(
                 raw.getField(field.source_field_name),
                 field,
                 field_path,
                 root_config,
             )
-            parsed_fields.append(parsed.value.alias(field.silver_field_name))
+            parsed_fields.append(parsed.value.alias(field.target_field_name))
             errors.append(parsed.error_paths)
             defaults.append(parsed.default_on_null_paths)
             zeros.append(parsed.zero_invalidated_paths)
@@ -1053,7 +1053,7 @@ class SparkDataFrameParser:
         )
         if options.drop_null_values:
             retained = F.filter(retained, lambda record: record.getField("value").isNotNull())
-        # Remove helper fields before map_from_entries; only key/value pairs belong in silver data.
+        # Remove helper fields before map_from_entries; only key/value pairs belong in target data.
         entries = F.transform(
             retained,
             lambda record: F.struct(
@@ -1095,8 +1095,8 @@ class SparkDataFrameParser:
         message = F.concat(
             F.lit(
                 "Spark Parser could not parse nested value for source "
-                f"{root_config.source_column_name!r} into silver column "
-                f"{root_config.silver_column_name!r} at "
+                f"{root_config.source_column_name!r} into target column "
+                f"{root_config.target_column_name!r} at "
             ),
             path,
             F.lit(f" as {nested.expected_data_type}: "),
@@ -1175,7 +1175,7 @@ class SparkDataFrameParser:
 
     @staticmethod
     def _empty_error_paths() -> Column:
-        """Return a typed empty path array so concat/flatten schemas stay stable."""
+        """Return a typed empty path array so concat/flatten schemas stay consistent."""
         return F.array().cast("array<string>")
 
     def _error_paths(self, failed: Column, path: Column) -> Column:
@@ -1213,18 +1213,18 @@ class SparkDataFrameParser:
         if options.on_parse_error is ParseErrorMode.PRESERVE:
             # Present configured source columns are schema-validated as strings, and compilation
             # restricts this mode to string parsers. Returning source therefore preserves the exact
-            # bronze token (including its original whitespace) without weakening the silver schema.
+            # bronze token (including its original whitespace) without weakening the target schema.
             return F.when(parse_failed, source.cast("string")).otherwise(candidate)
         message = F.concat(
             F.lit(
                 f"Spark Parser could not parse source {column_config.source_column_name!r} "
-                f"into silver column {column_config.silver_column_name!r} as "
+                f"into target column {column_config.target_column_name!r} as "
                 f"{column_config.expected_data_type}: "
             ),
             source,
         )
         # raise_error remains a lazy Spark expression. It fires only if an action materializes this
-        # silver value; a count whose projection prunes the value may not evaluate it.
+        # target value; a count whose projection prunes the value may not evaluate it.
         return F.when(
             parse_failed,
             F.raise_error(message).cast(column_config.expected_data_type),
@@ -1258,10 +1258,10 @@ class SparkDataFrameParser:
             # canonical expected datatype.
             fields = [
                 self._typed_value_literal(
-                    value[field.silver_field_name],
+                    value[field.target_field_name],
                     field.data_type,
                     field.parser,
-                ).alias(field.silver_field_name)
+                ).alias(field.target_field_name)
                 for field in options.field_parsers
             ]
             return F.struct(*fields).cast(data_type.canonical)
@@ -1313,7 +1313,7 @@ class SparkDataFrameParser:
         nested_default_on_null_paths: Column,
         nested_zero_invalidated_paths: Column,
     ) -> Column:
-        """Assemble one stable, human-explainable parser audit struct expression."""
+        """Assemble one deterministic, human-explainable parser audit struct expression."""
         options = column_config.parser
         parse_to_null = parse_failed & F.lit(options.on_parse_error is ParseErrorMode.NULL)
         parse_default = parse_failed & F.lit(options.on_parse_error is ParseErrorMode.DEFAULT)
@@ -1342,7 +1342,7 @@ class SparkDataFrameParser:
             if is_zip
             else F.lit(False)
         )
-        # Action order is intentional and stable. Null placeholders are filtered in Spark so each
+        # Action order is intentional. Null placeholders are filtered in Spark so each
         # row receives only the transformations that actually occurred.
         actions = F.filter(
             F.array(
@@ -1406,7 +1406,7 @@ class SparkDataFrameParser:
             parsed_value = parsed.cast("string")
         return F.struct(
             F.lit(column_config.source_column_name).alias("source_column_name"),
-            F.lit(column_config.silver_column_name).alias("silver_column_name"),
+            F.lit(column_config.target_column_name).alias("target_column_name"),
             F.lit(options.parser_type.value).alias("parser_type"),
             F.lit(column_config.expected_data_type).alias("expected_data_type"),
             source.alias("original_value"),
@@ -1431,7 +1431,7 @@ class SparkDataFrameParser:
         payload.setdefault("default_on_null", None)
         payload.setdefault("default_on_error", None)
         pairs: list[Column] = []
-        # Stringifying values gives every audit row one stable map type even though option values in
+        # Stringifying values gives every audit row one consistent map type even though option values in
         # the compiled model include Booleans, lists, mappings, dates, and nulls.
         for key, value in payload.items():
             pairs.extend((F.lit(key), F.lit(self._option_text(value))))

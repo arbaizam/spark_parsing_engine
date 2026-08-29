@@ -4,7 +4,7 @@
 #   [required]               must be supplied
 #   [optional; default: X]   may be omitted; X is materialized by the compiler
 #   [conditionally required] required only under the condition stated
-# In every column block, source_column_name, silver_column_name,
+# In every column block, source_column_name, target_column_name,
 # expected_data_type, parser, and mapping-form type are [required]. Every other
 # uncommented parser option is [optional] and is set to its displayed compiler
 # default. Commented default_on_* lines are [conditionally required], have no
@@ -27,7 +27,7 @@ globals:                                   # [optional; default: {}]
 columns:                                   # [required] Non-empty ordered list.
   # String parser
   - source_column_name: string_value       # [required] Exact top-level bronze name.
-    silver_column_name: StringValue        # [required] Non-empty, unique silver name.
+    target_column_name: StringValue        # [required] Non-empty, unique target name.
     expected_data_type: string             # [required] Exact target Spark datatype.
     parser:                                # [required] Mapping or scalar `string`.
       type: string                         # [required in mapping form]
@@ -48,7 +48,7 @@ columns:                                   # [required] Non-empty ordered list.
 
   # Byte parser (`tinyint` is an accepted alias).
   - source_column_name: byte_value
-    silver_column_name: ByteValue
+    target_column_name: ByteValue
     expected_data_type: byte
     parser:
       type: byte
@@ -68,7 +68,7 @@ columns:                                   # [required] Non-empty ordered list.
 
   # Short parser (`smallint` is an accepted alias).
   - source_column_name: short_value
-    silver_column_name: ShortValue
+    target_column_name: ShortValue
     expected_data_type: short
     parser:
       type: short
@@ -88,7 +88,7 @@ columns:                                   # [required] Non-empty ordered list.
 
   # Integer parser (`expected_data_type: int` and `type: int` are accepted aliases).
   - source_column_name: integer_value
-    silver_column_name: IntegerValue
+    target_column_name: IntegerValue
     expected_data_type: integer
     parser:
       type: integer
@@ -109,7 +109,7 @@ columns:                                   # [required] Non-empty ordered list.
 
   # Long parser (`expected_data_type: bigint` and `type: bigint` are accepted aliases).
   - source_column_name: long_value
-    silver_column_name: LongValue
+    target_column_name: LongValue
     expected_data_type: long
     parser:
       type: long
@@ -129,7 +129,7 @@ columns:                                   # [required] Non-empty ordered list.
 
   # Float parser (`real` is an accepted alias).
   - source_column_name: float_value
-    silver_column_name: FloatValue
+    target_column_name: FloatValue
     expected_data_type: float
     parser:
       type: float
@@ -149,7 +149,7 @@ columns:                                   # [required] Non-empty ordered list.
 
   # Decimal parser. Precision and scale are required; there is no datatype default.
   - source_column_name: decimal_value
-    silver_column_name: DecimalValue
+    target_column_name: DecimalValue
     expected_data_type: decimal(18,2)
     parser:
       type: decimal
@@ -169,7 +169,7 @@ columns:                                   # [required] Non-empty ordered list.
 
   # Double parser
   - source_column_name: double_value
-    silver_column_name: DoubleValue
+    target_column_name: DoubleValue
     expected_data_type: double
     parser:
       type: double
@@ -189,7 +189,7 @@ columns:                                   # [required] Non-empty ordered list.
 
   # Binary parser. Audit values are always rendered as canonical base64.
   - source_column_name: binary_value
-    silver_column_name: BinaryValue
+    target_column_name: BinaryValue
     expected_data_type: binary
     parser:
       type: binary
@@ -209,7 +209,7 @@ columns:                                   # [required] Non-empty ordered list.
 
   # Boolean parser
   - source_column_name: boolean_value
-    silver_column_name: BooleanValue
+    target_column_name: BooleanValue
     expected_data_type: boolean
     parser:
       type: boolean
@@ -232,7 +232,7 @@ columns:                                   # [required] Non-empty ordered list.
 
   # Date parser. Formats cascade in list order; the first successful parse wins.
   - source_column_name: date_value
-    silver_column_name: DateValue
+    target_column_name: DateValue
     expected_data_type: date
     parser:
       type: date
@@ -253,7 +253,7 @@ columns:                                   # [required] Non-empty ordered list.
 
   # Timestamp parser. Formats cascade in list order; the first successful parse wins.
   - source_column_name: timestamp_value
-    silver_column_name: TimestampValue
+    target_column_name: TimestampValue
     expected_data_type: timestamp
     parser:
       type: timestamp
@@ -274,7 +274,7 @@ columns:                                   # [required] Non-empty ordered list.
 
   # Timestamp without timezone. Represents local wall-clock time.
   - source_column_name: timestamp_ntz_value
-    silver_column_name: TimestampNtzValue
+    target_column_name: TimestampNtzValue
     expected_data_type: timestamp_ntz
     parser:
       type: timestamp_ntz
@@ -295,7 +295,7 @@ columns:                                   # [required] Non-empty ordered list.
 
   # Array parser. JSON supports recursive element types; delimited supports scalar elements.
   - source_column_name: array_value
-    silver_column_name: ArrayValue
+    target_column_name: ArrayValue
     expected_data_type: array<string>
     parser:
       type: array
@@ -320,9 +320,9 @@ columns:                                   # [required] Non-empty ordered list.
       drop_null_elements: false             # [optional; default: false]
       distinct: false                       # [optional; default: false]
 
-  # Struct parser. Every target field must have one source-to-silver mapping.
+  # Struct parser. Every target field must have one source-to-target mapping.
   - source_column_name: struct_value
-    silver_column_name: StructValue
+    target_column_name: StructValue
     expected_data_type: struct<name:string,zip:string>
     parser:
       type: struct
@@ -341,12 +341,12 @@ columns:                                   # [required] Non-empty ordered list.
       input_format: json                    # [optional; default: json; JSON only]
       fields:                               # [required] Complete recursive field list.
         - source_field_name: name
-          silver_field_name: name
+          target_field_name: name
           parser:
             type: string
             format: null
         - source_field_name: postal_code
-          silver_field_name: zip
+          target_field_name: zip
           parser:
             type: string
             format: zip
@@ -354,7 +354,7 @@ columns:                                   # [required] Non-empty ordered list.
 
   # Map parser. JSON input currently requires string keys.
   - source_column_name: map_value
-    silver_column_name: MapValue
+    target_column_name: MapValue
     expected_data_type: map<string,decimal(18,2)>
     parser:
       type: map

@@ -43,7 +43,7 @@ def test_parser_metadata_is_discoverable_and_detached() -> None:
     assert "preserve" not in integer_error_modes
     description["arguments"].clear()
     assert parser.string.describe()["arguments"]
-    assert parser.config.describe()["column_arguments"][1]["name"] == "silver_column_name"
+    assert parser.config.describe()["column_arguments"][1]["name"] == "target_column_name"
     boolean_global = next(
         argument
         for argument in parser.config.describe()["global_arguments"]
@@ -128,7 +128,7 @@ parser_config_name: Boolean Review
 version: "1"
 columns:
   - source_column_name: active
-    silver_column_name: IsActive
+    target_column_name: IsActive
     expected_data_type: boolean
     parser: boolean
 """

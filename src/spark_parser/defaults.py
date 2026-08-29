@@ -38,7 +38,7 @@ US_MONTH_FIRST_12_HOUR_SECONDS_FORMAT: Final = "MM/dd/yyyy hh:mm:ss a"
 ISO_LOCAL_TIMESTAMP_FORMAT: Final = "yyyy-MM-dd'T'HH:mm:ss[.SSSSSS]"
 ISO_OFFSET_TIMESTAMP_FORMAT: Final = "yyyy-MM-dd'T'HH:mm:ss[.SSSSSS]XXX"
 # Date inputs often arrive from two predictable bronze contracts: an ISO date string or a US
-# reporting-system timestamp whose time is irrelevant to the silver date. Keep ISO first because it
+# reporting-system timestamp whose time is irrelevant to the target date. Keep ISO first because it
 # is unambiguous. Offset-bearing timestamps are intentionally excluded: converting an instant to a
 # date would depend on ``spark.sql.session.timeZone`` and could shift the calendar day. The
 # slash-based fallback is deliberately month-first and requires both a time and an AM/PM marker, so

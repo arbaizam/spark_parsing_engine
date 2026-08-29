@@ -1,4 +1,4 @@
-parser_config_id: bronze_positions_to_silver
+parser_config_id: bronze_positions_to_target
 parser_config_name: Bronze Positions Parser
 version: 1.0.0
 owner: Data Engineering
@@ -14,7 +14,7 @@ globals:
 
 columns:
   - source_column_name: column_name1
-    silver_column_name: ColumnName1
+    target_column_name: ColumnName1
     expected_data_type: string
     parser:
       type: string
@@ -25,7 +25,7 @@ columns:
       audit: true
 
   - source_column_name: column_name2
-    silver_column_name: ColumnName2
+    target_column_name: ColumnName2
     expected_data_type: integer
     parser:
       type: integer
@@ -36,7 +36,7 @@ columns:
       audit: true
 
   - source_column_name: column_name3
-    silver_column_name: ColumnName3
+    target_column_name: ColumnName3
     expected_data_type: decimal(38,32)
     parser:
       type: decimal
@@ -45,7 +45,7 @@ columns:
       audit: true
 
   - source_column_name: column_name5
-    silver_column_name: ColumnName5
+    target_column_name: ColumnName5
     expected_data_type: date
     parser:
       type: date

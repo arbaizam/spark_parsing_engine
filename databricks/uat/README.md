@@ -9,7 +9,7 @@ surface while the repository test suite remains the exhaustive behavioral gate.
 The repository already has strong local coverage for strict YAML compilation and canonical
 serialization (`test_compiler_yaml.py`, `test_serializer.py`), service metadata and configuration
 review reports (`test_service.py`), and native Spark execution (`test_spark_runtime.py`). The Spark
-suite runs with ANSI mode enabled and covers scalar parsing, all error policies, stable audit
+suite runs with ANSI mode enabled and covers scalar parsing, all error policies, explicit audit
 schema, nested array/struct/map combinations, strict JSON, duplicate map keys, deep nested paths,
 and lazy fail-mode materialization.
 
@@ -42,7 +42,7 @@ wheel intentionally does not declare PySpark as an install dependency for the sa
 
 Use **Databricks Runtime 16.4 LTS** as the primary production UAT target. It provides Spark 3.5.2,
 Python 3.12.3, Java 17, and PyYAML 6.0.1, so it directly exercises the supported Spark 3.5 line on a
-current LTS runtime. Record any additional compatibility run separately rather than allowing an
+current LTS runtime. Record any additional runtime-validation run separately rather than allowing an
 unnamed cluster runtime to become release evidence.
 
 ## Run the notebook
@@ -63,7 +63,7 @@ Import or open `spark_parser_uat.py` as a Databricks source notebook and supply 
 Use a unique `run_id`. Writes use Delta `errorifexists`; the notebook never overwrites or drops a
 table and does not create the target schema. It leaves evidence tables in place for review:
 
-- `<catalog>.<schema>.<prefix>_<run_id>_silver`
+- `<catalog>.<schema>.<prefix>_<run_id>_target`
 - `<catalog>.<schema>.<prefix>_<run_id>_audit`
 
 The UAT owner may drop these exact tables after sign-off under the team's normal retention process.
@@ -73,25 +73,25 @@ The UAT owner may drop these exact tables after sign-off under the team's normal
 | Gate | Validation |
 | --- | --- |
 | Wheel | The requested wheel is installed in a clean Python process; package metadata, module version, and required SHA-256 match. |
-| Bronze to silver | Whitespace/case normalization, decimal rounding, dates, null markers, and typed output match expected values. |
+| Bronze to target | Whitespace/case normalization, decimal rounding, dates, null markers, and typed output match expected values. |
 | Error policies | `null` and `default` produce asserted values and audit actions; a separate materialized `fail` parse raises as expected. |
 | Nested data | Array normalization/deduplication, struct field mapping, nested arrays, map value dropping, child defaults, zero invalidation, and JSONPath-like audit paths are asserted. |
-| Spark SQL modes | The representative parse is materialized under ANSI `true` and `false` and its silver/audit outputs must match. `spark.sql.legacy.timeParserPolicy=EXCEPTION` also remains enabled so built-in timestamp fallbacks prove strict-policy safety. |
+| Spark SQL modes | The representative parse is materialized under ANSI `true` and `false` and its target/audit outputs must match. `spark.sql.legacy.timeParserPolicy=EXCEPTION` also remains enabled so built-in timestamp fallbacks prove strict-policy safety. |
 | Audit | Row keys, parser identity, configuration hash, action names, errors, and nested paths are materialized. |
-| Delta | Silver and audit DataFrames are written as Delta, read back, and compared for ordered field types and exact row equality. Delta's legal nullability normalization does not create a false failure. |
-| Rules engine | The Delta-read silver data and flattened parser results pass non-null/unique-key and configuration-hash checks, then become temporary views. |
+| Delta | Target and audit DataFrames are written as Delta, read back, and compared for ordered field types and exact row equality. Delta's legal nullability normalization does not create a false failure. |
+| Rules engine | The Delta-read target data and flattened parser results pass non-null/unique-key and configuration-hash checks, then become temporary views. |
 
 The final cell exits with a JSON `PASS` summary containing artifact/config paths, wheel digest,
 Databricks Runtime, Spark and Python versions, configuration identity, Delta table names, and these
 session-scoped handoff views:
 
-- `<prefix>_<run_id>_rules_input`: typed silver rows, keyed by `RecordId`;
-- `<prefix>_<run_id>_parser_results`: one parser result per audited silver column, also keyed by
+- `<prefix>_<run_id>_rules_input`: typed target rows, keyed by `RecordId`;
+- `<prefix>_<run_id>_parser_results`: one parser result per audited target column, also keyed by
   `RecordId` and carrying parser config/version/hash metadata.
 
 The repository does not declare a concrete rules-engine dependency or API. Run the project-specific
 rules-engine adapter in the same job session against `rules_engine_input_df` and
-`rules_engine_parser_results_df`, or have the next job task read the reported silver and audit
+`rules_engine_parser_results_df`, or have the next job task read the reported target and audit
 Delta tables. This keeps parser UAT independent of one rules-engine implementation while making the
 handoff schema explicit and testable.
 
@@ -103,5 +103,5 @@ Retain the notebook run URL and final JSON summary with the release record. Conf
    commit;
 2. `expected_wheel_sha256` was supplied and matched;
 3. the notebook exited with `"status": "PASS"` and named the approved Databricks Runtime;
-4. the silver and audit tables were inspected by the UAT owner; and
+4. the target and audit tables were inspected by the UAT owner; and
 5. the downstream rules-engine validation consumed the reported handoff tables or DataFrames.

@@ -19,8 +19,8 @@
 - Honor `input_format: delimited` for recursively nested arrays.
 - Resolve outer complex-parser `collapse_whitespace` to its effective value of `false` in
   serialization, UAT reports, parser metadata, and row-level audit options.
-- Include error, final-null default, and invalid-zero path arrays in the stable parser audit struct.
-- Include top-level source and silver column identity in nested fail-mode error messages.
+- Include error, final-null default, and invalid-zero path arrays in the parser audit struct.
+- Include top-level source and target column identity in nested fail-mode error messages.
 - Treat only lowercase `null` as the JSON null literal; other spellings follow normal null-marker
   or parse-error behavior.
 - Add recursive first-class `array`, `struct`, and string-keyed `map` parsers.
@@ -28,7 +28,7 @@
 - Add `fail`, `null`, and `drop` child-error policies with nested audit paths.
 - Add byte/tinyint, short/smallint, float/real, binary, and timestamp-without-timezone parsers.
 - Parse and canonicalize nested Spark DDL types without requiring a running Spark session.
-- Support recursive formatting, typed defaults, source-to-silver struct field renaming, array
+- Support recursive formatting, typed defaults, source-to-target struct field renaming, array
   deduplication/null removal, and map null-value removal.
 - Render complex audit values as canonical JSON and binary audit values as base64.
 - Expand Markdown UAT output with resolved globals, recursive schema trees, configuration metadata,

@@ -124,14 +124,14 @@ class NestedValueParser:
 
 @dataclass(frozen=True)
 class StructFieldParser:
-    """Source-to-silver parser for one configured struct field.
+    """Source-to-target parser for one configured struct field.
 
-    Source and silver names may differ. Runtime JSON decoding uses the source name, while emitted
-    struct order and field aliases follow the silver schema.
+    Source and target names may differ. Runtime JSON decoding uses the source name, while emitted
+    struct order and field aliases follow the target schema.
     """
 
     source_field_name: str
-    silver_field_name: str
+    target_field_name: str
     expected_data_type: str
     data_type: SparkDataType
     parser: ParserOptions
@@ -139,10 +139,10 @@ class StructFieldParser:
 
 @dataclass(frozen=True)
 class ColumnParser:
-    """Top-level binding between one bronze source and one typed silver output."""
+    """Top-level binding between one bronze source and one typed target output."""
 
     source_column_name: str
-    silver_column_name: str
+    target_column_name: str
     expected_data_type: str
     data_type: SparkDataType
     parser: ParserOptions

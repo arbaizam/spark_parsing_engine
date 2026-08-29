@@ -1,5 +1,5 @@
-parser_config_id: databricks_bronze_to_silver_uat
-parser_config_name: Databricks Bronze to Silver UAT
+parser_config_id: databricks_bronze_to_target_uat
+parser_config_name: Databricks Bronze to Target UAT
 version: "1.0.0"
 description: Representative Databricks UAT coverage for scalar and nested parsing behavior.
 owner: Data Engineering
@@ -14,12 +14,12 @@ globals:
 
 columns:
   - source_column_name: record_id
-    silver_column_name: RecordId
+    target_column_name: RecordId
     expected_data_type: string
     parser: string
 
   - source_column_name: customer_name
-    silver_column_name: CustomerName
+    target_column_name: CustomerName
     expected_data_type: string
     parser:
       type: string
@@ -28,7 +28,7 @@ columns:
       audit: true
 
   - source_column_name: loan_status
-    silver_column_name: LoanStatus
+    target_column_name: LoanStatus
     expected_data_type: string
     parser:
       type: string
@@ -36,7 +36,7 @@ columns:
       audit: true
 
   - source_column_name: state
-    silver_column_name: StateCode
+    target_column_name: StateCode
     expected_data_type: string
     parser:
       type: string
@@ -45,7 +45,7 @@ columns:
       audit: true
 
   - source_column_name: amount
-    silver_column_name: Amount
+    target_column_name: Amount
     expected_data_type: decimal(10,2)
     parser:
       type: decimal
@@ -53,7 +53,7 @@ columns:
       audit: true
 
   - source_column_name: quantity
-    silver_column_name: Quantity
+    target_column_name: Quantity
     expected_data_type: integer
     parser:
       type: integer
@@ -62,28 +62,28 @@ columns:
       audit: true
 
   - source_column_name: event_date
-    silver_column_name: EventDate
+    target_column_name: EventDate
     expected_data_type: date
     parser:
       type: date
       audit: true
 
   - source_column_name: event_timestamp
-    silver_column_name: EventTimestamp
+    target_column_name: EventTimestamp
     expected_data_type: timestamp
     parser:
       type: timestamp
       audit: true
 
   - source_column_name: event_timestamp
-    silver_column_name: EventTimestampNtz
+    target_column_name: EventTimestampNtz
     expected_data_type: timestamp_ntz
     parser:
       type: timestamp_ntz
       audit: true
 
   - source_column_name: aliases
-    silver_column_name: Aliases
+    target_column_name: Aliases
     expected_data_type: array<string>
     parser:
       type: array
@@ -98,19 +98,19 @@ columns:
       audit: true
 
   - source_column_name: profile
-    silver_column_name: Profile
+    target_column_name: Profile
     expected_data_type: struct<postal_code:string,scores:array<integer>>
     parser:
       type: struct
       fields:
         - source_field_name: zip_code
-          silver_field_name: postal_code
+          target_field_name: postal_code
           parser:
             type: string
             format: zip
             on_parse_error: null
         - source_field_name: raw_scores
-          silver_field_name: scores
+          target_field_name: scores
           parser:
             type: array
             element_parser:
@@ -126,7 +126,7 @@ columns:
       audit: true
 
   - source_column_name: attributes
-    silver_column_name: Attributes
+    target_column_name: Attributes
     expected_data_type: map<string,decimal(10,2)>
     parser:
       type: map

@@ -1,13 +1,13 @@
 # Spark Parser
 
-Spark Parser converts load-specific bronze string columns into explicitly typed silver
+Spark Parser converts load-specific bronze string columns into explicitly typed target
 columns using strict YAML configuration. All row transformations use native Spark SQL
 expressions—there are no Python or pandas UDFs.
 
 The package provides:
 
 - strict YAML compilation with resolved, code-owned defaults;
-- source-to-silver column mapping and exact Spark datatype validation;
+- source-to-target column mapping and exact Spark datatype validation;
 - complete practical scalar parsing: string, byte, short, integer, long, float, decimal,
   double, binary, Boolean, date, timestamp, and timestamp-without-timezone;
 - recursive first-class `array`, `struct`, and string-keyed `map` parsers, including nested
@@ -34,7 +34,7 @@ UAT notebook, and use a runtime that already provides Spark 3.5 or newer and PyY
 parser_config_id: bronze_customer_load
 parser_config_name: Bronze Customer Load
 version: 1.0.0
-description: Parse one bronze customer delivery for silver.
+description: Parse one bronze customer delivery for target.
 owner: Data Engineering
 owner_department: Enterprise Data
 
@@ -47,14 +47,14 @@ globals:
 
 columns:
   - source_column_name: customer_name
-    silver_column_name: CustomerName
+    target_column_name: CustomerName
     expected_data_type: string
     parser:
       type: string
       audit: true
 
   - source_column_name: mailing_address
-    silver_column_name: MailingAddress
+    target_column_name: MailingAddress
     expected_data_type: string
     parser:
       type: string
@@ -62,7 +62,7 @@ columns:
       audit: true
 
   - source_column_name: account_balance
-    silver_column_name: AccountBalance
+    target_column_name: AccountBalance
     expected_data_type: decimal(18,2)
     parser:
       type: decimal
@@ -72,7 +72,7 @@ columns:
       audit: true
 
   - source_column_name: borrower_names_json
-    silver_column_name: BorrowerNames
+    target_column_name: BorrowerNames
     expected_data_type: array<string>
     parser:
       type: array
@@ -93,7 +93,7 @@ parsing = parser.parse_dataframe(
     key_columns=["load_id", "row_id"],
 )
 
-silver_df = parsing.parsed_df
+target_df = parsing.parsed_df
 audit_df = parsing.results_df
 schema_warnings = parsing.warnings
 ```
@@ -144,7 +144,7 @@ config_help = parser.config.describe()
 - config identity, owner metadata, version, and canonical content hash;
 - an evidence-based summary of the compiler validations the config passed, with `N/A` for
   checks that do not apply;
-- source-to-silver mappings and exact expected datatypes;
+- source-to-target mappings and exact expected datatypes;
 - a recursive resolved schema/parser tree for every configured column;
 - a dedicated table of resolved global settings;
 - every fully resolved parser option, including inherited globals and defaults;
@@ -191,7 +191,7 @@ publishing or workspace deployment, and its UAT writes never overwrite or remove
 | `parser_config_id` | Yes | — | Stable, non-empty ID for the parsing configuration. |
 | `parser_config_name` | Yes | — | Non-empty human-readable name. |
 | `version` | Yes | — | Non-empty version string. Versions remain important; lifecycle status is intentionally absent. |
-| `columns` | Yes | — | Non-empty ordered list of source-to-silver parser mappings. |
+| `columns` | Yes | — | Non-empty ordered list of source-to-target parser mappings. |
 | `description` | No | `null` | Purpose and UAT scope. |
 | `owner` | No | `null` | Accountable person or team. |
 | `owner_department` | No | `null` | Accountable department. |
@@ -226,12 +226,12 @@ tokens, and strict compilation rejects them.
 | Argument | Required | Default | Behavior |
 | --- | ---: | --- | --- |
 | `source_column_name` | Yes | — | Exact top-level bronze name. It may be reused by multiple mappings. A missing source warns rather than failing. |
-| `silver_column_name` | Yes | — | Non-empty, unique name emitted by `parsed_df`. Duplicate silver names fail compilation. |
+| `target_column_name` | Yes | — | Non-empty, unique name emitted by `parsed_df`. Duplicate target names fail compilation. |
 | `expected_data_type` | Yes | — | Exact target Spark DDL type. Scalars and recursively nested `array<T>`, `struct<field:T,...>`, and `map<string,T>` are supported. |
 | `parser` | Yes | — | Matching scalar or complex parser name, or a mapping containing `type` and options. |
 
 `expected_data_type` is intentionally separate from `parser.type`: the parser selects the
-conversion implementation, while the expected type fixes the silver schema—including integer
+conversion implementation, while the expected type fixes the target schema—including integer
 width, decimal precision/scale, and the complete nested schema. The compiler recursively requires
 the parser tree to agree with it. Scalar aliases are `tinyint` → `byte`, `smallint` → `short`,
 `int` → `integer`, `bigint` → `long`, `real` → `float`, `bool` → `boolean`, and
@@ -242,7 +242,7 @@ setting any option:
 
 ```yaml
 - source_column_name: arm_next_rate_change_date
-  silver_column_name: ArmNextRateChangeDate
+  target_column_name: ArmNextRateChangeDate
   expected_data_type: date
   parser:
     type: date
@@ -268,7 +268,7 @@ These options apply to every parser type.
 | `null_markers` | No | Inherited globals | Column null-token list. Supplying it does not by itself enable replacement. |
 | `null_markers_mode` | No | `replace` | With column `null_markers`, `replace` uses only that list and `extend` appends it to globals. It cannot be supplied without column markers. |
 | `null_marker_case_sensitive` | No | Inherited global | Override null-token case sensitivity for this column. |
-| `is_nullable` | No | `true` | Allow the final silver value to remain null. |
+| `is_nullable` | No | `true` | Allow the final target value to remain null. |
 | `default_on_null` | Conditional | No default | Required only when `is_nullable: false`; must be non-null and exactly valid for the expected type. |
 | `on_parse_error` | No | `fail` | `fail`, `null`, `default`, or string-only `preserve`; see the error-mode section below. |
 | `default_on_error` | Conditional | No default | Required only with `on_parse_error: default`; must fit the expected type. |
@@ -343,7 +343,7 @@ target domain truly requires counties.
 #### State profile
 
 `state_us` recognizes the 50 US state names, their two-letter postal abbreviations, conventional
-legacy abbreviations such as `Ill.`, `Calif.`, and `Wash.`, plus `District of Columbia`,
+conventional abbreviations such as `Ill.`, `Calif.`, and `Wash.`, plus `District of Columbia`,
 `Washington DC`, `Washington, D.C.`, and `DC`. Matching is case-insensitive after whitespace
 normalization; periods and commas are ignored for lookup. The allow-list remains explicit, so
 punctuation removal does not make arbitrary three-letter values valid. Output is always the
@@ -352,11 +352,11 @@ canonical uppercase two-letter abbreviation.
 US territories are intentionally excluded because a field documented as a state should not
 silently broaden its domain. An unknown non-null value is a parse error and follows
 `on_parse_error`. Use `preserve` when a nonstandard source value such as `Mul` must remain unchanged,
-or use `null`/an explicit default when invalid state text should not survive into silver data.
+or use `null`/an explicit default when invalid state text should not survive into target data.
 
 ```yaml
 - source_column_name: state
-  silver_column_name: StateCode
+  target_column_name: StateCode
   expected_data_type: string
   parser:
     type: string
@@ -410,7 +410,7 @@ Both support `zero_is_valid`. Use decimal when exact base-10 representation matt
 
 Binary adds `encoding`, with `base64` as the safety default. `hex` and `utf8` are also supported.
 Invalid base64 or hexadecimal input follows `on_parse_error`; UTF-8 accepts every normalized
-string. The typed silver value is Spark `binary`, while audit `parsed_value` is always canonical
+string. The typed target value is Spark `binary`, while audit `parsed_value` is always canonical
 base64 so audit storage remains printable and encoding-independent.
 
 ### Boolean
@@ -432,7 +432,7 @@ globals:
 
 columns:
   - source_column_name: approval_status
-    silver_column_name: IsApproved
+    target_column_name: IsApproved
     expected_data_type: boolean
     parser:
       type: boolean
@@ -490,7 +490,7 @@ Array is a recursive first-class parser. The element datatype comes from `array<
 
 ```yaml
 - source_column_name: borrower_scores
-  silver_column_name: BorrowerScores
+  target_column_name: BorrowerScores
   expected_data_type: array<decimal(8,2)>
   parser:
     type: array
@@ -510,37 +510,37 @@ zero-based indexes, for example `$[2]` or `$[1].birth_date`.
 
 ### Struct
 
-Struct parses a JSON object into a complete, explicitly configured silver schema. The field names
+Struct parses a JSON object into a complete, explicitly configured target schema. The field names
 and datatypes in `expected_data_type` are the authoritative output schema. `fields` must configure
-every silver field exactly once.
+every target field exactly once.
 
 | Field argument | Required | Behavior |
 | --- | ---: | --- |
 | `source_field_name` | Yes | Exact JSON field name. |
-| `silver_field_name` | Yes | Must match one field in the parent `struct<...>` datatype. |
-| `parser` | Yes | Recursive parser inferred against that silver field's datatype. |
+| `target_field_name` | Yes | Must match one field in the parent `struct<...>` datatype. |
+| `parser` | Yes | Recursive parser inferred against that target field's datatype. |
 
 ```yaml
 - source_column_name: property_json
-  silver_column_name: Property
+  target_column_name: Property
   expected_data_type: struct<street:string,zip:string,scores:array<integer>>
   parser:
     type: struct
     input_format: json
     fields:
       - source_field_name: address
-        silver_field_name: street
+        target_field_name: street
         parser:
           type: string
           format: address_us_v1
       - source_field_name: postal_code
-        silver_field_name: zip
+        target_field_name: zip
         parser:
           type: string
           format: zip
           on_parse_error: null
       - source_field_name: raw_scores
-        silver_field_name: scores
+        target_field_name: scores
         parser:
           type: array
           element_parser: integer
@@ -567,7 +567,7 @@ Spark strings; values may use any recursively supported datatype.
 
 ```yaml
 - source_column_name: balances_json
-  silver_column_name: Balances
+  target_column_name: Balances
   expected_data_type: map<string,decimal(18,2)>
   parser:
     type: map
@@ -591,7 +591,7 @@ recursive compiler and runtime. Struct field order follows `expected_data_type`;
 preserved unless elements are dropped or deduplicated.
 
 `default_on_null` and `default_on_error` accept YAML lists for arrays and mappings for structs or
-maps. A struct default must contain exactly its silver fields. Defaults are recursively type- and
+maps. A struct default must contain exactly its target fields. Defaults are recursively type- and
 range-checked at compilation and emitted as properly typed native Spark literals.
 
 The supported vocabulary follows Spark's
@@ -625,7 +625,7 @@ Every column follows this order:
 
 `on_parse_error` controls step 5:
 
-- `fail` (default) constructs a lazy failure and raises when an action materializes that silver
+- `fail` (default) constructs a lazy failure and raises when an action materializes that target
   expression;
 - `null` returns a typed null; or
 - `default` assigns the required `default_on_error`; or
@@ -638,11 +638,11 @@ their own `on_parse_error`. Arrays use `on_element_error`, and maps use `on_valu
 top-level audit's `nested_error_paths` even when the invalid element or entry is preserved or
 dropped. Nested final-null defaults and zero invalidation are independently retained in
 `nested_default_on_null_paths` and `nested_zero_invalidated_paths`, including cases where no parse
-error occurred. A nested `fail` error identifies the top-level source column, silver column,
+error occurred. A nested `fail` error identifies the top-level source column, target column,
 expected child type, and exact nested path.
 
 Preservation is deliberately unavailable for integer, decimal, Boolean, date, timestamp, binary,
-and complex outputs: an invalid raw string cannot inhabit those typed silver positions. Quarantine
+and complex outputs: an invalid raw string cannot inhabit those typed target positions. Quarantine
 routing remains separate because it needs an explicit `quarantine_df` contract rather than
 overloading typed error handling.
 
@@ -652,9 +652,9 @@ Strict compilation validates, without starting Spark:
 
 - YAML syntax and duplicate/unsupported keys;
 - required IDs, version, columns, and parser types;
-- unique non-empty `silver_column_name` values;
+- unique non-empty `target_column_name` values;
 - supported recursive Spark DDL types, decimal precision/scale, and parser/type compatibility;
-- complete struct field coverage, unique source/silver nested names, recursive child parsers,
+- complete struct field coverage, unique source/target nested names, recursive child parsers,
   string map keys, and complex input-format constraints;
 - option placement and primitive types;
 - conditional `default_on_null`/`default_on_error` rules and typed values;
@@ -671,8 +671,8 @@ DataFrame binding validates lazily available schema metadata:
 - `column_prefix` must be non-empty.
 
 Actual bad values in `on_parse_error: fail` columns raise only when Spark materializes the failing
-silver expression. Projection-pruning actions such as `parsed_df.count()` may not evaluate that
-expression; a full silver write, `collect()`, or a select that consumes the column will.
+target expression. Projection-pruning actions such as `parsed_df.count()` may not evaluate that
+expression; a full target write, `collect()`, or a select that consumes the column will.
 
 ## DataFrameParsing outputs
 
@@ -680,7 +680,7 @@ expression; a full silver write, `collect()`, or a select that consumes the colu
 
 | Property/method | Behavior |
 | --- | --- |
-| `parsed_df` | Only silver columns, aliased to `silver_column_name` and ordered like the config. |
+| `parsed_df` | Only target columns, aliased to `target_column_name` and ordered like the config. |
 | `results_df` | Selected row keys followed by nested parser audit/identity metadata. |
 | `warnings` | Tuple of recoverable schema warnings, currently missing configured sources. |
 | `key_columns` | Effective ordered result-key names. |
@@ -689,7 +689,7 @@ expression; a full silver write, `collect()`, or a select that consumes the colu
 | `unpersist(blocking=False)` | Release the shared plan and return the same object. |
 
 Row keys are intentionally retained in `results_df`, not automatically copied into `parsed_df`.
-If a downstream join requires the key in both outputs, configure that source as a silver column as
+If a downstream join requires the key in both outputs, configure that source as a target column as
 well (the Databricks UAT does this with `RecordId`) or add it explicitly before the handoff.
 
 `parse_dataframe()` parameters:
@@ -714,7 +714,7 @@ Each parse-result struct contains:
 | Nested field | Type | Definition |
 | --- | --- | --- |
 | `source_column_name` | String | Configured bronze source. |
-| `silver_column_name` | String | Configured silver output. |
+| `target_column_name` | String | Configured target output. |
 | `parser_type` | String | Canonical parser applied. |
 | `expected_data_type` | String | Canonical target Spark datatype. |
 | `original_value` | Nullable string | Unmodified bronze value; null for a missing source. |
@@ -732,8 +732,7 @@ Possible actions are `source_column_missing`, `empty_string_to_null`, `null_mark
 `parse_error_to_null`, `parse_error_default_applied`, `parse_error_preserved`, `zero_invalidated`,
 `default_on_null_applied`, `json_null_to_null`, `nested_parse_errors_resolved`,
 `nested_zero_invalidated`, `nested_default_on_null_applied`, `zip_padded`, and
-`zip_plus4_formatted`. This order is contractual: new actions must be added deliberately rather
-than reordering existing entries that downstream rules may inspect.
+`zip_plus4_formatted`.
 
 Routine whitespace normalization, normal successful datatype conversion, and routine title/case/
 address/county/state formatting are visible through `original_value`, `parsed_value`, and the

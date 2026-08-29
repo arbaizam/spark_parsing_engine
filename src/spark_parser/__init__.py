@@ -1,4 +1,4 @@
-"""Stable public package surface for Spark Parser.
+"""Public package surface for Spark Parser.
 
 Compiler and metadata APIs import without initializing PySpark. Spark-backed runtime objects are
 loaded lazily through :func:`__getattr__`, allowing configuration authoring and review tools to run

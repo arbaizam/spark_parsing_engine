@@ -59,20 +59,20 @@ globals:
   false_values: ["false", N]
 columns:
   - source_column_name: customer_name
-    silver_column_name: CustomerName
+    target_column_name: CustomerName
     expected_data_type: string
     parser:
       type: string
       format: upper
       audit: true
   - source_column_name: nickname
-    silver_column_name: Nickname
+    target_column_name: Nickname
     expected_data_type: string
     parser:
       type: string
       audit: true
   - source_column_name: item_count
-    silver_column_name: ItemCount
+    target_column_name: ItemCount
     expected_data_type: integer
     parser:
       type: integer
@@ -81,43 +81,43 @@ columns:
       default_on_null: -1
       audit: true
   - source_column_name: amount
-    silver_column_name: Amount
+    target_column_name: Amount
     expected_data_type: decimal(8,2)
     parser:
       type: decimal
       replace_null_markers: true
       audit: true
   - source_column_name: opened_date
-    silver_column_name: OpenedDate
+    target_column_name: OpenedDate
     expected_data_type: date
     parser: date
   - source_column_name: is_active
-    silver_column_name: IsActive
+    target_column_name: IsActive
     expected_data_type: boolean
     parser:
       type: boolean
   - source_column_name: address
-    silver_column_name: Address
+    target_column_name: Address
     expected_data_type: string
     parser:
       type: string
       format: address_us_v1
       audit: true
   - source_column_name: county
-    silver_column_name: County
+    target_column_name: County
     expected_data_type: string
     parser:
       type: string
       format: county
   - source_column_name: zip_code
-    silver_column_name: ZipCode
+    target_column_name: ZipCode
     expected_data_type: string
     parser:
       type: string
       format: zip
       audit: true
   - source_column_name: source_not_delivered
-    silver_column_name: MissingDate
+    target_column_name: MissingDate
     expected_data_type: date
     parser:
       type: date
@@ -177,7 +177,7 @@ SELECT
     assert audit[2].actions_applied == ["zero_invalidated", "default_on_null_applied"]
     assert audit[3].parsed_value is None
     assert audit[3].actions_applied == ["null_marker_replaced"]
-    assert audit[4].silver_column_name == "Address"
+    assert audit[4].target_column_name == "Address"
     assert audit[5].actions_applied == ["zip_padded", "zip_plus4_formatted"]
     assert audit[6].effective is False
     assert audit[6].actions_applied == ["source_column_missing"]
@@ -193,14 +193,14 @@ parser_config_name: Location Edges
 version: "1"
 columns:
   - source_column_name: address
-    silver_column_name: Address
+    target_column_name: Address
     expected_data_type: string
     parser:
       type: string
       format: address_us_v1
       audit: true
   - source_column_name: address
-    silver_column_name: AddressRequired
+    target_column_name: AddressRequired
     expected_data_type: string
     parser:
       type: string
@@ -208,14 +208,14 @@ columns:
       is_nullable: false
       default_on_null: UNKNOWN
   - source_column_name: county
-    silver_column_name: County
+    target_column_name: County
     expected_data_type: string
     parser:
       type: string
       format: county
       on_parse_error: null
   - source_column_name: zip_code
-    silver_column_name: ZipCode
+    target_column_name: ZipCode
     expected_data_type: string
     parser:
       type: string
@@ -268,13 +268,13 @@ parser_config_name: Display and State Formats
 version: "1"
 columns:
   - source_column_name: label
-    silver_column_name: DisplayLabel
+    target_column_name: DisplayLabel
     expected_data_type: string
     parser:
       type: string
       format: title
   - source_column_name: state
-    silver_column_name: StateCode
+    target_column_name: StateCode
     expected_data_type: string
     parser:
       type: string
@@ -282,7 +282,7 @@ columns:
       on_parse_error: null
       audit: true
   - source_column_name: state
-    silver_column_name: RequiredStateCode
+    target_column_name: RequiredStateCode
     expected_data_type: string
     parser:
       type: string
@@ -291,7 +291,7 @@ columns:
       default_on_error: UNKNOWN
       audit: true
   - source_column_name: state
-    silver_column_name: PreservedStateCode
+    target_column_name: PreservedStateCode
     expected_data_type: string
     parser:
       type: string
@@ -309,7 +309,7 @@ columns:
                 F.lit("account owner"),
                 F.lit("district record"),
                 F.lit("punctuated district"),
-                F.lit("legacy abbreviation"),
+                F.lit("conventional abbreviation"),
                 F.lit("punctuated code"),
                 F.lit("conventional california"),
                 F.lit("conventional north dakota"),
@@ -348,7 +348,7 @@ columns:
         "Account Owner",
         "District Record",
         "Punctuated District",
-        "Legacy Abbreviation",
+        "Conventional Abbreviation",
         "Punctuated Code",
         "Conventional California",
         "Conventional North Dakota",
@@ -413,17 +413,17 @@ parser_config_name: Nested Preserve
 version: "1"
 columns:
   - source_column_name: profile
-    silver_column_name: Profile
+    target_column_name: Profile
     expected_data_type: struct<state:string>
     parser:
       type: struct
       fields:
         - source_field_name: state
-          silver_field_name: state
+          target_field_name: state
           parser: {type: string, format: state_us, on_parse_error: preserve}
       audit: true
   - source_column_name: states
-    silver_column_name: States
+    target_column_name: States
     expected_data_type: array<string>
     parser:
       type: array
@@ -431,7 +431,7 @@ columns:
       on_element_error: preserve
       audit: true
   - source_column_name: state_map
-    silver_column_name: StateMap
+    target_column_name: StateMap
     expected_data_type: map<string,string>
     parser:
       type: map
@@ -454,7 +454,7 @@ columns:
     assert row.StateMap == {"home": "IL", "other": "Mul"}
 
     audits = {
-        item.silver_column_name: item
+        item.target_column_name: item
         for item in parsing.results_df.first().spark_parser_parse_results
     }
     assert audits["Profile"].nested_error_paths == ["$.state"]
@@ -476,19 +476,19 @@ parser_config_name: Default Date Formats
 version: "1"
 columns:
   - source_column_name: event_date
-    silver_column_name: EventDate
+    target_column_name: EventDate
     expected_data_type: date
     parser:
       type: date
       on_parse_error: null
   - source_column_name: event_timestamp
-    silver_column_name: EventTimestamp
+    target_column_name: EventTimestamp
     expected_data_type: timestamp
     parser:
       type: timestamp
       on_parse_error: null
   - source_column_name: event_timestamp
-    silver_column_name: EventTimestampNtz
+    target_column_name: EventTimestampNtz
     expected_data_type: timestamp_ntz
     parser:
       type: timestamp_ntz
@@ -553,15 +553,15 @@ parser_config_name: ISO Timestamp Formats
 version: "1"
 columns:
   - source_column_name: value
-    silver_column_name: EventDate
+    target_column_name: EventDate
     expected_data_type: date
     parser: {type: date, on_parse_error: null}
   - source_column_name: value
-    silver_column_name: EventTimestamp
+    target_column_name: EventTimestamp
     expected_data_type: timestamp
     parser: {type: timestamp, on_parse_error: null}
   - source_column_name: value
-    silver_column_name: EventTimestampNtz
+    target_column_name: EventTimestampNtz
     expected_data_type: timestamp_ntz
     parser: {type: timestamp_ntz, on_parse_error: null}
 """
@@ -624,11 +624,11 @@ parser_config_name: Numeric Parity
 version: "1"
 columns:
   - source_column_name: scalar
-    silver_column_name: Scalar
+    target_column_name: Scalar
     expected_data_type: double
     parser: {type: double, on_parse_error: null}
   - source_column_name: nested
-    silver_column_name: Nested
+    target_column_name: Nested
     expected_data_type: array<double>
     parser:
       type: array
@@ -679,23 +679,23 @@ parser_config_name: ANSI Parity
 version: "1"
 columns:
   - source_column_name: integer_value
-    silver_column_name: IntegerValue
+    target_column_name: IntegerValue
     expected_data_type: integer
     parser: {type: integer, on_parse_error: null, audit: true}
   - source_column_name: double_value
-    silver_column_name: DoubleValue
+    target_column_name: DoubleValue
     expected_data_type: double
     parser: {type: double, on_parse_error: null, audit: true}
   - source_column_name: state_value
-    silver_column_name: StateValue
+    target_column_name: StateValue
     expected_data_type: string
     parser: {type: string, format: state_us, on_parse_error: null, audit: true}
   - source_column_name: date_value
-    silver_column_name: DateValue
+    target_column_name: DateValue
     expected_data_type: date
     parser: {type: date, on_parse_error: null, audit: true}
   - source_column_name: array_value
-    silver_column_name: ArrayValue
+    target_column_name: ArrayValue
     expected_data_type: array<double>
     parser:
       type: array
@@ -720,28 +720,28 @@ SELECT
         for ansi_value in ("true", "false"):
             spark.conf.set("spark.sql.ansi.enabled", ansi_value)
             parsing = SparkDataFrameParser().parse_dataframe(bronze_df, config)
-            silver = parsing.parsed_df.first().asDict(recursive=True)
+            target = parsing.parsed_df.first().asDict(recursive=True)
             audit = [
                 item.asDict(recursive=True)
                 for item in parsing.results_df.first().spark_parser_parse_results
             ]
-            snapshots[ansi_value] = silver, audit
+            snapshots[ansi_value] = target, audit
     finally:
         spark.conf.set("spark.sql.ansi.enabled", previous_ansi)
 
     assert snapshots["true"] == snapshots["false"]
-    silver = snapshots["true"][0]
-    assert silver["IntegerValue"] is None
-    assert silver["DoubleValue"] is None
-    assert silver["StateValue"] == "IL"
-    assert silver["DateValue"].isoformat() == "2026-09-30"
-    assert silver["ArrayValue"] == [None, 2.5]
+    target = snapshots["true"][0]
+    assert target["IntegerValue"] is None
+    assert target["DoubleValue"] is None
+    assert target["StateValue"] == "IL"
+    assert target["DateValue"].isoformat() == "2026-09-30"
+    assert target["ArrayValue"] == [None, 2.5]
 
 
 def test_nested_defaults_and_zero_invalidation_are_visible_in_audit(
     spark: SparkSession,
 ) -> None:
-    """Record every nested fabricated value so silver data remains explainable downstream."""
+    """Record every nested fabricated value so target data remains explainable downstream."""
     config = YamlParserConfigCompiler().compile_text(
         """
 parser_config_id: nested_default_audit
@@ -749,7 +749,7 @@ parser_config_name: Nested Default Audit
 version: "1"
 columns:
   - source_column_name: values
-    silver_column_name: Values
+    target_column_name: Values
     expected_data_type: array<integer>
     parser:
       type: array
@@ -793,7 +793,7 @@ parser_config_name: Escaped Map Path
 version: "1"
 columns:
   - source_column_name: values
-    silver_column_name: Values
+    target_column_name: Values
     expected_data_type: map<string,integer>
     parser:
       type: map
@@ -815,14 +815,14 @@ columns:
     assert audit.nested_error_paths == ["$['a\\'b']"]
 
 
-def test_audit_schema_is_stable_with_or_without_audited_columns(spark: SparkSession) -> None:
+def test_audit_schema_is_consistent_with_or_without_audited_columns(spark: SparkSession) -> None:
     template = """
 parser_config_id: audit_schema
 parser_config_name: Audit Schema
 version: "1"
 columns:
   - source_column_name: value
-    silver_column_name: Value
+    target_column_name: Value
     expected_data_type: string
     parser:
       type: string
@@ -846,7 +846,7 @@ columns:
     assert audited_type == empty_type
     assert audited_type.elementType.fieldNames() == [
         "source_column_name",
-        "silver_column_name",
+        "target_column_name",
         "parser_type",
         "expected_data_type",
         "original_value",
@@ -875,7 +875,7 @@ parser_config_name: Duplicate Default Keys
 version: "1"
 columns:
   - source_column_name: value
-    silver_column_name: Value
+    target_column_name: Value
     expected_data_type: string
     parser: string
 """
@@ -897,7 +897,7 @@ parser_config_name: Fail
 version: "1"
 columns:
   - source_column_name: value
-    silver_column_name: Value
+    target_column_name: Value
     expected_data_type: integer
     parser: integer
 """
@@ -922,7 +922,7 @@ globals:
   boolean_case_sensitive: false
 columns:
   - source_column_name: bad_integer
-    silver_column_name: DefaultedInteger
+    target_column_name: DefaultedInteger
     expected_data_type: integer
     parser:
       type: integer
@@ -930,24 +930,24 @@ columns:
       default_on_error: -1
       audit: true
   - source_column_name: boolean_value
-    silver_column_name: BooleanValue
+    target_column_name: BooleanValue
     expected_data_type: boolean
     parser:
       type: boolean
       on_parse_error: null
   - source_column_name: trim_value
-    silver_column_name: TrimValue
+    target_column_name: TrimValue
     expected_data_type: string
     parser:
       type: string
       collapse_whitespace: false
       trim_whitespace: true
   - source_column_name: nbsp_value
-    silver_column_name: NbspValue
+    target_column_name: NbspValue
     expected_data_type: string
     parser: string
   - source_column_name: decimal_value
-    silver_column_name: DecimalValue
+    target_column_name: DecimalValue
     expected_data_type: decimal(18,2)
     parser: decimal
 """
@@ -983,7 +983,7 @@ def test_wide_config_uses_constant_depth_projection_stages(spark: SparkSession) 
     df = spark.sql("SELECT " + ", ".join(f"'x' AS c{index}" for index in range(column_count)))
     columns = "\n".join(
         f"  - source_column_name: c{index}\n"
-        f"    silver_column_name: C{index}\n"
+        f"    target_column_name: C{index}\n"
         "    expected_data_type: string\n"
         "    parser: string"
         for index in range(column_count)
@@ -1009,7 +1009,7 @@ parser_config_name: Timestamp Option
 version: "1"
 columns:
   - source_column_name: value
-    silver_column_name: Value
+    target_column_name: Value
     expected_data_type: timestamp
     parser:
       type: timestamp
@@ -1035,7 +1035,7 @@ globals:
   boolean_case_sensitive: false
 columns:
   - source_column_name: names
-    silver_column_name: Names
+    target_column_name: Names
     expected_data_type: array<string>
     parser:
       type: array
@@ -1045,27 +1045,27 @@ columns:
       distinct: true
       audit: true
   - source_column_name: object
-    silver_column_name: Object
+    target_column_name: Object
     expected_data_type: struct<street:string,zip:string,scores:array<integer>,approved:boolean,due:date>
     parser:
       type: struct
       fields:
         - source_field_name: address
-          silver_field_name: street
+          target_field_name: street
           parser: {type: string, format: address_us_v1}
         - source_field_name: postal
-          silver_field_name: zip
+          target_field_name: zip
           parser: {type: string, format: zip, on_parse_error: null}
         - source_field_name: values
-          silver_field_name: scores
+          target_field_name: scores
           parser: {type: array, element_parser: integer, on_element_error: null}
-        - {source_field_name: is_approved, silver_field_name: approved, parser: boolean}
+        - {source_field_name: is_approved, target_field_name: approved, parser: boolean}
         - source_field_name: due_date
-          silver_field_name: due
+          target_field_name: due
           parser: {type: date, formats: [MM/dd/yyyy]}
       audit: true
   - source_column_name: attributes
-    silver_column_name: Attributes
+    target_column_name: Attributes
     expected_data_type: map<string,decimal(8,2)>
     parser: {type: map, value_parser: decimal, on_value_error: drop, audit: true}
 """
@@ -1093,7 +1093,7 @@ SELECT
     assert row.Attributes["empty"] is None
 
     audits = {
-        item.silver_column_name: item
+        item.target_column_name: item
         for item in parsing.results_df.first().spark_parser_parse_results
     }
     assert audits["Names"].parsed_value == '["ALICE","BOB"]'
@@ -1113,7 +1113,7 @@ parser_config_name: Complex Edges
 version: "1"
 columns:
   - source_column_name: numbers
-    silver_column_name: Numbers
+    target_column_name: Numbers
     expected_data_type: array<integer>
     parser:
       type: array
@@ -1124,12 +1124,12 @@ columns:
       distinct: true
       audit: true
   - source_column_name: object
-    silver_column_name: Object
+    target_column_name: Object
     expected_data_type: struct<a:integer>
     parser:
       type: struct
       fields:
-        - {source_field_name: a, silver_field_name: a, parser: integer}
+        - {source_field_name: a, target_field_name: a, parser: integer}
       on_parse_error: default
       default_on_error: {a: -1}
       audit: true
@@ -1142,7 +1142,7 @@ columns:
     assert row.Numbers == [1, 2]
     assert row.Object.a == -1
     audits = {
-        item.silver_column_name: item
+        item.target_column_name: item
         for item in parsing.results_df.first().spark_parser_parse_results
     }
     assert audits["Numbers"].nested_error_paths == ["$[2]"]
@@ -1157,23 +1157,23 @@ parser_config_id: new_scalars
 parser_config_name: New Scalars
 version: "1"
 columns:
-  - {source_column_name: byte_value, silver_column_name: ByteValue, expected_data_type: byte, parser: byte}
-  - {source_column_name: short_value, silver_column_name: ShortValue, expected_data_type: short, parser: short}
-  - {source_column_name: float_value, silver_column_name: FloatValue, expected_data_type: float, parser: float}
+  - {source_column_name: byte_value, target_column_name: ByteValue, expected_data_type: byte, parser: byte}
+  - {source_column_name: short_value, target_column_name: ShortValue, expected_data_type: short, parser: short}
+  - {source_column_name: float_value, target_column_name: FloatValue, expected_data_type: float, parser: float}
   - source_column_name: local_time
-    silver_column_name: LocalTime
+    target_column_name: LocalTime
     expected_data_type: timestamp_ntz
     parser: {type: timestamp_ntz, formats: [MM/dd/yyyy HH:mm]}
   - source_column_name: hex_value
-    silver_column_name: HexValue
+    target_column_name: HexValue
     expected_data_type: binary
     parser: {type: binary, encoding: hex, audit: true}
   - source_column_name: base64_value
-    silver_column_name: Base64Value
+    target_column_name: Base64Value
     expected_data_type: binary
     parser: binary
   - source_column_name: utf8_value
-    silver_column_name: Utf8Value
+    target_column_name: Utf8Value
     expected_data_type: binary
     parser: {type: binary, encoding: utf8}
 """
@@ -1205,7 +1205,7 @@ parser_config_name: Nested Fail
 version: "1"
 columns:
   - source_column_name: values
-    silver_column_name: Values
+    target_column_name: Values
     expected_data_type: array<integer>
     parser: {type: array, element_parser: integer, on_element_error: fail}
 """
@@ -1220,7 +1220,7 @@ columns:
         parsing.parsed_df.collect()
     message = str(exc_info.value)
     assert "source 'values'" in message
-    assert "silver column 'Values'" in message
+    assert "target column 'Values'" in message
     assert "$[1]" in message
 
 
@@ -1234,7 +1234,7 @@ parser_config_name: Recursive
 version: "1"
 columns:
   - source_column_name: payload
-    silver_column_name: Payload
+    target_column_name: Payload
     expected_data_type: array<struct<name:string,scores:array<integer>>>
     parser:
       type: array
@@ -1242,13 +1242,13 @@ columns:
       element_parser:
         type: struct
         fields:
-          - {source_field_name: raw_name, silver_field_name: name, parser: {type: string, format: upper}}
+          - {source_field_name: raw_name, target_field_name: name, parser: {type: string, format: upper}}
           - source_field_name: raw_scores
-            silver_field_name: scores
+            target_field_name: scores
             parser: {type: array, element_parser: integer, on_element_error: null}
       audit: true
   - source_column_name: nested_map
-    silver_column_name: NestedMap
+    target_column_name: NestedMap
     expected_data_type: map<string,array<integer>>
     parser:
       type: map
@@ -1284,7 +1284,7 @@ parser_config_name: JSON Null
 version: "1"
 columns:
   - source_column_name: payload
-    silver_column_name: Payload
+    target_column_name: Payload
     expected_data_type: array<string>
     parser:
       type: array
@@ -1314,7 +1314,7 @@ parser_config_name: Timestamp NTZ Errors
 version: "1"
 columns:
   - source_column_name: local_time
-    silver_column_name: LocalTime
+    target_column_name: LocalTime
     expected_data_type: timestamp_ntz
     parser:
       type: timestamp_ntz
@@ -1322,7 +1322,7 @@ columns:
       on_parse_error: null
       audit: true
   - source_column_name: local_times
-    silver_column_name: LocalTimes
+    target_column_name: LocalTimes
     expected_data_type: array<timestamp_ntz>
     parser:
       type: array
@@ -1354,7 +1354,7 @@ parser_config_name: Nested Numeric Guard
 version: "1"
 columns:
   - source_column_name: numbers
-    silver_column_name: Numbers
+    target_column_name: Numbers
     expected_data_type: array<integer>
     parser:
       type: array
@@ -1362,7 +1362,7 @@ columns:
       on_element_error: null
       audit: true
   - source_column_name: rates
-    silver_column_name: Rates
+    target_column_name: Rates
     expected_data_type: array<double>
     parser:
       type: array
@@ -1395,24 +1395,24 @@ parser_config_name: Strict JSON
 version: "1"
 columns:
   - source_column_name: object
-    silver_column_name: Object
+    target_column_name: Object
     expected_data_type: struct<a:integer>
     parser:
       type: struct
       fields:
-        - {source_field_name: a, silver_field_name: a, parser: integer}
+        - {source_field_name: a, target_field_name: a, parser: integer}
       on_parse_error: null
       audit: true
   - source_column_name: empty_array
-    silver_column_name: EmptyArray
+    target_column_name: EmptyArray
     expected_data_type: array<string>
     parser: {type: array, element_parser: string}
   - source_column_name: empty_map
-    silver_column_name: EmptyMap
+    target_column_name: EmptyMap
     expected_data_type: map<string,string>
     parser: {type: map, value_parser: string}
   - source_column_name: duplicate_map
-    silver_column_name: DuplicateMap
+    target_column_name: DuplicateMap
     expected_data_type: map<string,integer>
     parser:
       type: map
@@ -1420,7 +1420,7 @@ columns:
       on_parse_error: null
       audit: true
   - source_column_name: duplicate_map
-    silver_column_name: DefaultedDuplicateMap
+    target_column_name: DefaultedDuplicateMap
     expected_data_type: map<string,integer>
     parser:
       type: map
@@ -1428,7 +1428,7 @@ columns:
       on_parse_error: default
       default_on_error: {}
   - source_column_name: nested_duplicate_map
-    silver_column_name: NestedDuplicateMap
+    target_column_name: NestedDuplicateMap
     expected_data_type: array<map<string,integer>>
     parser:
       type: array
@@ -1454,7 +1454,7 @@ columns:
     assert row.DefaultedDuplicateMap == {}
     assert row.NestedDuplicateMap == [None]
     audits = {
-        item.silver_column_name: item
+        item.target_column_name: item
         for item in parsing.results_df.first().spark_parser_parse_results
     }
     assert audits["Object"].nested_error_paths == ["$"]
@@ -1472,13 +1472,13 @@ parser_config_name: Nested Delimited
 version: "1"
 columns:
   - source_column_name: payload
-    silver_column_name: Payload
+    target_column_name: Payload
     expected_data_type: struct<tags:array<string>>
     parser:
       type: struct
       fields:
         - source_field_name: raw_tags
-          silver_field_name: tags
+          target_field_name: tags
           parser:
             type: array
             input_format: delimited
@@ -1503,7 +1503,7 @@ parser_config_name: JSON Null Case
 version: "1"
 columns:
   - source_column_name: payload
-    silver_column_name: Payload
+    target_column_name: Payload
     expected_data_type: array<string>
     parser:
       type: array

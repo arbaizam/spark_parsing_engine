@@ -1,7 +1,7 @@
 """Lazy parsed and audit projections over one shared Spark plan.
 
 The runtime builds expensive normalization/parsing expressions once. This wrapper exposes a clean
-silver projection and a separate audit projection without duplicating the expression-building
+target projection and a separate audit projection without duplicating the expression-building
 logic or forcing an action. Callers choose when Spark materializes either view.
 """
 
@@ -22,7 +22,7 @@ def _column(name: str):
 
 
 class DataFrameParsing:
-    """Expose silver and audit projections built from the same lazy Spark plan.
+    """Expose target and audit projections built from the same lazy Spark plan.
 
     Accessing properties performs only logical ``select`` operations. Data is evaluated by later
     actions such as ``collect``, ``write``, or ``count``. Persist this wrapper before materializing
@@ -64,10 +64,10 @@ class DataFrameParsing:
 
     @property
     def parsed_df(self) -> DataFrame:
-        """Return only configured silver columns in configuration order.
+        """Return only configured target columns in configuration order.
 
         Internal UUID-backed names prevent collisions while the plan is built. This final select
-        restores the public silver names promised by the configuration.
+        restores the public target names promised by the configuration.
         """
         return self._evaluated.select(
             *[

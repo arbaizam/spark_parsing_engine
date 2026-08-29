@@ -18,7 +18,7 @@ def test_hash_and_mapping_are_deterministic() -> None:
     assert len(serializer.content_hash(first)) == 64
     payload = serializer.to_mapping(first)
     assert payload["columns"][0]["source_column_name"] == "column_name1"
-    assert payload["columns"][0]["silver_column_name"] == "ColumnName1"
+    assert payload["columns"][0]["target_column_name"] == "ColumnName1"
     assert payload["columns"][0]["expected_data_type"] == "string"
     assert payload["globals"]["true_values"] == ["true", "Y", "yes"]
     assert payload["columns"][0]["parser"]["trim_whitespace"] is True

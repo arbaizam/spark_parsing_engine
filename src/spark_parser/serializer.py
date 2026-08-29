@@ -22,7 +22,7 @@ class ParserConfigSerializer:
     """Produce explicit, JSON-compatible canonical parser metadata.
 
     Returned structures are newly allocated and safe for a caller to modify. Enum members,
-    decimals, dates, timestamps, tuples, and nested parser nodes are converted into stable public
+    decimals, dates, timestamps, tuples, and nested parser nodes are converted into deterministic public
     representations before JSON encoding.
     """
 
@@ -35,7 +35,7 @@ class ParserConfigSerializer:
         columns = [
             {
                 "source_column_name": column.source_column_name,
-                "silver_column_name": column.silver_column_name,
+                "target_column_name": column.target_column_name,
                 "expected_data_type": column.expected_data_type,
                 "parser": self.parser_mapping(
                     column.parser,
@@ -140,7 +140,7 @@ class ParserConfigSerializer:
                 fields=[
                     {
                         "source_field_name": field.source_field_name,
-                        "silver_field_name": field.silver_field_name,
+                        "target_field_name": field.target_field_name,
                         "parser": self.parser_mapping(
                             field.parser,
                             include_audit=False,

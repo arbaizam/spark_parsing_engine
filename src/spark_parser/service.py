@@ -52,9 +52,9 @@ def _walk_parser_options(options: ParserOptions):
 
 
 def _schema_tree(column: ColumnParser) -> str:
-    """Render one column's recursive source-to-silver parser tree as plain text."""
+    """Render one column's recursive source-to-target parser tree as plain text."""
     lines = [
-        f"{column.silver_column_name}: {column.expected_data_type} "
+        f"{column.target_column_name}: {column.expected_data_type} "
         f"[{column.parser.parser_type.value}] <- {column.source_column_name}"
     ]
 
@@ -69,7 +69,7 @@ def _schema_tree(column: ColumnParser) -> str:
             append(element.parser, prefix + "  ")
         for field in options.field_parsers:
             lines.append(
-                f"{prefix}.{field.silver_field_name}: {field.expected_data_type} "
+                f"{prefix}.{field.target_field_name}: {field.expected_data_type} "
                 f"[{field.parser.parser_type.value}] <- {field.source_field_name}"
             )
             append(field.parser, prefix + "  ")
@@ -194,12 +194,12 @@ class UatReviewReport:
                 "",
                 "## Column review",
                 "",
-                "| Source | Silver | Expected type | Parser | Format | Nullable | Error mode | Audit |",
+                "| Source | Target | Expected type | Parser | Format | Nullable | Error mode | Audit |",
                 "| --- | --- | --- | --- | --- | --- | --- | --- |",
                 *(
                     "| "
                     f"{_markdown_text(column['source_column_name'])} | "
-                    f"{_markdown_text(column['silver_column_name'])} | "
+                    f"{_markdown_text(column['target_column_name'])} | "
                     f"{_markdown_text(column['expected_data_type'])} | "
                     f"{_markdown_text(column['parser_type'])} | "
                     f"{_markdown_text(column['format_or_formats'])} | "
@@ -212,7 +212,7 @@ class UatReviewReport:
                 "## Resolved schema and parser tree",
                 "",
                 *(
-                    f"### {_markdown_text(column['silver_column_name'])}\n\n"
+                    f"### {_markdown_text(column['target_column_name'])}\n\n"
                     f"```text\n{column['schema_tree']}\n```\n"
                     for column in self.column_reviews
                 ),
@@ -220,12 +220,12 @@ class UatReviewReport:
                 "",
             ]
         )
-        # Options differ by parser type, so one small table per column is clearer and more stable
+        # Options differ by parser type, so one small table per column is clearer and more consistent
         # than a very wide union of every possible parser argument.
         for column in self.column_reviews:
             lines.extend(
                 [
-                    f"### {_markdown_text(column['silver_column_name'])}",
+                    f"### {_markdown_text(column['target_column_name'])}",
                     "",
                     "| Option | Effective value |",
                     "| --- | --- |",
@@ -449,7 +449,7 @@ class SparkParserService:
                 "No columns have audit enabled; results_df will contain an empty parse-results array."
             )
 
-        # Reusing one bronze source for multiple silver interpretations is allowed. Report it so a
+        # Reusing one bronze source for multiple target interpretations is allowed. Report it so a
         # reviewer can distinguish an intentional fan-out from accidental duplicate authoring.
         repeated_sources = sorted(
             {
@@ -474,7 +474,7 @@ class SparkParserService:
             column_reviews.append(
                 {
                     "source_column_name": column.source_column_name,
-                    "silver_column_name": column.silver_column_name,
+                    "target_column_name": column.target_column_name,
                     "expected_data_type": column.expected_data_type,
                     "parser_type": column.parser.parser_type.value,
                     "format_or_formats": format_or_formats,
@@ -519,10 +519,10 @@ class SparkParserService:
                 ),
             },
             {
-                "check": "Silver column uniqueness",
+                "check": "Target column uniqueness",
                 "status": "PASS",
                 "detail": (
-                    f"Validated {len(config.columns)} non-empty silver name(s); all are unique."
+                    f"Validated {len(config.columns)} non-empty target name(s); all are unique."
                 ),
             },
             {
