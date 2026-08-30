@@ -978,7 +978,10 @@ SELECT
     assert audit.options["type"] == "integer"
 
 
-def test_wide_config_uses_constant_depth_projection_stages(spark: SparkSession) -> None:
+def test_wide_config_uses_constant_depth_projection_stages(
+    spark: SparkSession,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     column_count = 40
     df = spark.sql("SELECT " + ", ".join(f"'x' AS c{index}" for index in range(column_count)))
     columns = "\n".join(
@@ -997,7 +1000,11 @@ def test_wide_config_uses_constant_depth_projection_stages(spark: SparkSession) 
         key_columns=["c0"],
     )
 
-    analyzed = parsing.parsed_df._jdf.queryExecution().analyzed().treeString()
+    parsing.parsed_df.explain(mode="extended")
+    explain_output = capsys.readouterr().out
+    analyzed_marker = "== Analyzed Logical Plan =="
+    assert analyzed_marker in explain_output
+    analyzed = explain_output.split(analyzed_marker, maxsplit=1)[1].split("\n== ", maxsplit=1)[0]
     assert analyzed.count("Project") <= 10
 
 

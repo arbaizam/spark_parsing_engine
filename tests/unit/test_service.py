@@ -6,7 +6,7 @@ import pytest
 
 from spark_parser import CompilationError, ParserType, SparkParserService, parser
 
-ROOT = Path(__file__).resolve().parents[1]
+TEST_CONFIG_PATH = Path(__file__).resolve().parents[1] / "fixtures" / "test_config.yaml"
 
 
 def test_parser_metadata_is_discoverable_and_detached() -> None:
@@ -78,7 +78,7 @@ def test_unknown_parser_description_uses_the_public_error_hierarchy() -> None:
 
 def test_config_review_contains_validation_resolved_options_and_markdown(tmp_path: Path) -> None:
     service = SparkParserService()
-    report = service.review_yaml(ROOT / "test_config.yaml")
+    report = service.review_yaml(TEST_CONFIG_PATH)
 
     assert report.is_valid is True
     assert report.errors == ()

@@ -4,14 +4,14 @@ from pathlib import Path
 
 from spark_parser import ParserConfigSerializer, YamlParserConfigCompiler
 
-ROOT = Path(__file__).resolve().parents[1]
+TEST_CONFIG_PATH = Path(__file__).resolve().parents[1] / "fixtures" / "test_config.yaml"
 
 
 def test_hash_and_mapping_are_deterministic() -> None:
     compiler = YamlParserConfigCompiler()
     serializer = ParserConfigSerializer()
-    first = compiler.compile_path(ROOT / "test_config.yaml")
-    second = compiler.compile_path(ROOT / "test_config.yaml")
+    first = compiler.compile_path(TEST_CONFIG_PATH)
+    second = compiler.compile_path(TEST_CONFIG_PATH)
 
     assert serializer.canonical_json(first) == serializer.canonical_json(second)
     assert serializer.content_hash(first) == serializer.content_hash(second)

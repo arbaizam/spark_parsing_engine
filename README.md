@@ -184,17 +184,18 @@ status without raising the compilation exception.
 Run the Spark-independent unit suite with:
 
 ```text
-python -m pytest tests -q -m "not spark"
+python -m pytest tests/unit -q
 ```
 
-Run every pytest case with a compatible Spark and Java runtime using:
+Run the real-Spark integration suite with a compatible Spark and Java runtime using:
 
 ```text
-SPARK_PARSER_REQUIRE_JAVA=1 python -m pytest tests -q
+SPARK_PARSER_REQUIRE_JAVA=1 python -m pytest tests/integration -q
 ```
 
-The Databricks system notebook runs directly from a repository checkout and requires no wheel,
-Volume, release metadata, or table writes. See the
+Run all pytest cases by targeting `tests/unit` and `tests/integration` together. The Databricks
+system notebook lives under `tests/system`, runs directly from a repository checkout, and requires
+no wheel, Volume, release metadata, or table writes. See the
 [unit-test summary](docs/spark_parser_unit_test_summary.md) and
 [system-test summary](docs/spark_parser_system_test_summary.md) for their inventories and execution
 contracts.
@@ -766,8 +767,7 @@ safe manipulation. The compiler resolves inherited and omitted values, and seria
 configuration-review reports materialize those effective values.
 
 [`examples/all_parsers.yaml`](examples/all_parsers.yaml) shows every top-level, global, column,
-common, and parser-specific argument with required/default indicators. The repository
-[`test_config.yaml`](test_config.yaml) is a smaller load-specific example.
+common, and parser-specific argument with required/default indicators.
 
 Lower-level classes remain public for targeted use:
 

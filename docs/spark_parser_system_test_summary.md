@@ -1,6 +1,6 @@
 # Spark Parser System Test Summary
 
-Source: `notebooks/99.spark_parser_system_tests.py`.
+Source: `tests/system/spark_parser_system_tests.py`.
 
 The Databricks notebook covers behavior that requires a real Spark session. It imports the package
 directly from the repository checkout and does not build, install, hash, publish, or verify a wheel.
@@ -38,7 +38,7 @@ and restores the original Spark SQL settings after a successful run.
 
 ## Execution
 
-Open `notebooks/99.spark_parser_system_tests.py` in the Databricks Git folder, attach compute, and
+Open `tests/system/spark_parser_system_tests.py` in the Databricks Git folder, attach compute, and
 select **Run all**.
 
 The run succeeds only when execution reaches:

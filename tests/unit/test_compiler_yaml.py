@@ -24,7 +24,8 @@ from spark_parser.defaults import (
     DEFAULT_TIMESTAMP_NTZ_FORMATS,
 )
 
-ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
+TEST_CONFIG_PATH = REPO_ROOT / "tests" / "fixtures" / "test_config.yaml"
 
 
 def test_recursive_spark_datatype_grammar_is_canonical() -> None:
@@ -167,7 +168,7 @@ columns:
 
 
 def test_repository_example_compiles_with_resolved_options() -> None:
-    config = YamlParserConfigCompiler().compile_path(ROOT / "test_config.yaml")
+    config = YamlParserConfigCompiler().compile_path(TEST_CONFIG_PATH)
 
     assert config.parser_config_id == "bronze_positions_to_target"
     assert config.version == "1.0.0"
@@ -187,7 +188,9 @@ def test_repository_example_compiles_with_resolved_options() -> None:
 
 
 def test_all_supported_parsers_compile() -> None:
-    config = YamlParserConfigCompiler().compile_path(ROOT / "examples" / "all_parsers.yaml")
+    config = YamlParserConfigCompiler().compile_path(
+        REPO_ROOT / "examples" / "all_parsers.yaml"
+    )
 
     assert [column.parser.parser_type for column in config.columns] == list(ParserType)
     assert config.columns[3].parser.on_parse_error is ParseErrorMode.FAIL
@@ -196,7 +199,7 @@ def test_all_supported_parsers_compile() -> None:
 
 def test_reference_example_columns_inherit_global_null_markers() -> None:
     """Prevent the reference template from silently replacing configured global markers."""
-    example = (ROOT / "examples" / "all_parsers.yaml").read_text(encoding="utf-8")
+    example = (REPO_ROOT / "examples" / "all_parsers.yaml").read_text(encoding="utf-8")
     example = example.replace("  null_markers: []", "  null_markers: [NA]", 1)
 
     config = YamlParserConfigCompiler().compile_text(example)

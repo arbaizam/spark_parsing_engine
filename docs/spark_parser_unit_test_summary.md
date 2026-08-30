@@ -1,11 +1,11 @@
-# Spark Parser Unit Test Summary
+# Spark Parser Unit and Integration Test Summary
 
-Source: the pytest suite under `tests/`.
+Sources: `tests/unit/` and `tests/integration/`. Shared test data lives under `tests/fixtures/`.
 
 The suite contains **56 explicit test functions** and collects **79 pytest cases** after parameter
-expansion. Of those cases, **53** are Spark-independent compiler, serializer, and service tests.
-The remaining **26** are marked `spark`; 25 materialize a real Spark session and one verifies
-serialized timestamp options without starting Spark.
+expansion. Of those cases, **53** are Spark-independent compiler, serializer, and service unit
+tests. The remaining **26** are Spark integration tests; 25 materialize a real Spark session and
+one verifies serialized timestamp options without starting Spark.
 
 The Databricks system-test notebook is separate from these counts and is documented in
 `spark_parser_system_test_summary.md`.
@@ -29,7 +29,7 @@ notebook asserts its own current runtime contract.
 Run the Spark-independent unit suite locally or from a Databricks Git-folder notebook shell cell:
 
 ```bash
-python -m pytest tests -q -m "not spark"
+python -m pytest tests/unit -q
 ```
 
 From a Databricks notebook whose current directory is not the repository root:
@@ -37,21 +37,28 @@ From a Databricks notebook whose current directory is not the repository root:
 ```bash
 %sh
 cd /Workspace/path/to/spark_parser
-python -m pytest tests -q -m "not spark"
+python -m pytest tests/unit -q
 ```
 
-Run the complete pytest suite in local development or CI with compatible Spark and Java installed:
+Run the Spark integration suite in local development or CI with compatible Spark and Java
+installed:
 
 ```bash
-SPARK_PARSER_REQUIRE_JAVA=1 python -m pytest tests -q
+SPARK_PARSER_REQUIRE_JAVA=1 python -m pytest tests/integration -q
 ```
 
 On PowerShell:
 
 ```powershell
 $env:SPARK_PARSER_REQUIRE_JAVA = "1"
-python -m pytest tests -q
+python -m pytest tests/integration -q
 ```
 
 `SPARK_PARSER_REQUIRE_JAVA=1` converts a missing Java runtime from a skip into a failure so a full
 runtime test cannot report success without executing its Spark cases.
+
+Run both pytest tiers together with:
+
+```bash
+python -m pytest tests/unit tests/integration -q
+```

@@ -2,6 +2,8 @@
 
 ## 0.4.0
 
+- Organize test assets into explicit unit, integration, system, and fixture directories, and make
+  the wide-plan regression test compatible with Spark Connect.
 - Add a comprehensive Databricks user-guide notebook covering discovery, YAML authoring,
   configuration review, compilation, scalar and recursive parsing, audit output, errors, schema
   validation, configuration identity, and pipeline integration boundaries.
