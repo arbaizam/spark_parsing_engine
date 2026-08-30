@@ -588,9 +588,9 @@ columns:
 
 | Parser | Argument | Default | Behavior |
 | --- | --- | --- | --- |
-| `date` | `formats` | `[yyyy-MM-dd, yyyy-MM-dd'T'HH:mm:ss[.SSSSSS], yyyy-MM-dd HH:mm:ss[.SSSSSS], MM/dd/yyyy hh:mm a, MM/dd/yyyy hh:mm:ss a]` | Non-empty ordered Spark datetime patterns; first successful parse wins, then casts to date. Offset-bearing ISO input is not included. |
-| `timestamp` | `formats` | `[yyyy-MM-dd'T'HH:mm:ss[.SSSSSS]XXX, yyyy-MM-dd'T'HH:mm:ss[.SSSSSS], yyyy-MM-dd HH:mm:ss[.SSSSSS], MM/dd/yyyy hh:mm a, MM/dd/yyyy hh:mm:ss a]` | First successful parse wins. ISO offsets, local ISO timestamps, optional microseconds, and the two known US exports are built in. |
-| `timestamp_ntz` | `formats` | `[yyyy-MM-dd'T'HH:mm:ss[.SSSSSS], yyyy-MM-dd HH:mm:ss[.SSSSSS], MM/dd/yyyy hh:mm a, MM/dd/yyyy hh:mm:ss a]` | First successful parse wins without applying a session timezone. Offset-bearing input is rejected. |
+| `date` | `formats` | `[yyyy-MM-dd, yyyy-MM-dd'T'HH:mm:ss[.SSSSSS], yyyy-MM-dd HH:mm:ss[.SSSSSS], MM/dd/yyyy h:mm a, MM/dd/yyyy h:mm:ss a]` | Non-empty ordered Spark datetime patterns; first successful parse wins, then casts to date. Offset-bearing ISO input is not included. |
+| `timestamp` | `formats` | `[yyyy-MM-dd'T'HH:mm:ss[.SSSSSS]XXX, yyyy-MM-dd'T'HH:mm:ss[.SSSSSS], yyyy-MM-dd HH:mm:ss[.SSSSSS], MM/dd/yyyy h:mm a, MM/dd/yyyy h:mm:ss a]` | First successful parse wins. ISO offsets, local ISO timestamps, optional microseconds, and the two known US exports are built in. |
+| `timestamp_ntz` | `formats` | `[yyyy-MM-dd'T'HH:mm:ss[.SSSSSS], yyyy-MM-dd HH:mm:ss[.SSSSSS], MM/dd/yyyy h:mm a, MM/dd/yyyy h:mm:ss a]` | First successful parse wins without applying a session timezone. Offset-bearing input is rejected. |
 
 Formats are tried in order. The parser does not guess because forms such as `MM/dd/yyyy` and
 `dd/MM/yyyy` can both be valid while meaning different dates. These are Spark datetime patterns,
@@ -599,10 +599,10 @@ session timezone. `timestamp_ntz` represents local wall-clock time, so it does n
 conversion and rejects offset-bearing defaults at compile time.
 
 The built-in formats cover ISO text, optional microseconds, `Z` or numeric offsets for
-`timestamp`, SQL-style local timestamps, and known US exports such as `09/30/2026 12:00 AM`.
-Slash-based values are always month/day/year and use a 12-hour clock from `01` through `12`; there
-is no locale guessing. The `date` parser drops the time after a successful parse, while `timestamp`
-and `timestamp_ntz` keep it.
+`timestamp`, SQL-style local timestamps, and known US exports such as `09/30/2026 8:08 AM`.
+Slash-based values are always month/day/year and use a 12-hour clock from `1` through `12`, with or
+without a leading zero; there is no locale guessing. The `date` parser drops the time after a
+successful parse, while `timestamp` and `timestamp_ntz` keep it.
 
 Set `formats` when a source uses a different contract. A bare value such as `09/30/2026` is not a
 default because its locale is ambiguous. Offset-bearing values are also excluded from the default

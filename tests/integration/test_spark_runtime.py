@@ -609,13 +609,15 @@ columns:
       on_parse_error: null
 """
     )
-    bronze_df = spark.range(4).select(
+    bronze_df = spark.range(6).select(
         (F.col("id") + 1).cast("integer").alias("row_id"),
         F.element_at(
             F.array(
                 F.lit("2026-09-29 01:02:03"),
-                F.lit("09/30/2026 12:00 AM"),
-                F.lit("09/30/2026 12:00:00 AM"),
+                F.lit("09/30/2026 8:08 AM"),
+                F.lit("09/30/2026 08:08 AM"),
+                F.lit("06/11/2026 8:08:17 PM"),
+                F.lit("06/11/2026 08:08:17 PM"),
                 # A bare slash date remains invalid. Accepting it would silently guess whether the
                 # source uses month/day or day/month ordering.
                 F.lit("09/10/2026"),
@@ -625,8 +627,10 @@ columns:
         F.element_at(
             F.array(
                 F.lit("2026-09-29 01:02:03"),
-                F.lit("09/30/2026 12:00 AM"),
-                F.lit("09/30/2026 12:00:00 AM"),
+                F.lit("09/30/2026 8:08 AM"),
+                F.lit("09/30/2026 08:08 AM"),
+                F.lit("06/11/2026 8:08:17 PM"),
+                F.lit("06/11/2026 08:08:17 PM"),
                 F.lit("09/10/2026"),
             ),
             (F.col("id") + 1).cast("integer"),
@@ -642,15 +646,21 @@ columns:
     assert rows[0].EventDate.isoformat() == "2026-09-29"
     assert rows[1].EventDate.isoformat() == "2026-09-30"
     assert rows[2].EventDate.isoformat() == "2026-09-30"
-    assert rows[3].EventDate is None
+    assert rows[3].EventDate.isoformat() == "2026-06-11"
+    assert rows[4].EventDate.isoformat() == "2026-06-11"
+    assert rows[5].EventDate is None
     assert str(rows[0].EventTimestamp) == "2026-09-29 01:02:03"
-    assert str(rows[1].EventTimestamp) == "2026-09-30 00:00:00"
-    assert str(rows[2].EventTimestamp) == "2026-09-30 00:00:00"
-    assert rows[3].EventTimestamp is None
+    assert str(rows[1].EventTimestamp) == "2026-09-30 08:08:00"
+    assert str(rows[2].EventTimestamp) == "2026-09-30 08:08:00"
+    assert str(rows[3].EventTimestamp) == "2026-06-11 20:08:17"
+    assert str(rows[4].EventTimestamp) == "2026-06-11 20:08:17"
+    assert rows[5].EventTimestamp is None
     assert str(rows[0].EventTimestampNtz) == "2026-09-29 01:02:03"
-    assert str(rows[1].EventTimestampNtz) == "2026-09-30 00:00:00"
-    assert str(rows[2].EventTimestampNtz) == "2026-09-30 00:00:00"
-    assert rows[3].EventTimestampNtz is None
+    assert str(rows[1].EventTimestampNtz) == "2026-09-30 08:08:00"
+    assert str(rows[2].EventTimestampNtz) == "2026-09-30 08:08:00"
+    assert str(rows[3].EventTimestampNtz) == "2026-06-11 20:08:17"
+    assert str(rows[4].EventTimestampNtz) == "2026-06-11 20:08:17"
+    assert rows[5].EventTimestampNtz is None
 
 
 def test_iso_timestamp_defaults_cover_fractional_and_offset_input(spark: SparkSession) -> None:
@@ -1290,7 +1300,7 @@ columns:
   - source_column_name: local_time
     target_column_name: LocalTime
     expected_data_type: timestamp_ntz
-    parser: {type: timestamp_ntz, formats: ["MM/dd/yyyy hh:mm a"]}
+    parser: {type: timestamp_ntz, formats: ["MM/dd/yyyy h:mm a"]}
   - source_column_name: hex_value
     target_column_name: HexValue
     expected_data_type: binary

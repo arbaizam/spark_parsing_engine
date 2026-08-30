@@ -33,8 +33,8 @@ DEFAULT_AUDIT: Final = False
 # Parser-specific scalar defaults.
 DEFAULT_ZERO_IS_VALID: Final = True
 DEFAULT_STRING_FORMAT: Final = None
-US_MONTH_FIRST_12_HOUR_FORMAT: Final = "MM/dd/yyyy hh:mm a"
-US_MONTH_FIRST_12_HOUR_SECONDS_FORMAT: Final = "MM/dd/yyyy hh:mm:ss a"
+US_MONTH_FIRST_12_HOUR_FORMAT: Final = "MM/dd/yyyy h:mm a"
+US_MONTH_FIRST_12_HOUR_SECONDS_FORMAT: Final = "MM/dd/yyyy h:mm:ss a"
 ISO_LOCAL_TIMESTAMP_FORMAT: Final = "yyyy-MM-dd'T'HH:mm:ss[.SSSSSS]"
 ISO_OFFSET_TIMESTAMP_FORMAT: Final = "yyyy-MM-dd'T'HH:mm:ss[.SSSSSS]XXX"
 SQL_LOCAL_TIMESTAMP_FORMAT: Final = "yyyy-MM-dd HH:mm:ss[.SSSSSS]"
@@ -54,10 +54,10 @@ BUILTIN_DATETIME_FORMAT_SHAPES: Final[dict[str, str]] = {
         r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{1,6})?$"
     ),
     US_MONTH_FIRST_12_HOUR_FORMAT: (
-        r"^\d{2}/\d{2}/\d{4} \d{2}:\d{2} [AaPp][Mm]$"
+        r"^\d{2}/\d{2}/\d{4} \d{1,2}:\d{2} [AaPp][Mm]$"
     ),
     US_MONTH_FIRST_12_HOUR_SECONDS_FORMAT: (
-        r"^\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2} [AaPp][Mm]$"
+        r"^\d{2}/\d{2}/\d{4} \d{1,2}:\d{2}:\d{2} [AaPp][Mm]$"
     ),
 }
 # Date inputs often arrive as an ISO date/local timestamp, a SQL-style local timestamp, or a US
