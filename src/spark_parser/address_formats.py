@@ -31,7 +31,7 @@ _DIRECTIONALS = {
 }
 
 # Common Publication 28 suffix names and aliases. Changes to this table alter canonical target
-# output, so additions should be accompanied by focused runtime examples and UAT review.
+# output, so additions should be accompanied by focused runtime and system-test coverage.
 _SUFFIXES = {
     "alley": "Aly",
     "aly": "Aly",

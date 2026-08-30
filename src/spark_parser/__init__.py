@@ -33,7 +33,7 @@ from spark_parser.models import (
     StructFieldParser,
 )
 from spark_parser.serializer import ParserConfigSerializer
-from spark_parser.service import SparkParserService, UatReviewReport, parser
+from spark_parser.service import ConfigReviewReport, SparkParserService, parser
 from spark_parser.version import __version__
 
 __all__ = [
@@ -63,7 +63,7 @@ __all__ = [
     "StringFormat",
     "DataFrameParsing",
     "YamlParserConfigCompiler",
-    "UatReviewReport",
+    "ConfigReviewReport",
     "__version__",
     "parser",
     "parse_spark_data_type",

@@ -1,4 +1,4 @@
-"""Tests for public metadata discovery and UAT review reporting."""
+"""Tests for public metadata discovery and configuration review reporting."""
 
 from pathlib import Path
 
@@ -76,7 +76,7 @@ def test_unknown_parser_description_uses_the_public_error_hierarchy() -> None:
         parser.describe("bogus")
 
 
-def test_uat_report_contains_validation_resolved_options_and_markdown(tmp_path: Path) -> None:
+def test_config_review_contains_validation_resolved_options_and_markdown(tmp_path: Path) -> None:
     service = SparkParserService()
     report = service.review_yaml(ROOT / "test_config.yaml")
 
@@ -101,13 +101,13 @@ def test_uat_report_contains_validation_resolved_options_and_markdown(tmp_path: 
     markdown_path = report.write_markdown(tmp_path / "review.md")
     json_path = report.write_json(tmp_path / "review.json")
     assert markdown_path.read_text(encoding="utf-8").startswith("# Spark Parser")
-    assert '"report_type": "spark_parser_uat_config_review"' in json_path.read_text(
+    assert '"report_type": "spark_parser_config_review"' in json_path.read_text(
         encoding="utf-8"
     )
-    assert report.to_mapping()["report_type"] == "spark_parser_uat_config_review"
+    assert report.to_mapping()["report_type"] == "spark_parser_config_review"
 
 
-def test_invalid_uat_report_returns_errors_instead_of_raising() -> None:
+def test_invalid_config_review_returns_errors_instead_of_raising() -> None:
     report = parser.review_yaml("parser_config_id: incomplete")
 
     assert report.is_valid is False

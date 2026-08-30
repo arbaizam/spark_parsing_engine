@@ -42,7 +42,7 @@ jobs:
           python -m pip install ".[test]" "pyspark==${{ matrix.pyspark }}" build ruff
 
       - name: Lint
-        run: python -m ruff check src tests databricks/uat/spark_parser_uat.py
+        run: python -m ruff check src tests notebooks/99.spark_parser_system_tests.py
 
       - name: Test with a required Spark runtime
         env:

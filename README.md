@@ -27,8 +27,8 @@ python -m pip install -e ".[spark,test]"
 
 The production wheel intentionally does not declare PySpark as an install dependency. Databricks
 owns the Spark/Py4J runtime, and allowing pip to resolve another PySpark distribution beside it can
-break that binding. Install the wheel on Databricks with `--no-deps`, as shown in the checked-in
-UAT notebook, and use a runtime that already provides Spark 3.5 or newer and PyYAML 6 or newer.
+break that binding. Install the wheel on Databricks with `--no-deps`, and use a runtime that already
+provides Spark 3.5 or newer and PyYAML 6 or newer.
 
 ```yaml
 parser_config_id: bronze_customer_load
@@ -121,7 +121,7 @@ The service is the recommended entry point for common package operations.
 | `parser.describe("date")` | Return metadata for one parser by name. |
 | `parser.string.describe()` | Return the string parser's arguments, defaults, behavior, and gotchas. The same accessor exists for every parser type. |
 | `parser.config.describe()` | Return top-level, global, and column metadata definitions. |
-| `parser.review_yaml(source)` | Validate YAML and return a `UatReviewReport` instead of raising for authoring errors. |
+| `parser.review_yaml(source)` | Validate YAML and return a `ConfigReviewReport` instead of raising for authoring errors. |
 
 Parser metadata accessors are `string`, `byte`, `short`, `integer`, `long`, `float`, `decimal`,
 `double`, `binary`, `boolean`, `date`, `timestamp`, `timestamp_ntz`, `array`, `struct`, and `map`.
@@ -137,7 +137,7 @@ all_defaults = parser.defaults()
 config_help = parser.config.describe()
 ```
 
-## UAT configuration report
+## Configuration review report
 
 `review_yaml()` accepts YAML text, a `Path`/path string, or a mapping. A valid report contains:
 
@@ -163,24 +163,38 @@ if not report.is_valid:
     raise ValueError(report.errors)
 
 display(report.to_markdown())
-report.write_markdown("customer_parser_uat.md")
-report.write_json("customer_parser_uat.json")
+report.write_markdown("customer_parser_review.md")
+report.write_json("customer_parser_review.json")
 report_json = report.to_json()
 report_payload = report.to_mapping()
 ```
 
-`UatReviewReport` properties are `is_valid`, `source`, `errors`, `warnings`, `summary`,
+`ConfigReviewReport` properties are `is_valid`, `source`, `errors`, `warnings`, `summary`,
 `validation_checks`, `column_reviews`, and `resolved_config`. `to_mapping()` returns a detached
 JSON-compatible structure; `to_json(indent=2)` and `to_markdown()` render storage and human review
 formats. `write_json(path)` and `write_markdown(path)` save UTF-8 artifacts and return their target
 `Path` objects. An invalid report contains its compiler errors and renders a `FAIL`
 status without raising the compilation exception.
 
-For release validation on Databricks, use the checked-in
-[Databricks UAT workflow](databricks/uat/README.md). It installs an exact wheel, runs representative
-ANSI-mode parsing and audit assertions, round-trips both outputs through Delta, and produces an
-explicit handoff contract for a downstream rules engine. The workflow does not automate package
-publishing or workspace deployment, and its UAT writes never overwrite or remove tables.
+## Testing
+
+Run the Spark-independent unit suite with:
+
+```text
+python -m pytest tests -q -m "not spark"
+```
+
+Run every pytest case with a compatible Spark and Java runtime using:
+
+```text
+SPARK_PARSER_REQUIRE_JAVA=1 python -m pytest tests -q
+```
+
+The Databricks system notebook runs directly from a repository checkout and requires no wheel,
+Volume, release metadata, or table writes. See the
+[unit-test summary](docs/spark_parser_unit_test_summary.md) and
+[system-test summary](docs/spark_parser_system_test_summary.md) for their inventories and execution
+contracts.
 
 ## Configuration metadata
 
@@ -192,7 +206,7 @@ publishing or workspace deployment, and its UAT writes never overwrite or remove
 | `parser_config_name` | Yes | — | Non-empty human-readable name. |
 | `version` | Yes | — | Non-empty version string. Versions remain important; lifecycle status is intentionally absent. |
 | `columns` | Yes | — | Non-empty ordered list of source-to-target parser mappings. |
-| `description` | No | `null` | Purpose and UAT scope. |
+| `description` | No | `null` | Purpose and configuration scope. |
 | `owner` | No | `null` | Accountable person or team. |
 | `owner_department` | No | `null` | Accountable department. |
 | `globals` | No | `{}` | Global null and Boolean vocabularies inherited by columns. |
@@ -280,7 +294,8 @@ incompatible typed defaults, empty required lists, and contradictory conditional
 For complex JSON containers, outer `trim_whitespace`, empty/null-marker handling, nullability,
 defaults, and `on_parse_error` apply to the complete bronze string. `collapse_whitespace` is not
 applied inside raw JSON because doing so could change quoted JSON string values, so it resolves to
-`false` for `array`, `struct`, and `map` parsers. Serialization, UAT reports, `describe()`, and the
+`false` for `array`, `struct`, and `map` parsers. Serialization, configuration reviews,
+`describe()`, and the
 row-level audit options all report that effective value. Each configured
 leaf parser performs its own normal whitespace normalization after JSON decoding. Nested parsers
 cannot enable separate audit entries; their effective options and error paths are consolidated
@@ -472,7 +487,8 @@ timezone; configure that behavior explicitly if a source contract truly requires
 The built-in patterns are full-token shape-guarded before Spark parses them. This prevents Spark
 3.5's `spark.sql.legacy.timeParserPolicy=EXCEPTION` from raising on a harmless mismatch while the
 format cascade is trying its next pattern. A custom `formats` list uses Spark's native pattern
-behavior; test custom patterns under the production session policy as part of load-specific UAT.
+behavior; test custom patterns under the production session policy during load-specific integration
+testing.
 
 ### Array
 
@@ -690,7 +706,7 @@ expression; a full target write, `collect()`, or a select that consumes the colu
 
 Row keys are intentionally retained in `results_df`, not automatically copied into `parsed_df`.
 If a downstream join requires the key in both outputs, configure that source as a target column as
-well (the Databricks UAT does this with `RecordId`) or add it explicitly before the handoff.
+well (the Databricks system tests do this with `RecordId`) or add it explicitly before the handoff.
 
 `parse_dataframe()` parameters:
 
@@ -743,8 +759,8 @@ resolved `options` map but do not add noisy action entries or independently set 
 Defaults have one code-owned source of truth in
 [`spark_parser.defaults`](src/spark_parser/defaults.py). `PARSER_DEFAULTS` is the live public
 module mapping and should be treated as read-only; `parser.defaults()` returns a detached copy for
-safe manipulation. The compiler resolves inherited and omitted values, and serialization/UAT
-reports materialize those effective values.
+safe manipulation. The compiler resolves inherited and omitted values, and serialization and
+configuration-review reports materialize those effective values.
 
 [`examples/all_parsers.yaml`](examples/all_parsers.yaml) shows every top-level, global, column,
 common, and parser-specific argument with required/default indicators. The repository

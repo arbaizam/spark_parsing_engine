@@ -86,7 +86,7 @@ def _schema_tree(column: ColumnParser) -> str:
 
 
 @dataclass(frozen=True)
-class UatReviewReport:
+class ConfigReviewReport:
     """Immutable structured result of reviewing one parser configuration.
 
     Invalid reports carry authoring errors without raising, which makes them suitable for review
@@ -109,7 +109,7 @@ class UatReviewReport:
         # a value returned to an authoring UI.
         return deepcopy(
             {
-                "report_type": "spark_parser_uat_config_review",
+                "report_type": "spark_parser_config_review",
                 "engine_version": __version__,
                 "is_valid": self.is_valid,
                 "source": self.source,
@@ -141,7 +141,7 @@ class UatReviewReport:
         """
         status = "PASS" if self.is_valid else "FAIL"
         lines = [
-            "# Spark Parser UAT Configuration Review",
+            "# Spark Parser Configuration Review",
             "",
             f"**Validation status:** {status}",
             f"**Source:** {_markdown_text(self.source)}",
@@ -412,7 +412,7 @@ class SparkParserService:
     def review_yaml(
         self,
         source: str | Path | Mapping[str, Any],
-    ) -> UatReviewReport:
+    ) -> ConfigReviewReport:
         """Validate authoring input and return a detailed report instead of raising.
 
         Only expected input/compilation failures are converted into an invalid report. Programming
@@ -422,7 +422,7 @@ class SparkParserService:
         try:
             config, source_label = self._compile_source(source)
         except (CompilationError, TypeError, ValueError, OSError) as exc:
-            return UatReviewReport(
+            return ConfigReviewReport(
                 is_valid=False,
                 source=source_label or self._source_label(source),
                 errors=(str(exc),),
@@ -436,9 +436,9 @@ class SparkParserService:
         resolved = self._serializer.to_mapping(config)
         report_warnings: list[str] = []
         # Ownership metadata is not required for execution, but missing values reduce the usefulness
-        # of a UAT artifact and therefore deserve explicit review warnings.
+        # of a configuration review and therefore deserve explicit warnings.
         if config.description is None:
-            report_warnings.append("description is not set; UAT scope may be less clear.")
+            report_warnings.append("description is not set; configuration scope may be less clear.")
         if config.owner is None:
             report_warnings.append("owner is not set.")
         if config.owner_department is None:
@@ -564,7 +564,7 @@ class SparkParserService:
             "owner": config.owner,
             "owner_department": config.owner_department,
         }
-        return UatReviewReport(
+        return ConfigReviewReport(
             is_valid=True,
             source=source_label,
             errors=(),
@@ -614,4 +614,4 @@ class SparkParserService:
 # Most consumers need no mutable service state, so a package-level singleton is the ergonomic
 # default. Tests and dependency-injected applications may still instantiate SparkParserService.
 parser = SparkParserService()
-"""Convenience singleton for compilation, parsing, discovery, and UAT reporting."""
+"""Convenience singleton for compilation, parsing, discovery, and configuration review."""
