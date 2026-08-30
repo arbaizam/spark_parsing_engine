@@ -101,6 +101,9 @@ schema_warnings = parsing.warnings
 `parser` is the package-level `SparkParserService` singleton. You may instantiate
 `SparkParserService()` when dependency injection or isolated service objects are preferable.
 
+For an executable end-to-end walkthrough, open the
+[Spark Parser user guide](examples/spark_parser_user_guide.py) as a Databricks source notebook.
+
 ## Service API
 
 The service is the recommended entry point for common package operations.

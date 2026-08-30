@@ -2,6 +2,9 @@
 
 ## 0.4.0
 
+- Add a comprehensive Databricks user-guide notebook covering discovery, YAML authoring,
+  configuration review, compilation, scalar and recursive parsing, audit output, errors, schema
+  validation, configuration identity, and pipeline integration boundaries.
 - Add `title` string formatting for display text that retains normalized spaces.
 - Add `state_us` string formatting for the 50 US states and Washington, DC, including postal codes,
   punctuation-tolerant names, and an explicit set of conventional abbreviations.
