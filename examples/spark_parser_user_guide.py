@@ -94,8 +94,10 @@ print(f"Spark version: {spark.version}")
 # MAGIC - `parsed_df`: configured target columns in YAML order;
 # MAGIC - `results_df`: caller-selected row keys plus parser audit and configuration identity.
 # MAGIC
-# MAGIC Spark evaluates the expressions only when an action such as `display()`, `collect()`,
-# MAGIC `count()`, or `write` materializes one of those DataFrames.
+# MAGIC Spark evaluates parsed expressions only when an action consumes them. Actions such as
+# MAGIC `display()`, `collect()`, and a target write normally do that. Do not use `count()` to test
+# MAGIC a parse failure: Spark may prune an unused parsed expression, and that optimizer choice can
+# MAGIC vary by runtime and plan.
 
 # COMMAND ----------
 
@@ -641,8 +643,9 @@ fail_parsing = parser.parse_dataframe(
     key_columns=["raw_value"],
 )
 
-# Building and even counting the row can remain lazy with respect to the unused parsed expression.
-assert fail_parsing.parsed_df.count() == 1
+# Building the parsed projection is lazy and exposes the configured target schema without
+# evaluating the bad source value.
+assert fail_parsing.parsed_df.columns == ["ParsedValue"]
 try:
     fail_parsing.parsed_df.select("ParsedValue").collect()
 except Exception as exc:  # Spark wraps executor failures differently across runtimes.

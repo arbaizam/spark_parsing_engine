@@ -1,34 +1,33 @@
 # Spark Parser
 
-Spark Parser converts load-specific bronze string columns into explicitly typed target
-columns using strict YAML configuration. All row transformations use native Spark SQL
-expressions—there are no Python or pandas UDFs.
+Spark Parser turns raw bronze strings into typed Spark columns from a strict YAML contract. It is
+built for ingestion pipelines where source files arrive as strings but the next layer needs a
+predictable schema, consistent cleanup rules, and a record of what changed.
 
-The package provides:
+Every row transformation is a native Spark SQL expression. There are no Python or pandas UDFs, so
+Spark can optimize the generated plan and run it the same way in local tests and Databricks jobs.
 
-- strict YAML compilation with resolved, code-owned defaults;
-- source-to-target column mapping and exact Spark datatype validation;
-- complete practical scalar parsing: string, byte, short, integer, long, float, decimal,
-  double, binary, Boolean, date, timestamp, and timestamp-without-timezone;
-- recursive first-class `array`, `struct`, and string-keyed `map` parsers, including nested
-  combinations such as `array<struct<...>>`;
-- native address, county, and ZIP normalization profiles;
-- optional row-level audit structs aligned to rules-engine-style output;
-- a discoverable service API (`parser.string.describe()`); and
-- structured JSON reports and standalone human-readable Markdown configuration documents.
+Use the package to:
+
+- map source columns to target names and Spark datatypes;
+- parse scalar values such as integers, decimals, Booleans, dates, timestamps, and binary data;
+- parse nested arrays, structs, and string-keyed maps recursively;
+- normalize common US address, county, state, and ZIP values;
+- decide what happens to nulls, invalid values, and bad nested elements;
+- produce optional row-level audit details alongside the parsed data; and
+- review, serialize, and hash the fully resolved configuration before a load runs.
 
 ## Quick start
 
-For local development, install Spark explicitly through the optional extra:
+For local development, install the Spark and test extras:
 
 ```text
 python -m pip install -e ".[spark,test]"
 ```
 
-The production wheel intentionally does not declare PySpark as an install dependency. Databricks
-owns the Spark/Py4J runtime, and allowing pip to resolve another PySpark distribution beside it can
-break that binding. Install the wheel on Databricks with `--no-deps`, and use a runtime that already
-provides Spark 3.5 or newer and PyYAML 6 or newer.
+Do not install the Spark extra on Databricks. The Databricks runtime already owns Spark and Py4J;
+installing another PySpark distribution beside it can break that connection. Install the package
+wheel with `--no-deps` on a runtime that provides Spark 3.5 or newer and PyYAML 6 or newer.
 
 ```yaml
 parser_config_id: bronze_customer_load
@@ -98,15 +97,105 @@ audit_df = parsing.results_df
 schema_warnings = parsing.warnings
 ```
 
-`parser` is the package-level `SparkParserService` singleton. You may instantiate
-`SparkParserService()` when dependency injection or isolated service objects are preferable.
+For most callers, `parser` is the only object they need. It is a package-level
+`SparkParserService` instance that handles compilation, review, serialization, and DataFrame
+parsing. Create a separate `SparkParserService()` only when an application needs its own service
+instance for dependency injection or test isolation.
 
 For an executable end-to-end walkthrough, open the
 [Spark Parser user guide](examples/spark_parser_user_guide.py) as a Databricks source notebook.
 
+## How the package fits together
+
+The main path through the package is:
+
+`YAML or mapping` → `YamlParserConfigCompiler` → `ParserConfig` → `SparkDataFrameParser` →
+`DataFrameParsing`
+
+`SparkParserService` sits in front of that path and wires the pieces together. The compiler side
+does not import PySpark, which means config authoring, review, datatype validation, serialization,
+and hashing can run in a lightweight Python environment. PySpark is loaded only when code asks for
+the DataFrame runtime.
+
+### Public entry point and orchestration
+
+- [`__init__.py`](src/spark_parser/__init__.py) defines the supported public import surface. It
+  exports the compiler, models, enums, service, and errors directly, while loading
+  `SparkDataFrameParser` and `DataFrameParsing` only when requested. That lazy boundary keeps
+  compiler-only tools from needing PySpark.
+
+- [`service.py`](src/spark_parser/service.py) is the package facade. It powers the shared `parser`
+  object, delegates compilation and serialization, loads the Spark runtime only for DataFrame
+  work, exposes parser/config metadata, and builds `ConfigReviewReport` objects in JSON or
+  Markdown form. Application code should normally start here.
+
+### Configuration contract
+
+- [`compiler_yaml.py`](src/spark_parser/compiler_yaml.py) is the trust boundary for authored
+  configuration. It reads YAML or mappings, rejects duplicate and unknown keys, resolves inherited
+  defaults, checks parser/type compatibility, validates recursive parser trees and typed defaults,
+  and returns an immutable `ParserConfig`. None of that work requires a Spark session.
+
+- [`models.py`](src/spark_parser/models.py) contains the frozen dataclasses shared by the compiler,
+  serializer, service, and runtime. These objects represent global settings, parser options,
+  nested fields/elements/values, column mappings, and the complete compiled configuration. Once a
+  config is compiled, these models are the contract passed through the rest of the package.
+
+- [`data_types.py`](src/spark_parser/data_types.py) parses the supported Spark DDL grammar without
+  importing PySpark. It canonicalizes aliases, decimal precision and scale, and recursively nested
+  arrays, structs, and maps into `SparkDataType` objects. The compiler uses that model to catch
+  schema mistakes before a cluster is involved.
+
+- [`defaults.py`](src/spark_parser/defaults.py) is the single source of truth for every omitted
+  parser option, including null behavior, Boolean vocabularies, datetime formats, binary encoding,
+  and complex-parser settings. The compiler, metadata API, serializer, audit output, and docs all
+  read from these values so a default has one definition.
+
+- [`enums.py`](src/spark_parser/enums.py) defines the accepted vocabulary for parser types,
+  formatting modes, error policies, input formats, and encodings. It also groups numeric and
+  complex parser families for the validation and runtime branches that apply to them.
+
+### Discovery, serialization, and identity
+
+- [`metadata.py`](src/spark_parser/metadata.py) builds the dictionaries returned by methods such as
+  `parser.string.describe()` and `parser.config.describe()`. It turns the package's enums and
+  defaults into machine-readable help for notebooks, config editors, catalogs, and review tools.
+
+- [`serializer.py`](src/spark_parser/serializer.py) converts a compiled config into a fully
+  resolved, JSON-compatible mapping. It also produces deterministic canonical JSON and the SHA-256
+  content hash, so identity follows runtime behavior rather than the shorthand used in the source
+  YAML.
+
+### Spark execution
+
+- [`spark_runtime.py`](src/spark_parser/spark_runtime.py) is the execution engine. It checks the
+  incoming DataFrame schema, builds native Spark expressions for scalar and recursive parsing,
+  applies null/default/error policies, and constructs audit metadata. It returns a lazy plan and
+  never collects source rows or calls a Python UDF.
+
+- [`address_formats.py`](src/spark_parser/address_formats.py) holds the Spark-expression helpers
+  for `address_us_v1`, `county`, `state_us`, and `zip`. Keeping these domain-specific rules outside
+  the main runtime makes the lookup tables and formatting decisions easier to review and test.
+
+- [`dataframe_parsing.py`](src/spark_parser/dataframe_parsing.py) wraps the shared lazy plan produced
+  by the runtime. Its `parsed_df` and `results_df` properties expose the target and audit
+  projections, while `persist()` and `unpersist()` let a job avoid recomputing the plan when it
+  materializes both.
+
+### Package-wide support
+
+- [`exceptions.py`](src/spark_parser/exceptions.py) defines the public error hierarchy:
+  `CompilationError` for bad configuration, `SchemaValidationError` for an incompatible DataFrame,
+  and `SchemaWarning` for recoverable binding issues such as a missing source column. All package
+  errors inherit from `SparkParserError`.
+
+- [`version.py`](src/spark_parser/version.py) owns the package version. That value appears in wheel
+  metadata, configuration review reports, and the parser identity columns written to
+  `results_df`.
+
 ## Service API
 
-The service is the recommended entry point for common package operations.
+The shared `parser` service covers the normal workflow:
 
 | Method/property | Result and behavior |
 | --- | --- |
@@ -126,10 +215,10 @@ The service is the recommended entry point for common package operations.
 | `parser.config.describe()` | Return top-level, global, and column metadata definitions. |
 | `parser.review_yaml(source)` | Validate YAML and return a `ConfigReviewReport` instead of raising for authoring errors. |
 
-Parser metadata accessors are `string`, `byte`, `short`, `integer`, `long`, `float`, `decimal`,
-`double`, `binary`, `boolean`, `date`, `timestamp`, `timestamp_ntz`, `array`, `struct`, and `map`.
-Descriptions are machine-readable dictionaries so notebooks, catalogs, and authoring UIs can
-render the same defaults used by the compiler.
+Metadata accessors are available for `string`, `byte`, `short`, `integer`, `long`, `float`,
+`decimal`, `double`, `binary`, `boolean`, `date`, `timestamp`, `timestamp_ntz`, `array`, `struct`,
+and `map`. Each one returns a plain dictionary, which makes it easy for notebooks and config tools
+to show the same arguments and defaults the compiler uses.
 
 ```python
 string_help = parser.string.describe()
@@ -142,22 +231,20 @@ config_help = parser.config.describe()
 
 ## Configuration review report
 
-`review_yaml()` accepts YAML text, a `Path`/path string, or a mapping. A valid report contains:
+Use `review_yaml()` when you want to inspect a config without running a DataFrame. It accepts YAML
+text, a `Path` or path string, or an already loaded mapping. A valid report shows:
 
-- config identity, owner metadata, version, and canonical content hash;
-- an evidence-based summary of the compiler validations the config passed, with `N/A` for
-  checks that do not apply;
-- source-to-target mappings and exact expected datatypes;
-- a recursive resolved schema/parser tree for every configured column;
-- a dedicated table of resolved global settings;
-- every fully resolved parser option, including inherited globals and defaults;
+- identity, ownership, version, and the canonical content hash;
+- which compiler checks passed and which ones did not apply;
+- every source-to-target mapping and target datatype;
+- the resolved parser tree for nested arrays, structs, and maps;
+- global settings and inherited column options;
 - effective error, nullability, formatting, and audit behavior;
-- parser-specific key behaviors and gotchas; and
-- review warnings such as missing ownership metadata or no audited columns; and
-- a copy-ready canonical YAML appendix containing inherited values and effective defaults.
+- warnings such as missing ownership metadata or a config with no audited columns; and
+- canonical YAML with inherited values and defaults filled in.
 
-It does not inspect a DataFrame, so input-schema warnings such as a missing source column are
-reported later by `parse_dataframe()`.
+The report only reviews configuration. Data-dependent issues, such as a configured source column
+that is missing from an input DataFrame, are reported later by `parse_dataframe()`.
 
 ```python
 report = parser.review_yaml("customer_parser.yaml")
@@ -172,12 +259,11 @@ report_json = report.to_json()
 report_payload = report.to_mapping()
 ```
 
-`ConfigReviewReport` properties are `is_valid`, `source`, `errors`, `warnings`, `summary`,
-`validation_checks`, `column_reviews`, and `resolved_config`. `to_mapping()` returns a detached
-JSON-compatible structure; `to_json(indent=2)` and `to_markdown()` render storage and human review
-formats. `write_json(path)` and `write_markdown(path)` save UTF-8 artifacts and return their target
-`Path` objects. An invalid report contains its compiler errors and renders a `FAIL`
-status without raising the compilation exception.
+`ConfigReviewReport` exposes `is_valid`, `source`, `errors`, `warnings`, `summary`,
+`validation_checks`, `column_reviews`, and `resolved_config`. Use `to_mapping()` or `to_json()` for
+automation and `to_markdown()` for a review document. `write_json()` and `write_markdown()` save
+UTF-8 files and return the destination `Path`. Invalid configs still produce a report: errors are
+included in the result and the Markdown status is `FAIL`.
 
 ## Testing
 
@@ -193,9 +279,14 @@ Run the real-Spark integration suite with a compatible Spark and Java runtime us
 SPARK_PARSER_REQUIRE_JAVA=1 python -m pytest tests/integration -q
 ```
 
-Run all pytest cases by targeting `tests/unit` and `tests/integration` together. The Databricks
-system notebook lives under `tests/system`, runs directly from a repository checkout, and requires
-no wheel, Volume, release metadata, or table writes. See the
+To run both pytest suites in one command:
+
+```text
+python -m pytest tests/unit tests/integration -q
+```
+
+The Databricks system notebook lives under `tests/system`. It runs from a repository checkout and
+does not need a wheel, Volume, release metadata, or table writes. See the
 [unit-test summary](docs/spark_parser_unit_test_summary.md) and
 [system-test summary](docs/spark_parser_system_test_summary.md) for their inventories and execution
 contracts.
@@ -208,17 +299,17 @@ contracts.
 | --- | ---: | --- | --- |
 | `parser_config_id` | Yes | — | Stable, non-empty ID for the parsing configuration. |
 | `parser_config_name` | Yes | — | Non-empty human-readable name. |
-| `version` | Yes | — | Non-empty version string. Versions remain important; lifecycle status is intentionally absent. |
+| `version` | Yes | — | Non-empty version string identifying this config contract. Lifecycle status is outside the parser config. |
 | `columns` | Yes | — | Non-empty ordered list of source-to-target parser mappings. |
 | `description` | No | `null` | Purpose and configuration scope. |
 | `owner` | No | `null` | Accountable person or team. |
 | `owner_department` | No | `null` | Accountable department. |
 | `globals` | No | `{}` | Global null and Boolean vocabularies inherited by columns. |
 
-Duplicate YAML keys, non-string metadata keys, and unknown arguments are rejected. Quote
-numeric-looking versions such as `"1"` so YAML retains them as strings.
-YAML merge keys (`<<`) are intentionally unsupported because they can hide inherited keys from
-a strict review; ordinary anchors and aliases remain usable.
+The compiler rejects duplicate YAML keys, non-string metadata keys, and unknown arguments. Quote a
+numeric-looking version such as `"1"`; otherwise YAML may load it as a number. Merge keys (`<<`)
+are not supported because they can hide values during review, though ordinary anchors and aliases
+still work.
 
 ### Global arguments
 
@@ -230,14 +321,12 @@ a strict review; ordinary anchors and aliases remain usable.
 | `false_values` | No | `["false"]` | Non-empty global tokens mapped to Boolean false. |
 | `boolean_case_sensitive` | No | `false` | Whether global Boolean-token matching requires exact case. The default is case-insensitive. |
 
-When null-marker case sensitivity is `true`, `NA` matches only `NA`. When it is `false`, the
-normalized input and all markers are lowercased before comparison, so `NA`, `na`, and `Na`
-match the same marker. Matching occurs after whitespace collapse and trim. Each column may
-override this global setting.
+With case-sensitive matching, `NA` matches only `NA`. With case-insensitive matching, `NA`, `na`,
+and `Na` all match. Null markers are checked after whitespace collapse and trimming, and a column
+can override the global setting.
 
-Quote Boolean-looking YAML tokens—especially `"true"`, `"false"`, `"yes"`, `"no"`, `"on"`,
-and `"off"`. Without quotes, YAML can load them as actual booleans rather than bronze string
-tokens, and strict compilation rejects them.
+Quote tokens such as `"true"`, `"false"`, `"yes"`, `"no"`, `"on"`, and `"off"`. YAML may otherwise
+load them as Boolean values instead of the source strings the parser expects.
 
 ### Column arguments
 
@@ -248,15 +337,14 @@ tokens, and strict compilation rejects them.
 | `expected_data_type` | Yes | — | Exact target Spark DDL type. Scalars and recursively nested `array<T>`, `struct<field:T,...>`, and `map<string,T>` are supported. |
 | `parser` | Yes | — | Matching scalar or complex parser name, or a mapping containing `type` and options. |
 
-`expected_data_type` is intentionally separate from `parser.type`: the parser selects the
-conversion implementation, while the expected type fixes the target schema—including integer
-width, decimal precision/scale, and the complete nested schema. The compiler recursively requires
-the parser tree to agree with it. Scalar aliases are `tinyint` → `byte`, `smallint` → `short`,
-`int` → `integer`, `bigint` → `long`, `real` → `float`, `bool` → `boolean`, and
-`timestamp_ltz` → `timestamp`.
+`parser.type` chooses the conversion, while `expected_data_type` defines the target schema. Keeping
+them separate lets the compiler verify details such as integer width, decimal precision and scale,
+and every field inside a nested type. The parser tree must match that schema all the way down.
+Accepted scalar aliases are `tinyint` → `byte`, `smallint` → `short`, `int` → `integer`, `bigint`
+→ `long`, `real` → `float`, `bool` → `boolean`, and `timestamp_ltz` → `timestamp`.
 
-Scalar form such as `parser: date` applies every safe default. Mapping form is required when
-setting any option:
+Use the short form, such as `parser: date`, when the defaults are right for the column. Use mapping
+form when you need to set an option:
 
 ```yaml
 - source_column_name: arm_next_rate_change_date
@@ -267,10 +355,10 @@ setting any option:
     audit: true
 ```
 
-If `arm_next_rate_change_date` is absent from the DataFrame, parsing emits a `SchemaWarning`,
-adds a message to `DataFrameParsing.warnings`, and produces a typed null. For a mapping with
-`is_nullable: false`, its required `default_on_null` is assigned instead. An audited mapping
-records `source_column_missing`, sets `effective` to false, and supplies a missing-source error.
+If `arm_next_rate_change_date` is missing from the DataFrame, the parser emits a `SchemaWarning`,
+adds the message to `DataFrameParsing.warnings`, and produces a typed null. A non-nullable mapping
+uses its required `default_on_null` instead. When audit is enabled, the result also records
+`source_column_missing`, marks the parser ineffective for that row, and includes an error message.
 
 ## Common parser arguments
 
@@ -292,19 +380,19 @@ These options apply to every parser type.
 | `default_on_error` | Conditional | No default | Required only with `on_parse_error: default`; must fit the expected type. |
 | `audit` | No | `false` | Add a row-level audit struct for this column. |
 
-Compilation rejects misplaced parser-specific arguments, invalid option types, unknown keys,
-incompatible typed defaults, empty required lists, and contradictory conditional arguments.
+The compiler rejects options on the wrong parser, invalid value types, unknown keys, incompatible
+defaults, empty required lists, and contradictory settings.
 
-For complex JSON containers, outer `trim_whitespace`, empty/null-marker handling, nullability,
-defaults, and `on_parse_error` apply to the complete bronze string. `collapse_whitespace` is not
-applied inside raw JSON because doing so could change quoted JSON string values, so it resolves to
-`false` for `array`, `struct`, and `map` parsers. Serialization, configuration reviews,
-`describe()`, and the
-row-level audit options all report that effective value. Each configured
-leaf parser performs its own normal whitespace normalization after JSON decoding. Nested parsers
-cannot enable separate audit entries; their effective options and error paths are consolidated
-under the audited top-level column. The exact lowercase JSON literal `null` is treated as a
-successful typed null and records `json_null_to_null` when audited.
+For a complex JSON value, the container parser applies trimming, empty/null-marker handling,
+nullability, defaults, and `on_parse_error` to the whole source string. It does not collapse
+whitespace inside raw JSON because that could change a quoted value. As a result,
+`collapse_whitespace` resolves to `false` for outer `array`, `struct`, and `map` parsers everywhere
+that effective options are reported.
+
+After decoding, each leaf parser applies its own whitespace rules. Nested parsers report their
+options and error paths through the top-level audit entry instead of creating separate entries.
+The exact lowercase JSON literal `null` is a successful typed null and records
+`json_null_to_null` when audit is enabled.
 
 ## Parser-specific reference
 
@@ -324,13 +412,13 @@ String supports the common arguments plus `format`.
 | `state_us` | Return the uppercase two-letter abbreviation for a US state or Washington, DC. | `"Illinois"` → `"IL"`; `"Ill."` → `"IL"`; `"WA."` → `"WA"` |
 | `zip` | Return a canonical ZIP5 or ZIP+4 string. | `"1234"` → `"01234"`; `"123456"` → `"00012-3456"` |
 
-`title` uses Spark's deterministic `initcap` behavior. It is appropriate for ordinary display
-labels whose words should retain spaces; it does not apply the specialized `Mc`, apostrophe,
-hyphen, suffix, or unit rules in `address_us_v1` and `county`.
+`title` uses Spark's `initcap` behavior. It works well for display labels that should keep their
+spaces, but it does not know the `Mc`, apostrophe, hyphen, street-suffix, or unit rules used by
+`address_us_v1` and `county`.
 
 #### Address profile
 
-`address_us_v1` is a versioned, native-Spark display formatter. It:
+`address_us_v1` is a versioned display formatter built from Spark expressions. It:
 
 - collapses whitespace and removes commas/periods from tokens;
 - recognizes common USPS suffix names and aliases (`Street`/`St.` → `St`, `Avenue` → `Ave`);
@@ -341,37 +429,34 @@ hyphen, suffix, or unit rules in `address_us_v1` and `county`.
 - uppercases alphanumeric values following a unit designator and hash-prefixed unit values
   (`Apt 4b` → `Apt 4B`, `Apt #4b` → `Apt #4B`).
 
-Only the final suffix-like token is treated as the street suffix, preventing names such as
-`123 Center Street` from becoming `123 Ctr St`. Empty punctuation-only tokens are removed before
-joining, so commas do not create doubled spaces. Null input remains null.
+Only the last suffix-like token is treated as a street suffix. That keeps an address such as
+`123 Center Street` from turning into `123 Ctr St`. Punctuation-only tokens are removed before the
+address is joined back together, and null stays null.
 
-Suffix output is deliberately punctuation-free (`St`, not `St.`), consistent with canonical
-USPS abbreviations. The formatter follows [USPS Publication 28 suffix conventions](https://pe.usps.com/text/pub28/28apc_002.htm),
-but it is not an address parser, deliverability check, geocoder, or authoritative postal
-validator. Ambiguous human names cannot be perfectly inferred from casing alone. The package
-therefore keeps this deterministic profile lightweight and native to Spark rather than adding
-a Python UDF or a large external postal model.
+Suffixes are punctuation-free (`St`, not `St.`), following
+[USPS Publication 28 conventions](https://pe.usps.com/text/pub28/28apc_002.htm). This formatter is
+not a geocoder, deliverability check, or full postal validator, and casing alone cannot resolve
+every human-name ambiguity. Its job is narrower: provide predictable display cleanup without a
+Python UDF or an external postal model.
 
 #### County profile
 
-`county` removes one existing case-insensitive `County` suffix, smart-cases the remaining name,
-and appends exactly one ` County`. A value containing only `County` is a parse error. It does not
-convert or infer Parish, Borough, Municipality, or Census Area; select this profile only when the
-target domain truly requires counties.
+`county` removes an existing `County` suffix, smart-cases the name, and adds one canonical
+` County` suffix. A value containing only `County` is a parse error. It does not turn parishes,
+boroughs, municipalities, or census areas into counties, so use it only for a true county field.
 
 #### State profile
 
 `state_us` recognizes the 50 US state names, their two-letter postal abbreviations, conventional
-conventional abbreviations such as `Ill.`, `Calif.`, and `Wash.`, plus `District of Columbia`,
+abbreviations such as `Ill.`, `Calif.`, and `Wash.`, plus `District of Columbia`,
 `Washington DC`, `Washington, D.C.`, and `DC`. Matching is case-insensitive after whitespace
-normalization; periods and commas are ignored for lookup. The allow-list remains explicit, so
-punctuation removal does not make arbitrary three-letter values valid. Output is always the
-canonical uppercase two-letter abbreviation.
+normalization; periods and commas are ignored during lookup. The allow-list is fixed, so stripping
+punctuation does not make an arbitrary three-letter value valid. Output is always the uppercase
+two-letter abbreviation.
 
-US territories are intentionally excluded because a field documented as a state should not
-silently broaden its domain. An unknown non-null value is a parse error and follows
-`on_parse_error`. Use `preserve` when a nonstandard source value such as `Mul` must remain unchanged,
-or use `null`/an explicit default when invalid state text should not survive into target data.
+US territories are not included in a formatter for state fields. An unknown non-null value follows
+`on_parse_error`: use `preserve` when a nonstandard source value such as `Mul` must survive, or use
+`null` or an explicit default when invalid state text should not reach the target.
 
 ```yaml
 - source_column_name: state
@@ -400,11 +485,11 @@ Audited padding records `zip_padded`; inserting or changing ZIP+4 formatting rec
 
 ### Byte, short, integer, and long
 
-`byte`, `short`, `integer`, and `long` target signed 8-bit, 16-bit, 32-bit, and 64-bit Spark
-integers. Their aliases are `tinyint`, `smallint`, `int`, and `bigint`. Overflow and non-integral
+`byte`, `short`, `integer`, and `long` map to Spark's signed 8-bit, 16-bit, 32-bit, and 64-bit
+integers. Their aliases are `tinyint`, `smallint`, `int`, and `bigint`. Overflow and fractional
 input are parse errors.
 
-Both add `zero_is_valid` (default `true`). When false, a successfully parsed zero becomes null
+Each adds `zero_is_valid` (default `true`). When false, a successfully parsed zero becomes null
 before final null handling. If the column is non-nullable, `default_on_null` is then assigned.
 A zero `default_on_null` or `default_on_error` is rejected when zero is invalid because it could
 not survive the subsequent zero-invalidating step.
@@ -412,22 +497,20 @@ not survive the subsequent zero-invalidating step.
 ### Decimal
 
 `expected_data_type` must be `decimal(p,s)`, with precision from 1 through 38 and scale from zero
-through precision. Typed defaults are checked against that exact precision and scale. Decimal is
-recommended over double for currency and other exact base-10 values. It supports
-`zero_is_valid` with the same behavior as integer and long. Spark rounds source values with excess
-scale to the configured scale (for example, `1.239` parsed as `decimal(18,2)` becomes `1.24`);
-typed defaults with excess scale remain compile-time errors.
+through precision. Defaults are checked against that exact shape. Use decimal instead of double
+for currency and other exact base-10 values. It supports `zero_is_valid` with the same behavior as
+the integer parsers. Spark rounds source values to the configured scale (`1.239` becomes `1.24` in
+`decimal(18,2)`), while an over-scale default fails at compile time.
 
 ### Float and double
 
-Float and double accept only finite numeric typed defaults and use Spark's single- and
-double-precision representations. A float default must also survive conversion to Spark's
-binary32 range: values that would become infinity or silently underflow to zero fail compilation.
-Both support `zero_is_valid`. Use decimal when exact base-10 representation matters.
+Float and double use Spark's single- and double-precision representations. Defaults must be finite,
+and a float default must fit Spark's binary32 range without becoming infinity or underflowing to
+zero. Both support `zero_is_valid`. Use decimal when exact base-10 representation matters.
 
 ### Binary
 
-Binary adds `encoding`, with `base64` as the safety default. `hex` and `utf8` are also supported.
+Binary adds `encoding`, with `base64` as the default. `hex` and `utf8` are also supported.
 Invalid base64 or hexadecimal input follows `on_parse_error`; UTF-8 accepts every normalized
 string. The typed target value is Spark `binary`, while audit `parsed_value` is always canonical
 base64 so audit storage remains printable and encoding-independent.
@@ -441,8 +524,8 @@ base64 so audit storage remains printable and encoding-independent.
 | `boolean_values_mode` | No | `replace` | When column token lists are supplied, `replace` replaces each supplied side and `extend` appends it to globals. An omitted side continues to inherit its global list. |
 | `boolean_case_sensitive` | No | Inherited global `false` | Exact-case matching when true; lowercase comparison when false. |
 
-Effective true and false sets must not overlap under the effective case rule. An unknown non-null
-token is a parse error—it is never silently treated as false.
+The resolved true and false sets cannot overlap under the active case rule. Any other non-null
+token is a parse error, not an implicit false.
 
 ```yaml
 globals:
@@ -464,46 +547,41 @@ columns:
 
 | Parser | Argument | Default | Behavior |
 | --- | --- | --- | --- |
-| `date` | `formats` | `[yyyy-MM-dd, yyyy-MM-dd'T'HH:mm:ss[.SSSSSS], MM/dd/yyyy hh:mm a, MM/dd/yyyy hh:mm:ss a]` | Non-empty ordered Spark datetime patterns; first successful parse wins, then casts to date. Offset-bearing ISO input is deliberately excluded. |
+| `date` | `formats` | `[yyyy-MM-dd, yyyy-MM-dd'T'HH:mm:ss[.SSSSSS], MM/dd/yyyy hh:mm a, MM/dd/yyyy hh:mm:ss a]` | Non-empty ordered Spark datetime patterns; first successful parse wins, then casts to date. Offset-bearing ISO input is not included. |
 | `timestamp` | `formats` | `[yyyy-MM-dd'T'HH:mm:ss[.SSSSSS]XXX, yyyy-MM-dd'T'HH:mm:ss[.SSSSSS], yyyy-MM-dd HH:mm:ss[.SSSSSS], MM/dd/yyyy hh:mm a, MM/dd/yyyy hh:mm:ss a]` | First successful parse wins. ISO offsets, local ISO timestamps, optional microseconds, and the two known US exports are built in. |
 | `timestamp_ntz` | `formats` | `[yyyy-MM-dd'T'HH:mm:ss[.SSSSSS], yyyy-MM-dd HH:mm:ss[.SSSSSS], MM/dd/yyyy hh:mm a, MM/dd/yyyy hh:mm:ss a]` | First successful parse wins without applying a session timezone. Offset-bearing input is rejected. |
 
-Formats cascade in declared order. Automatic inference is not performed because ambiguous forms
-such as `MM/dd/yyyy` and `dd/MM/yyyy` can both parse valid but different dates. Patterns are Spark
-datetime patterns, not Python `strptime` patterns. `timestamp` represents an absolute instant and
-its interpretation follows the active Spark SQL session timezone. `timestamp_ntz` represents a
-local wall-clock value and performs no timezone conversion. Its typed defaults likewise reject a
-timezone offset at compile time, preventing the same configuration from producing different
-wall-clock values under different session timezones.
+Formats are tried in order. The parser does not guess because forms such as `MM/dd/yyyy` and
+`dd/MM/yyyy` can both be valid while meaning different dates. These are Spark datetime patterns,
+not Python `strptime` patterns. `timestamp` represents an instant and follows the active Spark SQL
+session timezone. `timestamp_ntz` represents local wall-clock time, so it does no timezone
+conversion and rejects offset-bearing defaults at compile time.
 
-The built-in datetime formats accept ISO text (including `T`, optional microseconds, and—for
-ordinary `timestamp`—`Z` or numeric offsets) and common US bronze exports such as
-`09/30/2026 12:00 AM` and `09/30/2026 12:00:00 AM`. The slash-based forms are deliberately defined
-as month/day/year; the parser does not guess locale. The `date` parser discards the successfully
-parsed time component and produces `2026-09-30`. The `timestamp` and `timestamp_ntz` parsers
-preserve midnight as `2026-09-30 00:00:00`, with the timezone behavior described above. Supplying
-`formats` replaces the relevant parser's defaults when a source contract uses a different
-representation. A bare slash date such as `09/30/2026` is not built in because accepting bare
-numeric dates would make locale ambiguity easy to miss. Offset-bearing input is also not a date
-default because converting an instant to a calendar date can shift the day with the Spark session
-timezone; configure that behavior explicitly if a source contract truly requires it.
+The built-in formats cover ISO text, optional microseconds, `Z` or numeric offsets for
+`timestamp`, and known US exports such as `09/30/2026 12:00 AM`. Slash-based values are always
+month/day/year; there is no locale guessing. The `date` parser drops the time after a successful
+parse, while `timestamp` and `timestamp_ntz` keep it.
 
-The built-in patterns are full-token shape-guarded before Spark parses them. This prevents Spark
-3.5's `spark.sql.legacy.timeParserPolicy=EXCEPTION` from raising on a harmless mismatch while the
-format cascade is trying its next pattern. A custom `formats` list uses Spark's native pattern
-behavior; test custom patterns under the production session policy during load-specific integration
-testing.
+Set `formats` when a source uses a different contract. A bare value such as `09/30/2026` is not a
+default because its locale is ambiguous. Offset-bearing values are also excluded from the default
+`date` formats: converting an instant to a calendar date can change the day based on the Spark
+session timezone.
+
+Before Spark parses a built-in datetime format, the package checks that the whole token has the
+right shape. This avoids a Spark 3.5 `spark.sql.legacy.timeParserPolicy=EXCEPTION` failure when the
+parser is simply moving to the next format. Custom formats use Spark's native pattern behavior, so
+test them under the same session policy used by the production load.
 
 ### Array
 
-Array is a recursive first-class parser. The element datatype comes from `array<T>` and must match
+Array parses each value with a child parser. The element type comes from `array<T>` and must match
 `element_parser`.
 
 | Argument | Required | Default | Behavior |
 | --- | ---: | --- | --- |
 | `input_format` | No | `json` | `json` for any recursive element type, or `delimited` for scalar elements. |
 | `delimiter` | Conditional | — | Required for `delimited`; treated literally rather than as a regular expression. |
-| `element_parser` | Yes | — | Recursive parser matching `T`. Element-level `audit` and `on_parse_error` are owned by the array and therefore rejected here. |
+| `element_parser` | Yes | — | Recursive parser matching `T`. The array owns element-level audit and error policy, so `audit` and `on_parse_error` are not accepted here. |
 | `on_element_error` | No | `fail` | `fail` raises lazily, `null` sends a typed null through final-null handling, `drop` removes the bad element, and string-only `preserve` retains its raw token. |
 | `drop_null_elements` | No | `false` | Remove both source nulls and values resolved to null. |
 | `distinct` | No | `false` | Remove duplicate parsed elements, preserving first occurrence order; rejected when the element tree contains a non-comparable map. |
@@ -524,15 +602,14 @@ Array is a recursive first-class parser. The element datatype comes from `array<
     audit: true
 ```
 
-Delimited input does not guess CSV quoting or escaping. For CSV-like inputs, ingest with Spark's
-CSV reader or normalize to a JSON array first. JSON arrays preserve their order. Error paths use
-zero-based indexes, for example `$[2]` or `$[1].birth_date`.
+Delimited input is a literal split; it does not implement CSV quoting or escaping. Use Spark's CSV
+reader for CSV-like data, or normalize the source to a JSON array first. JSON arrays keep their
+order. Error paths use zero-based indexes such as `$[2]` or `$[1].birth_date`.
 
 ### Struct
 
-Struct parses a JSON object into a complete, explicitly configured target schema. The field names
-and datatypes in `expected_data_type` are the authoritative output schema. `fields` must configure
-every target field exactly once.
+Struct parses a JSON object into the schema declared by `expected_data_type`. Its `fields` list
+must configure every target field once, though source and target field names may differ.
 
 | Field argument | Required | Behavior |
 | --- | ---: | --- |
@@ -567,16 +644,16 @@ every target field exactly once.
           on_element_error: drop
 ```
 
-Unknown JSON fields are ignored. A configured missing or explicit-null field follows its nested
-parser's `is_nullable`/`default_on_null` behavior. Nested field failures follow that field's
-`on_parse_error` behavior and produce paths such as `$.zip`. Strict container validation occurs
-before leaf parsing, so the wrong JSON container shape and disabled JSON extensions follow the
-appropriate container error policy instead of appearing as a successful all-null struct.
+Unknown JSON fields are ignored. A configured field that is missing or null follows its child
+parser's `is_nullable` and `default_on_null` settings. A bad field follows that child's
+`on_parse_error` policy and produces a path such as `$.zip`. The container shape is checked before
+its fields are parsed, so a JSON array or malformed object cannot slip through as an all-null
+struct.
 
 ### Map
 
-Map parses a JSON object into `map<string,T>`. JSON map keys are intentionally restricted to
-Spark strings; values may use any recursively supported datatype.
+Map parses a JSON object into `map<string,T>`. Keys are Spark strings, while values may use any
+supported scalar or nested datatype.
 
 | Argument | Required | Default | Behavior |
 | --- | ---: | --- | --- |
@@ -597,39 +674,37 @@ Spark strings; values may use any recursively supported datatype.
     audit: true
 ```
 
-Map error paths identify the source key, for example `$['principal']`. Duplicate JSON object keys
-cannot produce a valid Spark map, so a duplicated key is treated as a malformed container and
-follows `on_parse_error` or the parent's child-error policy for a nested map. This prevents Spark's
-`DUPLICATED_MAP_KEY` runtime failure. Canonical bronze JSON should contain unique keys. A `struct`
-parser retains Spark's last-value-wins behavior for duplicated fields.
+Map error paths include the source key, for example `$['principal']`. Duplicate JSON keys make the
+whole map invalid and follow `on_parse_error`, or the parent's child-error policy for a nested map.
+Handling the duplicate at this boundary avoids Spark's `DUPLICATED_MAP_KEY` runtime failure. A
+`struct` still follows Spark's last-value-wins behavior for duplicate fields.
 
 ### Recursive nesting and complex defaults
 
-Complex parsers may nest without a package-defined depth limit: `array<struct<...>>`,
-`map<string,array<decimal(18,2)>>`, and structs containing arrays/maps/structs all use the same
-recursive compiler and runtime. Struct field order follows `expected_data_type`; array order is
-preserved unless elements are dropped or deduplicated.
+Complex parsers can be nested without a package-defined depth limit. An
+`array<struct<...>>`, a `map<string,array<decimal(18,2)>>`, and a struct containing other complex
+types all go through the same recursive compiler and runtime. Struct fields follow the order in
+`expected_data_type`; arrays keep source order unless values are dropped or deduplicated.
 
-`default_on_null` and `default_on_error` accept YAML lists for arrays and mappings for structs or
-maps. A struct default must contain exactly its target fields. Defaults are recursively type- and
-range-checked at compilation and emitted as properly typed native Spark literals.
+Complex defaults use YAML lists for arrays and mappings for structs or maps. A struct default must
+contain its full target field set. The compiler checks every nested value and range before the
+runtime turns the default into a typed Spark literal.
 
-The supported vocabulary follows Spark's
+Supported datatypes follow Spark's
 [SQL datatype model](https://spark.apache.org/docs/3.5.7/sql-ref-datatypes.html). Complex decoding
 uses native [`from_json`](https://spark.apache.org/docs/3.5.7/api/python/reference/pyspark.sql/api/pyspark.sql.functions.from_json.html)
-and higher-order Spark expressions; it never crosses into a Python or pandas UDF.
+and higher-order Spark expressions, never a Python or pandas UDF.
 
-JSON decoding uses explicit safety settings consistently across Spark 3.5+: comments,
-single-quoted strings, unquoted field names, and numeric literals with leading zeroes are rejected.
-Leading-zero bronze values remain supported when represented as JSON strings (for example,
-`"001"` inside an integer array parses to `1`). A malformed top-level container follows
-`on_parse_error`; malformed nested containers follow their field/element/value policy.
+JSON decoding rejects comments, single-quoted strings, unquoted field names, and numeric literals
+with leading zeroes. Put a leading-zero value in quotes when it is valid source data—for example,
+`"001"` inside an integer array parses to `1`. A malformed top-level container follows
+`on_parse_error`; a malformed nested container follows its field, element, or value policy.
 
-Spark `variant` is intentionally excluded because this package supports Spark 3.5 and Variant is
-a Spark 4.x feature. Interval types remain out of scope until a concrete bronze encoding contract
-is defined. Spark `char`/`varchar` are table-schema types rather than general DataFrame expression
-types. UUIDs, enums, email addresses, and other domain concepts remain strings here and belong in
-the downstream rules engine for validation.
+Spark `variant` is not supported because the package still targets Spark 3.5, while Variant starts
+in Spark 4.x. Interval types need a defined bronze encoding before they can be added. Spark
+`char`/`varchar` are table-schema types rather than general DataFrame expression types. UUIDs,
+enums, email addresses, and similar domain values stay strings here; validate those in the
+downstream rules engine.
 
 ## Parsing order and error modes
 
@@ -643,32 +718,30 @@ Every column follows this order:
 6. Convert numeric zero to null when `zero_is_valid: false`.
 7. Apply `default_on_null` for a non-nullable target.
 
-`on_parse_error` controls step 5:
+`on_parse_error` decides what happens at step 5:
 
-- `fail` (default) constructs a lazy failure and raises when an action materializes that target
-  expression;
-- `null` returns a typed null; or
-- `default` assigns the required `default_on_error`; or
+- `fail` (default) raises when Spark materializes the bad target expression;
+- `null` returns a typed null;
+- `default` assigns the required `default_on_error`; and
 - `preserve` returns the exact, pre-normalization bronze token and is accepted only for a string
   parser.
 
-For a complex column, those modes govern malformed top-level JSON. Struct fields recursively use
-their own `on_parse_error`. Arrays use `on_element_error`, and maps use `on_value_error`, each with
-`fail`, `null`, `drop`, or string-child-only `preserve`. Handled child errors are retained in the
-top-level audit's `nested_error_paths` even when the invalid element or entry is preserved or
-dropped. Nested final-null defaults and zero invalidation are independently retained in
-`nested_default_on_null_paths` and `nested_zero_invalidated_paths`, including cases where no parse
-error occurred. A nested `fail` error identifies the top-level source column, target column,
-expected child type, and exact nested path.
+For a complex column, those modes handle malformed top-level JSON. Struct fields use their own
+`on_parse_error`; arrays use `on_element_error`; maps use `on_value_error`. Child policies support
+`fail`, `null`, `drop`, or `preserve` when the child is a string.
 
-Preservation is deliberately unavailable for integer, decimal, Boolean, date, timestamp, binary,
-and complex outputs: an invalid raw string cannot inhabit those typed target positions. Quarantine
-routing remains separate because it needs an explicit `quarantine_df` contract rather than
-overloading typed error handling.
+Handled child errors still appear in the top-level audit's `nested_error_paths`, even when the bad
+element or entry was dropped or preserved. Nested defaults and zero invalidation have their own
+path arrays. A nested `fail` message names the top-level source and target columns, the expected
+child type, and the failing path.
+
+`preserve` is not available for non-string targets because a raw invalid string cannot live in an
+integer, date, binary, or complex Spark column. Quarantine routing is also outside this API; it
+needs its own `quarantine_df` contract instead of another parse-error mode.
 
 ## Compile-time and DataFrame validation
 
-Strict compilation validates, without starting Spark:
+Before Spark starts, compilation checks:
 
 - YAML syntax and duplicate/unsupported keys;
 - required IDs, version, columns, and parser types;
@@ -681,7 +754,7 @@ Strict compilation validates, without starting Spark:
 - global/column null-marker modes; and
 - non-empty, non-overlapping effective Boolean vocabularies.
 
-DataFrame binding validates lazily available schema metadata:
+When a config is bound to a DataFrame, the runtime checks:
 
 - duplicate configured source names in the input schema are ambiguous and fail;
 - present configured sources must have Spark `string` type or fail;
@@ -690,27 +763,27 @@ DataFrame binding validates lazily available schema metadata:
 - keys must be existing, unique, unambiguous non-empty names; and
 - `column_prefix` must be non-empty.
 
-Actual bad values in `on_parse_error: fail` columns raise only when Spark materializes the failing
-target expression. Projection-pruning actions such as `parsed_df.count()` may not evaluate that
-expression; a full target write, `collect()`, or a select that consumes the column will.
+A bad value under `on_parse_error: fail` raises only when Spark evaluates that target expression.
+An optimizer-pruned action such as `parsed_df.count()` may never touch it. Collect the target
+column directly, or perform a full target write, when the job must materialize every parsed value.
 
 ## DataFrameParsing outputs
 
-`parse_dataframe()` returns one `DataFrameParsing` object around a shared lazy Spark plan.
+`parse_dataframe()` returns a `DataFrameParsing` wrapper around one shared lazy Spark plan.
 
 | Property/method | Behavior |
 | --- | --- |
 | `parsed_df` | Only target columns, aliased to `target_column_name` and ordered like the config. |
 | `results_df` | Selected row keys followed by nested parser audit/identity metadata. |
-| `warnings` | Tuple of recoverable schema warnings, currently missing configured sources. |
+| `warnings` | Tuple of recoverable schema warnings, such as missing configured sources. |
 | `key_columns` | Effective ordered result-key names. |
 | `result_columns` | Names of the three parser result columns. |
 | `persist(storage_level=MEMORY_AND_DISK)` | Persist the shared plan and return the same object. Useful before materializing both projections. |
 | `unpersist(blocking=False)` | Release the shared plan and return the same object. |
 
-Row keys are intentionally retained in `results_df`, not automatically copied into `parsed_df`.
-If a downstream join requires the key in both outputs, configure that source as a target column as
-well (the Databricks system tests do this with `RecordId`) or add it explicitly before the handoff.
+Row keys belong to `results_df`; they are not copied into `parsed_df` automatically. If a
+downstream join needs the same key in both outputs, configure it as a target column too (the
+Databricks system tests do this with `RecordId`) or add it before the handoff.
 
 `parse_dataframe()` parameters:
 
@@ -754,17 +827,16 @@ Possible actions are `source_column_missing`, `empty_string_to_null`, `null_mark
 `nested_zero_invalidated`, `nested_default_on_null_applied`, `zip_padded`, and
 `zip_plus4_formatted`.
 
-Routine whitespace normalization, normal successful datatype conversion, and routine title/case/
-address/county/state formatting are visible through `original_value`, `parsed_value`, and the
-resolved `options` map but do not add noisy action entries or independently set `changed`.
+Normal whitespace cleanup, successful type conversion, and routine string formatting are visible
+by comparing `original_value` with `parsed_value` and reviewing `options`. They do not add action
+entries or set `changed` on their own.
 
 ## Defaults and exhaustive YAML reference
 
-Defaults have one code-owned source of truth in
-[`spark_parser.defaults`](src/spark_parser/defaults.py). `PARSER_DEFAULTS` is the live public
-module mapping and should be treated as read-only; `parser.defaults()` returns a detached copy for
-safe manipulation. The compiler resolves inherited and omitted values, and serialization and
-configuration-review reports materialize those effective values.
+All defaults come from [`spark_parser.defaults`](src/spark_parser/defaults.py). `PARSER_DEFAULTS`
+is the public module mapping and should be treated as read-only; `parser.defaults()` returns a copy
+that callers can safely change. Compilation fills in omitted and inherited values, and both
+serialization and review reports show the result.
 
 [`examples/all_parsers.yaml`](examples/all_parsers.yaml) shows every top-level, global, column,
 common, and parser-specific argument with required/default indicators.
@@ -779,4 +851,5 @@ from spark_parser import (
 )
 ```
 
-The high-level service composes these APIs and is preferred for ordinary application code.
+These lower-level classes are useful for focused tooling and tests. Most application code should
+use the `parser` service shown above.

@@ -907,9 +907,9 @@ columns:
         fail_config,
         key_columns=["value"],
     )
-    assert failing.parsed_df.count() == 1
+    assert failing.parsed_df.columns == ["Value"]
     with pytest.raises((Py4JJavaError, PySparkException)):
-        failing.parsed_df.collect()
+        failing.parsed_df.select("Value").collect()
 
     behavior_config = compiler.compile_text(
         """
