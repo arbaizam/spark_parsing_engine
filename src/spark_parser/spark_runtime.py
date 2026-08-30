@@ -29,12 +29,7 @@ from spark_parser.address_formats import (
 )
 from spark_parser.data_types import SparkDataType
 from spark_parser.dataframe_parsing import DataFrameParsing
-from spark_parser.defaults import (
-    ISO_LOCAL_TIMESTAMP_FORMAT,
-    ISO_OFFSET_TIMESTAMP_FORMAT,
-    US_MONTH_FIRST_12_HOUR_FORMAT,
-    US_MONTH_FIRST_12_HOUR_SECONDS_FORMAT,
-)
+from spark_parser.defaults import BUILTIN_DATETIME_FORMAT_SHAPES
 from spark_parser.enums import (
     COMPLEX_PARSER_TYPES,
     NUMERIC_PARSER_TYPES,
@@ -94,31 +89,6 @@ _EDGE_WHITESPACE_PATTERN = r"^[\s\u00A0]+|[\s\u00A0]+$"
 # Numeric child values are decoded through strict JSON to obtain ANSI-safe casts. This pattern
 # rejects partial tokens and non-JSON spellings before Spark attempts the typed conversion.
 _JSON_NUMBER_PATTERN = r"^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$"
-
-# Spark 3.5's ``try_to_timestamp`` can still raise SparkUpgradeException under the default
-# ``spark.sql.legacy.timeParserPolicy=EXCEPTION`` when Spark accepts a prefix that the
-# corrected parser rejects (for example, trying ``yyyy-MM-dd`` against an ISO timestamp). Full-token
-# shape guards keep known built-in formats away from the wrong formatter. Calendar validity remains
-# Spark's responsibility, while lexical mismatches safely become null and follow parser policy.
-_DATETIME_INPUT_SHAPES = {
-    "yyyy-MM-dd": r"^\d{4}-\d{2}-\d{2}$",
-    ISO_LOCAL_TIMESTAMP_FORMAT: (
-        r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?$"
-    ),
-    ISO_OFFSET_TIMESTAMP_FORMAT: (
-        r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?"
-        r"(?:Z|[+-]\d{2}:\d{2})$"
-    ),
-    "yyyy-MM-dd HH:mm:ss[.SSSSSS]": (
-        r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{1,6})?$"
-    ),
-    US_MONTH_FIRST_12_HOUR_FORMAT: (
-        r"^\d{2}/\d{2}/\d{4} \d{2}:\d{2} [AaPp][Mm]$"
-    ),
-    US_MONTH_FIRST_12_HOUR_SECONDS_FORMAT: (
-        r"^\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2} [AaPp][Mm]$"
-    ),
-}
 
 # ``PERMISSIVE`` gives a null result instead of throwing for malformed containers. The runtime can
 # then apply the user's explicit fail/null/default policy in a consistent way.
@@ -228,14 +198,15 @@ class SparkDataFrameParser:
         df: DataFrame,
         config: ParserConfig,
         *,
-        key_columns: Sequence[str] | None = None,
+        key_columns: Sequence[str],
+        on_missing_source: str = "fail",
         column_prefix: str = "spark_parser",
     ) -> DataFrameParsing:
         """Build lazy parsed and row-level audit projections.
 
-        Existing configured source fields must occur exactly once and have
-        Spark ``string`` type. A missing source emits a recoverable warning and
-        produces a typed null (or ``default_on_null`` for a non-nullable target).
+        Existing configured source fields must occur exactly once and have Spark ``string`` type.
+        A missing source fails binding unless ``on_missing_source='warn'`` explicitly requests a
+        recoverable warning and typed null/default substitution.
         Invalid non-null values raise during the first Spark action unless their parser explicitly
         selects ``on_parse_error: null``, ``default``, or string-only ``preserve``.
         """
@@ -247,6 +218,7 @@ class SparkDataFrameParser:
             df,
             config,
             key_columns,
+            on_missing_source,
             column_prefix,
         )
 
@@ -347,15 +319,21 @@ class SparkDataFrameParser:
         self,
         df: DataFrame,
         config: ParserConfig,
-        key_columns: Sequence[str] | None,
+        key_columns: Sequence[str],
+        on_missing_source: str,
         column_prefix: str,
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         """Validate the bronze schema and return normalized result keys plus recoverable warnings.
 
         Schema inspection is metadata-only and does not trigger a Spark action. Missing configured
-        sources are recoverable because the runtime can substitute a typed null/default; ambiguous
-        or non-string sources are not recoverable and fail immediately.
+        sources are recoverable only through an explicit warn policy; ambiguous or non-string
+        sources are not recoverable and fail immediately.
         """
+        if not isinstance(on_missing_source, str):
+            raise TypeError("on_missing_source must be 'fail' or 'warn'.")
+        if on_missing_source not in {"fail", "warn"}:
+            raise ValueError("on_missing_source must be 'fail' or 'warn'.")
+        self._validate_custom_datetime_policy(df, config)
         duplicates = sorted({name for name in df.columns if df.columns.count(name) > 1})
         configured_names = {column.source_column_name for column in config.columns}
         ambiguous = sorted(configured_names & set(duplicates))
@@ -364,6 +342,12 @@ class SparkDataFrameParser:
         missing = sorted(configured_names - set(df.columns))
         schema_warnings: list[str] = []
         if missing:
+            if on_missing_source == "fail":
+                raise SchemaValidationError(
+                    f"Configured source columns are missing: {missing}. Pass "
+                    "on_missing_source='warn' only when typed null/default substitution is "
+                    "intentional."
+                )
             message = (
                 "Configured source columns are missing and will produce typed null/default "
                 f"values: {missing}."
@@ -392,21 +376,13 @@ class SparkDataFrameParser:
                 f"Input contains reserved parser output columns: {conflicts}."
             )
         if key_columns is None:
-            # All bronze columns provide a usable default identity for exploratory work. Production
-            # callers should normally pass stable business/load keys explicitly.
-            if duplicates:
-                raise SchemaValidationError(
-                    "Input contains duplicate column names, so the default all-column row key is "
-                    f"ambiguous: {duplicates}. Pass explicit, uniquely named key_columns."
-                )
-            normalized_keys = tuple(df.columns)
-        else:
-            if isinstance(key_columns, (str, bytes)):
-                raise TypeError("key_columns must be a sequence, not a string.")
-            try:
-                normalized_keys = tuple(key_columns)
-            except TypeError as exc:
-                raise TypeError("key_columns must be a sequence of column names.") from exc
+            raise SchemaValidationError("key_columns is required and must be supplied explicitly.")
+        if isinstance(key_columns, (str, bytes)):
+            raise TypeError("key_columns must be a sequence, not a string.")
+        try:
+            normalized_keys = tuple(key_columns)
+        except TypeError as exc:
+            raise TypeError("key_columns must be a sequence of column names.") from exc
         if not normalized_keys:
             raise SchemaValidationError("key_columns must contain at least one column name.")
         invalid_keys = [name for name in normalized_keys if not isinstance(name, str) or not name]
@@ -429,6 +405,42 @@ class SparkDataFrameParser:
                 f"key_columns conflict with parser result columns: {result_key_conflicts}."
             )
         return normalized_keys, tuple(schema_warnings)
+
+    @classmethod
+    def _validate_custom_datetime_policy(cls, df: DataFrame, config: ParserConfig) -> None:
+        """Reject unsafe custom datetime parsing before Spark can bypass parser error policy."""
+        custom_formats = sorted(
+            {
+                datetime_format
+                for column in config.columns
+                for options in cls._walk_parser_options(column.parser)
+                if options.parser_type
+                in {ParserType.DATE, ParserType.TIMESTAMP, ParserType.TIMESTAMP_NTZ}
+                for datetime_format in options.formats
+                if datetime_format not in BUILTIN_DATETIME_FORMAT_SHAPES
+            }
+        )
+        if not custom_formats:
+            return
+        policy = df.sparkSession.conf.get("spark.sql.legacy.timeParserPolicy", "EXCEPTION").upper()
+        if policy != "CORRECTED":
+            raise SchemaValidationError(
+                "Custom datetime formats require "
+                "spark.sql.legacy.timeParserPolicy=CORRECTED so malformed values follow the "
+                f"configured parser error policy; current policy is {policy!r}. Custom formats: "
+                f"{custom_formats}."
+            )
+
+    @classmethod
+    def _walk_parser_options(cls, options: ParserOptions):
+        """Yield one fully resolved parser tree without importing authoring-service helpers."""
+        yield options
+        if options.element_parser is not None:
+            yield from cls._walk_parser_options(options.element_parser.parser)
+        for field in options.field_parsers:
+            yield from cls._walk_parser_options(field.parser)
+        if options.value_parser is not None:
+            yield from cls._walk_parser_options(options.value_parser.parser)
 
     @staticmethod
     def _runtime_plan(
@@ -625,7 +637,7 @@ class SparkDataFrameParser:
             # already carry more specific paths. CaseWhen must remain around ``nested.value``:
             # a descendant map_from_entries can throw DUPLICATED_MAP_KEY and must not be evaluated
             # after the raw-container validator has already classified the container as invalid.
-            container_errors = self._error_paths(decoded.failed, F.lit("$"))
+            container_errors = self._paths_when(decoded.failed, F.lit("$"))
             candidate = F.when(
                 decoded.failed,
                 F.lit(None).cast(column_config.expected_data_type),
@@ -659,25 +671,7 @@ class SparkDataFrameParser:
         """Build a scalar candidate expression; invalid non-null input returns typed null."""
         parser_type = data_type.parser_type
         if parser_type is ParserType.STRING:
-            if options.string_format is StringFormat.LOWER:
-                return F.lower(normalized)
-            if options.string_format is StringFormat.UPPER:
-                return F.upper(normalized)
-            if options.string_format is StringFormat.TITLE:
-                # Unlike Pascal casing, title casing intentionally retains the normalized spaces.
-                # Lowercasing first makes output deterministic for mixed-case bronze values.
-                return F.initcap(F.lower(normalized))
-            if options.string_format is StringFormat.PASCAL:
-                return F.regexp_replace(F.initcap(F.lower(normalized)), r"\s+", "")
-            if options.string_format is StringFormat.ADDRESS_US_V1:
-                return format_address_us_v1(normalized)
-            if options.string_format is StringFormat.COUNTY:
-                return format_county(normalized)
-            if options.string_format is StringFormat.STATE_US:
-                return format_state_us(normalized)
-            if options.string_format is StringFormat.ZIP:
-                return format_zip(normalized)
-            return normalized
+            return self._parse_string_candidate(normalized, options.string_format)
         if parser_type in NUMERIC_PARSER_TYPES:
             # Nested values arrive as strings after JSON decoding. Normalize safe alternate numeric
             # spellings, then wrap the token in a tiny JSON object so from_json performs an
@@ -688,9 +682,10 @@ class SparkDataFrameParser:
             json_number = F.regexp_replace(json_number, r"^-\.", "-0.")
             json_number = F.regexp_replace(json_number, r"\.$", "")
             json_number = F.regexp_replace(json_number, r"\.(?=[eE])", "")
+            decode_type = "short" if parser_type is ParserType.BYTE else data_type.canonical
             parsed = F.from_json(
                 F.concat(F.lit('{"value":'), json_number, F.lit("}")),
-                f"struct<value:{data_type.canonical}>",
+                f"struct<value:{decode_type}>",
                 _STRICT_JSON_OPTIONS,
             ).getField("value")
             # ``from_json`` may accept a valid prefix in some runtime combinations. The explicit
@@ -699,6 +694,14 @@ class SparkDataFrameParser:
                 json_number.rlike(_JSON_NUMBER_PATTERN),
                 parsed,
             ).otherwise(F.lit(None).cast(data_type.canonical))
+            if parser_type is ParserType.BYTE:
+                # Spark's JSON decoder accepts 128..255 as unsigned bytes and then wraps them into
+                # negative signed values. Decode through short and narrow only after an explicit
+                # signed-byte range check so overflow remains a parse error.
+                return F.when(
+                    parsed.between(-128, 127),
+                    parsed.cast("byte"),
+                ).otherwise(F.lit(None).cast("byte"))
             if parser_type in {ParserType.FLOAT, ParserType.DOUBLE}:
                 return F.when(
                     F.isnan(parsed) | (F.abs(parsed) == F.lit(float("inf"))),
@@ -744,13 +747,41 @@ class SparkDataFrameParser:
         raise ValueError(f"Unsupported parser type: {parser_type.value}.")
 
     @staticmethod
+    def _parse_string_candidate(
+        normalized: Column,
+        string_format: StringFormat | None,
+    ) -> Column:
+        """Apply one closed string-format profile and reject future unimplemented enum members."""
+        if string_format is None:
+            return normalized
+        if string_format is StringFormat.LOWER:
+            return F.lower(normalized)
+        if string_format is StringFormat.UPPER:
+            return F.upper(normalized)
+        if string_format is StringFormat.TITLE:
+            # Unlike Pascal casing, title casing intentionally retains the normalized spaces.
+            # Lowercasing first makes output deterministic for mixed-case bronze values.
+            return F.initcap(F.lower(normalized))
+        if string_format is StringFormat.PASCAL:
+            return F.regexp_replace(F.initcap(F.lower(normalized)), r"\s+", "")
+        if string_format is StringFormat.ADDRESS_US_V1:
+            return format_address_us_v1(normalized)
+        if string_format is StringFormat.COUNTY:
+            return format_county(normalized)
+        if string_format is StringFormat.STATE_US:
+            return format_state_us(normalized)
+        if string_format is StringFormat.ZIP:
+            return format_zip(normalized)
+        raise ValueError(f"Unsupported string format: {string_format.value}.")
+
+    @staticmethod
     def _timestamp_candidate(normalized: Column, datetime_format: str) -> Column:
         """Parse one timestamp format after any known full-token safety guard."""
         parsed = F.try_to_timestamp(normalized, F.lit(datetime_format))
-        shape = _DATETIME_INPUT_SHAPES.get(datetime_format)
+        shape = BUILTIN_DATETIME_FORMAT_SHAPES.get(datetime_format)
         if shape is None:
-            # Custom Spark patterns retain native Spark behavior. The compiler cannot safely infer
-            # a complete regex for the entire Spark DateTimeFormatter pattern language.
+            # DataFrame binding requires CORRECTED timeParserPolicy for custom patterns because the
+            # compiler cannot safely infer a complete regex for Spark's full pattern language.
             return parsed
         return F.when(normalized.rlike(shape), parsed).otherwise(F.lit(None).cast("timestamp"))
 
@@ -873,7 +904,7 @@ class SparkDataFrameParser:
             return _NestedParse(
                 value,
                 decoded.failed,
-                F.concat(state.error_paths, self._error_paths(decoded.failed, path)),
+                F.concat(state.error_paths, self._paths_when(decoded.failed, path)),
                 F.concat(
                     state.default_on_null_paths,
                     self._paths_when(default_applied, path),
@@ -912,7 +943,7 @@ class SparkDataFrameParser:
         return _NestedParse(
             value,
             failed,
-            self._error_paths(failed, path),
+            self._paths_when(failed, path),
             self._paths_when(default_applied, path),
             self._paths_when(zero_invalidated, path),
         )
@@ -1178,10 +1209,6 @@ class SparkDataFrameParser:
         """Return a typed empty path array so concat/flatten schemas stay consistent."""
         return F.array().cast("array<string>")
 
-    def _error_paths(self, failed: Column, path: Column) -> Column:
-        """Return ``[path]`` when failed, otherwise a typed empty array."""
-        return self._paths_when(failed, path)
-
     @staticmethod
     def _paths_when(condition: Column, path: Column) -> Column:
         """Return one typed path when a null-safe audit condition occurred."""
@@ -1326,17 +1353,30 @@ class SparkDataFrameParser:
         nested_defaulted = F.size(nested_default_on_null_paths) > 0
         nested_zero_invalidated = F.size(nested_zero_invalidated_paths) > 0
         is_zip = options.string_format is StringFormat.ZIP
-        compact_zip = F.regexp_replace(normalized, r"\s+", "")
-        zip_digit_count = F.length(F.regexp_replace(compact_zip, r"\D", ""))
+        zip_source_parts = F.split(normalized, r"\s*,\s*", -1)
+        zip_candidate_parts = F.split(candidate, r"\s*,\s*", -1)
+        zip_padding_flags = F.zip_with(
+            zip_source_parts,
+            zip_candidate_parts,
+            lambda source_part, candidate_part: F.length(
+                F.regexp_replace(source_part, r"\D", "")
+            )
+            < F.length(F.regexp_replace(candidate_part, r"\D", "")),
+        )
+        zip_plus4_flags = F.zip_with(
+            zip_source_parts,
+            zip_candidate_parts,
+            lambda source_part, candidate_part: candidate_part.contains("-")
+            & (candidate_part != F.regexp_replace(source_part, r"\s+", "")),
+        )
         zip_plus4 = (
-            F.coalesce(candidate.contains("-") & (candidate != compact_zip), F.lit(False))
+            F.coalesce(F.exists(zip_plus4_flags, lambda changed: changed), F.lit(False))
             if is_zip
             else F.lit(False)
         )
         zip_padded = (
             F.coalesce(
-                candidate.isNotNull()
-                & (zip_digit_count < F.when(candidate.contains("-"), F.lit(9)).otherwise(F.lit(5))),
+                F.exists(zip_padding_flags, lambda changed: changed),
                 F.lit(False),
             )
             if is_zip

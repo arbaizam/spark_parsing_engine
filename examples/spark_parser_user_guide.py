@@ -469,6 +469,7 @@ with warnings.catch_warnings(record=True) as captured_warnings:
         bronze_df,
         config,
         key_columns=["record_id"],
+        on_missing_source="warn",
     )
 
 assert parsing.key_columns == ("record_id",)
@@ -696,9 +697,10 @@ for column in complex_columns:
 # MAGIC YAML compilation proves the authored parser contract. DataFrame binding then proves whether
 # MAGIC a particular bronze schema can satisfy it.
 # MAGIC
-# MAGIC Recoverable condition:
+# MAGIC Fail-closed condition:
 # MAGIC
-# MAGIC - a configured source is missing, producing a warning and typed null/default.
+# MAGIC - a configured source is missing. Pass `on_missing_source="warn"` only when substituting a
+# MAGIC   warning and typed null/default is an intentional load-contract decision.
 # MAGIC
 # MAGIC Rejected conditions include:
 # MAGIC

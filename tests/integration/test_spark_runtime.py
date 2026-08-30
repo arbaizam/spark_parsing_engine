@@ -136,15 +136,22 @@ SELECT
   'Y' AS is_active,
   '123 mccormick st. apt 4b' AS address,
   'mclean county' AS county,
-  '123456' AS zip_code
+  '123-45' AS zip_code
 """
     )
 
+    with pytest.raises(SchemaValidationError, match="Configured source columns are missing"):
+        SparkDataFrameParser().parse_dataframe(
+            bronze_df,
+            config,
+            key_columns=["row_id"],
+        )
     with pytest.warns(UserWarning, match="source_not_delivered"):
         parsing = SparkDataFrameParser().parse_dataframe(
             bronze_df,
             config,
             key_columns=["row_id"],
+            on_missing_source="warn",
         )
 
     parsed = parsing.parsed_df.first()
@@ -156,7 +163,7 @@ SELECT
     assert parsed.IsActive is True
     assert parsed.Address == "123 McCormick St Apt 4B"
     assert parsed.County == "McLean County"
-    assert parsed.ZipCode == "00012-3456"
+    assert parsed.ZipCode == "00123-0045"
     assert parsed.MissingDate is None
     assert parsing.warnings and "source_not_delivered" in parsing.warnings[0]
 
@@ -404,6 +411,113 @@ columns:
     assert invalid_audit[2].changed is True
 
 
+def test_territories_and_single_or_multiple_property_values(spark: SparkSession) -> None:
+    """Parse scalar/list property locations while retaining a canonical string target."""
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: property_locations
+parser_config_name: Property Locations
+version: "1"
+columns:
+  - source_column_name: single_state
+    target_column_name: SingleState
+    expected_data_type: string
+    parser: {type: string, format: state_us}
+  - source_column_name: territory_states
+    target_column_name: TerritoryStates
+    expected_data_type: string
+    parser: {type: string, format: state_us}
+  - source_column_name: dc_and_state
+    target_column_name: DcAndState
+    expected_data_type: string
+    parser: {type: string, format: state_us}
+  - source_column_name: single_zip
+    target_column_name: SingleZip
+    expected_data_type: string
+    parser: {type: string, format: zip}
+  - source_column_name: property_zips
+    target_column_name: PropertyZips
+    expected_data_type: string
+    parser: {type: string, format: zip, audit: true}
+  - source_column_name: invalid_states
+    target_column_name: InvalidStates
+    expected_data_type: string
+    parser: {type: string, format: state_us, on_parse_error: null}
+  - source_column_name: invalid_zips
+    target_column_name: InvalidZips
+    expected_data_type: string
+    parser: {type: string, format: zip, on_parse_error: null}
+"""
+    )
+    bronze_df = spark.range(1).select(
+        F.lit("Puerto Rico").alias("single_state"),
+        F.lit(
+            "American Samoa, Guam, Northern Mariana Islands, Puerto Rico, U.S. Virgin Islands"
+        ).alias("territory_states"),
+        F.lit("Washington, D.C., Illinois").alias("dc_and_state"),
+        F.lit("1234").alias("single_zip"),
+        F.lit("1234, 67890").alias("property_zips"),
+        F.lit("IL, Mul").alias("invalid_states"),
+        F.lit("12345, nope").alias("invalid_zips"),
+    )
+
+    row = (
+        SparkDataFrameParser()
+        .parse_dataframe(bronze_df, config, key_columns=["single_state"])
+        .parsed_df.first()
+    )
+    assert row.SingleState == "PR"
+    assert row.TerritoryStates == "AS, GU, MP, PR, VI"
+    assert row.DcAndState == "DC, IL"
+    assert row.SingleZip == "01234"
+    assert row.PropertyZips == "01234, 67890"
+    assert row.InvalidStates is None
+    assert row.InvalidZips is None
+    audit = (
+        SparkDataFrameParser()
+        .parse_dataframe(bronze_df, config, key_columns=["single_state"])
+        .results_df.first()
+        .spark_parser_parse_results[0]
+    )
+    assert audit.actions_applied == ["zip_padded"]
+
+
+def test_zip_rejects_ambiguous_compact_six_to_eight_digit_values(
+    spark: SparkSession,
+) -> None:
+    """Require an explicit comma or a complete nine-digit ZIP+4 representation."""
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: zip_shapes
+parser_config_name: ZIP Shapes
+version: "1"
+columns:
+  - source_column_name: value
+    target_column_name: Value
+    expected_data_type: string
+    parser: {type: string, format: zip, on_parse_error: null}
+"""
+    )
+    tokens = ["123456", "1234567", "12345678", "123456789"]
+    rows = (
+        SparkDataFrameParser()
+        .parse_dataframe(
+            spark.range(len(tokens)).select(
+                F.col("id").cast("integer").alias("row_id"),
+                F.element_at(
+                    F.array(*(F.lit(token) for token in tokens)),
+                    (F.col("id") + 1).cast("integer"),
+                ).alias("value"),
+            ),
+            config,
+            key_columns=["row_id"],
+        )
+        .parsed_df.orderBy("row_id")
+        .collect()
+    )
+    assert [row.Value for row in rows] == [None, None, None, "12345-6789"]
+
+
 def test_nested_string_error_policies_can_preserve_raw_tokens(spark: SparkSession) -> None:
     """Preserve invalid formatted strings inside structs, arrays, and maps without losing paths."""
     config = YamlParserConfigCompiler().compile_text(
@@ -499,7 +613,7 @@ columns:
         (F.col("id") + 1).cast("integer").alias("row_id"),
         F.element_at(
             F.array(
-                F.lit("2026-09-29"),
+                F.lit("2026-09-29 01:02:03"),
                 F.lit("09/30/2026 12:00 AM"),
                 F.lit("09/30/2026 12:00:00 AM"),
                 # A bare slash date remains invalid. Accepting it would silently guess whether the
@@ -521,7 +635,7 @@ columns:
 
     rows = (
         SparkDataFrameParser()
-        .parse_dataframe(bronze_df, config)
+        .parse_dataframe(bronze_df, config, key_columns=["row_id"])
         .parsed_df.orderBy("row_id")
         .collect()
     )
@@ -719,7 +833,11 @@ SELECT
     try:
         for ansi_value in ("true", "false"):
             spark.conf.set("spark.sql.ansi.enabled", ansi_value)
-            parsing = SparkDataFrameParser().parse_dataframe(bronze_df, config)
+            parsing = SparkDataFrameParser().parse_dataframe(
+                bronze_df,
+                config,
+                key_columns=["integer_value"],
+            )
             target = parsing.parsed_df.first().asDict(recursive=True)
             audit = [
                 item.asDict(recursive=True)
@@ -864,10 +982,10 @@ columns:
     assert empty.results_df.first().spark_parser_parse_results == []
 
 
-def test_duplicate_input_names_explain_why_default_keys_are_unavailable(
+def test_duplicate_input_names_reject_ambiguous_explicit_keys(
     spark: SparkSession,
 ) -> None:
-    """Report an ambiguous default row identity without blaming caller-supplied key_columns."""
+    """Reject an explicitly selected key whose input name occurs more than once."""
     config = YamlParserConfigCompiler().compile_text(
         """
 parser_config_id: duplicate_default_keys
@@ -882,8 +1000,10 @@ columns:
     )
     df = spark.sql("SELECT 'ok' AS value, 1 AS duplicate, 2 AS duplicate")
 
-    with pytest.raises(SchemaValidationError, match="default all-column row key is ambiguous"):
+    with pytest.raises(TypeError, match="key_columns"):
         SparkDataFrameParser().parse_dataframe(df, config)
+    with pytest.raises(SchemaValidationError, match="key_columns are ambiguous"):
+        SparkDataFrameParser().parse_dataframe(df, config, key_columns=["duplicate"])
 
 
 def test_fail_default_boolean_trim_and_decimal_runtime_contracts(
@@ -1069,7 +1189,7 @@ columns:
         - {source_field_name: is_approved, target_field_name: approved, parser: boolean}
         - source_field_name: due_date
           target_field_name: due
-          parser: {type: date, formats: [MM/dd/yyyy]}
+          parser: date
       audit: true
   - source_column_name: attributes
     target_column_name: Attributes
@@ -1082,7 +1202,7 @@ columns:
 SELECT
   1 AS id,
   '[" alice ","BOB",null,"alice"]' AS names,
-  '{"address":"123 mccormick st. apt #4b","postal":"1234","values":[1,"bad",3],"is_approved":"y","due_date":"08/27/2026"}' AS object,
+  '{"address":"123 mccormick st. apt #4b","postal":"1234","values":[1,"bad",3],"is_approved":"y","due_date":"08/27/2026 12:00 AM"}' AS object,
   '{"a":12.345,"bad":"x","empty":null}' AS attributes
 """
     )
@@ -1170,7 +1290,7 @@ columns:
   - source_column_name: local_time
     target_column_name: LocalTime
     expected_data_type: timestamp_ntz
-    parser: {type: timestamp_ntz, formats: [MM/dd/yyyy HH:mm]}
+    parser: {type: timestamp_ntz, formats: ["MM/dd/yyyy hh:mm a"]}
   - source_column_name: hex_value
     target_column_name: HexValue
     expected_data_type: binary
@@ -1187,7 +1307,7 @@ columns:
     )
     df = spark.sql(
         "SELECT '127' byte_value, '32767' short_value, '1.25' float_value, "
-        "'08/27/2026 14:30' local_time, '4869' hex_value, "
+        "'08/27/2026 02:30 PM' local_time, '4869' hex_value, "
         "'SGk=' base64_value, 'Hi' utf8_value"
     )
 
@@ -1202,6 +1322,82 @@ columns:
     assert bytes(row.Utf8Value) == b"Hi"
     audit = parsing.results_df.first().spark_parser_parse_results[0]
     assert audit.parsed_value == "SGk="
+
+
+def test_integral_boundaries_reject_byte_wraparound(spark: SparkSession) -> None:
+    """Keep signed byte bounds identical at top level and inside arrays."""
+    compiler = YamlParserConfigCompiler()
+    config = compiler.compile_text(
+        """
+parser_config_id: integral_boundaries
+parser_config_name: Integral Boundaries
+version: "1"
+columns:
+  - source_column_name: scalar
+    target_column_name: ByteValue
+    expected_data_type: byte
+    parser: {type: byte, on_parse_error: null}
+  - source_column_name: scalar
+    target_column_name: ShortValue
+    expected_data_type: short
+    parser: {type: short, on_parse_error: null}
+  - source_column_name: nested
+    target_column_name: NestedByte
+    expected_data_type: array<byte>
+    parser: {type: array, element_parser: byte, on_element_error: null}
+"""
+    )
+    tokens = ["127", "128", "200", "255", "256", "-128", "-129"]
+    rows = (
+        SparkDataFrameParser()
+        .parse_dataframe(
+            spark.range(len(tokens)).select(
+                F.col("id").cast("integer").alias("row_id"),
+                F.element_at(
+                    F.array(*(F.lit(token) for token in tokens)),
+                    (F.col("id") + 1).cast("integer"),
+                ).alias("scalar"),
+                F.element_at(
+                    F.array(*(F.lit(f'["{token}"]') for token in tokens)),
+                    (F.col("id") + 1).cast("integer"),
+                ).alias("nested"),
+            ),
+            config,
+            key_columns=["row_id"],
+        )
+        .parsed_df.orderBy("row_id")
+        .collect()
+    )
+    assert [row.ByteValue for row in rows] == [127, None, None, None, None, -128, None]
+    assert [row.NestedByte[0] for row in rows] == [
+        127,
+        None,
+        None,
+        None,
+        None,
+        -128,
+        None,
+    ]
+    assert [row.ShortValue for row in rows] == [127, 128, 200, 255, 256, -128, -129]
+
+    failing = SparkDataFrameParser().parse_dataframe(
+        spark.sql("SELECT '128' AS value"),
+        compiler.compile_text(
+            """
+parser_config_id: byte_fail
+parser_config_name: Byte Fail
+version: "1"
+columns:
+  - source_column_name: value
+    target_column_name: Value
+    expected_data_type: byte
+    parser: byte
+"""
+        ),
+        key_columns=["value"],
+    )
+    with pytest.raises((Py4JJavaError, PySparkException)):
+        failing.parsed_df.collect()
 
 
 def test_nested_fail_policy_raises_when_materialized(spark: SparkSession) -> None:
@@ -1343,14 +1539,31 @@ columns:
         F.lit('["08/27/2026 14:30","bad"]').alias("local_times"),
     )
 
-    parsing = SparkDataFrameParser().parse_dataframe(df, config, key_columns=["local_time"])
-    row = parsing.parsed_df.first()
-    assert row.LocalTime is None
-    assert str(row.LocalTimes[0]) == "2026-08-27 14:30:00"
-    assert row.LocalTimes[1] is None
-    audits = parsing.results_df.first().spark_parser_parse_results
-    assert audits[0].actions_applied == ["parse_error_to_null"]
-    assert audits[1].nested_error_paths == ["$[1]"]
+    previous_policy = spark.conf.get("spark.sql.legacy.timeParserPolicy")
+    try:
+        spark.conf.set("spark.sql.legacy.timeParserPolicy", "EXCEPTION")
+        with pytest.raises(SchemaValidationError, match="require.*CORRECTED"):
+            SparkDataFrameParser().parse_dataframe(
+                df,
+                config,
+                key_columns=["local_time"],
+            )
+
+        spark.conf.set("spark.sql.legacy.timeParserPolicy", "CORRECTED")
+        parsing = SparkDataFrameParser().parse_dataframe(
+            df,
+            config,
+            key_columns=["local_time"],
+        )
+        row = parsing.parsed_df.first()
+        assert row.LocalTime is None
+        assert str(row.LocalTimes[0]) == "2026-08-27 14:30:00"
+        assert row.LocalTimes[1] is None
+        audits = parsing.results_df.first().spark_parser_parse_results
+        assert audits[0].actions_applied == ["parse_error_to_null"]
+        assert audits[1].nested_error_paths == ["$[1]"]
+    finally:
+        spark.conf.set("spark.sql.legacy.timeParserPolicy", previous_policy)
 
 
 def test_nested_numeric_parser_rejects_json_wrapper_injection(spark: SparkSession) -> None:

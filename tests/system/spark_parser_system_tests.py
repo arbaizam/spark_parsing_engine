@@ -479,7 +479,7 @@ print("PASS: Ordered DataFrame and row-level audit metadata match the public con
 
 # COMMAND ----------
 
-_start("ST-007", "Represent a missing configured source as a warning and auditable null")
+_start("ST-007", "Explicitly represent a missing source as a warning and auditable null")
 
 missing_config = parser.compile_text(
     """
@@ -499,6 +499,7 @@ missing_parsing = parser.parse_dataframe(
     spark.createDataFrame([("row-1",)], "row_id string"),
     missing_config,
     key_columns=["row_id"],
+    on_missing_source="warn",
     column_prefix="system_missing",
 )
 assert missing_parsing.parsed_df.first().MissingValue is None
@@ -508,7 +509,7 @@ assert missing_audit.effective is False
 assert missing_audit.actions_applied == ["source_column_missing"]
 assert missing_audit.error == "Source column is missing."
 
-print("PASS: Recoverable schema drift stays visible in warnings and row-level audit output.")
+print("PASS: Explicitly recoverable drift stays visible in warnings and row-level audit output.")
 
 # COMMAND ----------
 
@@ -550,15 +551,15 @@ _expect_raises(
     contains="reserved parser output columns",
 )
 _expect_raises(
-    SchemaValidationError,
+    TypeError,
     lambda: parser.parse_dataframe(
         spark.sql("SELECT 'x' AS value, 1 AS duplicate, 2 AS duplicate"),
         schema_config,
     ),
-    contains="default all-column row key is ambiguous",
+    contains="key_columns",
 )
 
-print("PASS: Non-string sources, reserved outputs, and ambiguous default keys fail safely.")
+print("PASS: Non-string sources, reserved outputs, and omitted explicit keys fail safely.")
 
 # COMMAND ----------
 

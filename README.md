@@ -332,7 +332,7 @@ load them as Boolean values instead of the source strings the parser expects.
 
 | Argument | Required | Default | Behavior |
 | --- | ---: | --- | --- |
-| `source_column_name` | Yes | — | Exact top-level bronze name. It may be reused by multiple mappings. A missing source warns rather than failing. |
+| `source_column_name` | Yes | — | Exact top-level bronze name. It may be reused by multiple mappings. A missing source fails DataFrame binding unless the caller explicitly selects `on_missing_source="warn"`. |
 | `target_column_name` | Yes | — | Non-empty, unique name emitted by `parsed_df`. Duplicate target names fail compilation. |
 | `expected_data_type` | Yes | — | Exact target Spark DDL type. Scalars and recursively nested `array<T>`, `struct<field:T,...>`, and `map<string,T>` are supported. |
 | `parser` | Yes | — | Matching scalar or complex parser name, or a mapping containing `type` and options. |
@@ -355,10 +355,11 @@ form when you need to set an option:
     audit: true
 ```
 
-If `arm_next_rate_change_date` is missing from the DataFrame, the parser emits a `SchemaWarning`,
-adds the message to `DataFrameParsing.warnings`, and produces a typed null. A non-nullable mapping
-uses its required `default_on_null` instead. When audit is enabled, the result also records
-`source_column_missing`, marks the parser ineffective for that row, and includes an error message.
+If `arm_next_rate_change_date` is missing from the DataFrame, binding fails by default. A caller may
+set `on_missing_source="warn"` only when substituting a typed null—or the required
+`default_on_null` for a non-nullable mapping—is intentional. That mode emits a `SchemaWarning`,
+adds the message to `DataFrameParsing.warnings`, and records `source_column_missing` in an enabled
+audit entry.
 
 ## Common parser arguments
 
@@ -379,6 +380,9 @@ These options apply to every parser type.
 | `on_parse_error` | No | `fail` | `fail`, `null`, `default`, or string-only `preserve`; see the error-mode section below. |
 | `default_on_error` | Conditional | No default | Required only with `on_parse_error: default`; must fit the expected type. |
 | `audit` | No | `false` | Add a row-level audit struct for this column. |
+
+`review_yaml()` warns when global null markers are configured but no parser node enables
+`replace_null_markers`; in that configuration the markers are intentionally inert.
 
 The compiler rejects options on the wrong parser, invalid value types, unknown keys, incompatible
 defaults, empty required lists, and contradictory settings.
@@ -409,8 +413,8 @@ String supports the common arguments plus `format`.
 | `pascal` | Lowercase, title-case, and remove spaces. Intended for identifiers rather than human names. | `"account status"` → `"AccountStatus"` |
 | `address_us_v1` | Apply deterministic US address display normalization. | `"123 mccormick st. apt 4b"` → `"123 McCormick St Apt 4B"` |
 | `county` | Smart-case a county name and ensure exactly one trailing `County`. | `"mclean county"` → `"McLean County"` |
-| `state_us` | Return the uppercase two-letter abbreviation for a US state or Washington, DC. | `"Illinois"` → `"IL"`; `"Ill."` → `"IL"`; `"WA."` → `"WA"` |
-| `zip` | Return a canonical ZIP5 or ZIP+4 string. | `"1234"` → `"01234"`; `"123456"` → `"00012-3456"` |
+| `state_us` | Return one or more uppercase two-letter abbreviations for US states, territories, or Washington, DC. | `"Illinois"` → `"IL"`; `"Puerto Rico, tx"` → `"PR, TX"` |
+| `zip` | Return one or more canonical ZIP5 or ZIP+4 values as a string. | `"1234"` → `"01234"`; `"1234, 67890"` → `"01234, 67890"` |
 
 `title` uses Spark's `initcap` behavior. It works well for display labels that should keep their
 spaces, but it does not know the `Mc`, apostrophe, hyphen, street-suffix, or unit rules used by
@@ -447,16 +451,21 @@ boroughs, municipalities, or census areas into counties, so use it only for a tr
 
 #### State profile
 
-`state_us` recognizes the 50 US state names, their two-letter postal abbreviations, conventional
-abbreviations such as `Ill.`, `Calif.`, and `Wash.`, plus `District of Columbia`,
-`Washington DC`, `Washington, D.C.`, and `DC`. Matching is case-insensitive after whitespace
-normalization; periods and commas are ignored during lookup. The allow-list is fixed, so stripping
-punctuation does not make an arbitrary three-letter value valid. Output is always the uppercase
-two-letter abbreviation.
+`state_us` recognizes the 50 US state names, the USPS territories `AS`, `GU`, `MP`, `PR`, and `VI`,
+their full names, their two-letter postal abbreviations, conventional state abbreviations such as
+`Ill.`, `Calif.`, and `Wash.`, plus `District of Columbia`, `Washington DC`, `Washington, D.C.`,
+and `DC`. Matching is case-insensitive after whitespace normalization; periods and commas are
+ignored during lookup. The allow-list is fixed, so stripping punctuation does not make an
+arbitrary three-letter value valid. Output is always the uppercase two-letter abbreviation.
 
-US territories are not included in a formatter for state fields. An unknown non-null value follows
-`on_parse_error`: use `preserve` when a nonstandard source value such as `Mul` must survive, or use
-`null` or an explicit default when invalid state text should not reach the target.
+Comma-separated property values are parsed independently, kept in source order, and joined with
+canonical `, ` spacing. `Washington, D.C.` remains one recognized value rather than being split.
+If any component is empty or invalid, the entire field follows `on_parse_error`; the formatter does
+not return partially parsed lists.
+
+An unknown non-null value follows `on_parse_error`: use `preserve` when a nonstandard source value
+such as `Mul` must survive, or use `null` or an explicit default when invalid state text should not
+reach the target.
 
 ```yaml
 - source_column_name: state
@@ -476,18 +485,50 @@ ZIP values remain strings so leading zeroes are preserved.
 | Normalized input | Output |
 | --- | --- |
 | 1–5 digits | Left-pad to five digits (`1234` → `01234`). |
-| 6–9 digits | Treat the last four digits as the extension and left-pad the remaining base to five (`123456` → `00012-3456`). |
+| 9 digits | Treat the last four digits as the extension (`123456789` → `12345-6789`). |
 | `1–5 digits` + hyphen + `1–4 digits` | Pad each component independently (`123-45` → `00123-0045`). |
-| Non-digits, malformed hyphens, empty components, or more than nine digits | Parse error handled by `on_parse_error`. |
+| 6–8 compact digits, non-digits, malformed hyphens, or empty components | Parse error handled by `on_parse_error`. |
 
 Audited padding records `zip_padded`; inserting or changing ZIP+4 formatting records
 `zip_plus4_formatted`.
+
+#### Multiple-property state and ZIP fields
+
+When one loan field contains a comma-separated state or ZIP for each property, keep the target as
+`string` and use the ordinary `state_us` or `zip` profile. A single value follows the original
+scalar behavior; multiple values are parsed independently and rejoined with canonical spacing.
+
+```yaml
+- source_column_name: property_states
+  target_column_name: PropertyStates
+  expected_data_type: string
+  parser:
+    type: string
+    format: state_us
+    on_parse_error: fail
+
+- source_column_name: property_zips
+  target_column_name: PropertyZips
+  expected_data_type: string
+  parser:
+    type: string
+    format: zip
+    on_parse_error: fail
+```
+
+For example, `Illinois` becomes `IL`, `Illinois, tx` becomes `IL, TX`, `1234` becomes `01234`,
+and `1234, 67890` becomes `01234, 67890`.
 
 ### Byte, short, integer, and long
 
 `byte`, `short`, `integer`, and `long` map to Spark's signed 8-bit, 16-bit, 32-bit, and 64-bit
 integers. Their aliases are `tinyint`, `smallint`, `int`, and `bigint`. Overflow and fractional
 input are parse errors.
+
+Numeric parsing accepts safe alternate spellings such as a leading plus sign, leading zeroes,
+`.5`, and `5.` by normalizing them before strict JSON conversion. Scientific notation is accepted
+for decimal/float/double values; integral parsers reject exponent notation such as `1e5` rather
+than silently coercing it.
 
 Each adds `zero_is_valid` (default `true`). When false, a successfully parsed zero becomes null
 before final null handling. If the column is non-nullable, `default_on_null` is then assigned.
@@ -547,7 +588,7 @@ columns:
 
 | Parser | Argument | Default | Behavior |
 | --- | --- | --- | --- |
-| `date` | `formats` | `[yyyy-MM-dd, yyyy-MM-dd'T'HH:mm:ss[.SSSSSS], MM/dd/yyyy hh:mm a, MM/dd/yyyy hh:mm:ss a]` | Non-empty ordered Spark datetime patterns; first successful parse wins, then casts to date. Offset-bearing ISO input is not included. |
+| `date` | `formats` | `[yyyy-MM-dd, yyyy-MM-dd'T'HH:mm:ss[.SSSSSS], yyyy-MM-dd HH:mm:ss[.SSSSSS], MM/dd/yyyy hh:mm a, MM/dd/yyyy hh:mm:ss a]` | Non-empty ordered Spark datetime patterns; first successful parse wins, then casts to date. Offset-bearing ISO input is not included. |
 | `timestamp` | `formats` | `[yyyy-MM-dd'T'HH:mm:ss[.SSSSSS]XXX, yyyy-MM-dd'T'HH:mm:ss[.SSSSSS], yyyy-MM-dd HH:mm:ss[.SSSSSS], MM/dd/yyyy hh:mm a, MM/dd/yyyy hh:mm:ss a]` | First successful parse wins. ISO offsets, local ISO timestamps, optional microseconds, and the two known US exports are built in. |
 | `timestamp_ntz` | `formats` | `[yyyy-MM-dd'T'HH:mm:ss[.SSSSSS], yyyy-MM-dd HH:mm:ss[.SSSSSS], MM/dd/yyyy hh:mm a, MM/dd/yyyy hh:mm:ss a]` | First successful parse wins without applying a session timezone. Offset-bearing input is rejected. |
 
@@ -558,9 +599,10 @@ session timezone. `timestamp_ntz` represents local wall-clock time, so it does n
 conversion and rejects offset-bearing defaults at compile time.
 
 The built-in formats cover ISO text, optional microseconds, `Z` or numeric offsets for
-`timestamp`, and known US exports such as `09/30/2026 12:00 AM`. Slash-based values are always
-month/day/year; there is no locale guessing. The `date` parser drops the time after a successful
-parse, while `timestamp` and `timestamp_ntz` keep it.
+`timestamp`, SQL-style local timestamps, and known US exports such as `09/30/2026 12:00 AM`.
+Slash-based values are always month/day/year and use a 12-hour clock from `01` through `12`; there
+is no locale guessing. The `date` parser drops the time after a successful parse, while `timestamp`
+and `timestamp_ntz` keep it.
 
 Set `formats` when a source uses a different contract. A bare value such as `09/30/2026` is not a
 default because its locale is ambiguous. Offset-bearing values are also excluded from the default
@@ -569,8 +611,10 @@ session timezone.
 
 Before Spark parses a built-in datetime format, the package checks that the whole token has the
 right shape. This avoids a Spark 3.5 `spark.sql.legacy.timeParserPolicy=EXCEPTION` failure when the
-parser is simply moving to the next format. Custom formats use Spark's native pattern behavior, so
-test them under the same session policy used by the production load.
+parser is simply moving to the next format. Custom formats require
+`spark.sql.legacy.timeParserPolicy=CORRECTED`; DataFrame binding fails with an actionable error
+under `EXCEPTION` or `LEGACY`. This prevents a malformed row from bypassing `on_parse_error` and
+aborting the job.
 
 ### Array
 
@@ -758,7 +802,8 @@ When a config is bound to a DataFrame, the runtime checks:
 
 - duplicate configured source names in the input schema are ambiguous and fail;
 - present configured sources must have Spark `string` type or fail;
-- missing configured sources warn and bind as typed null/default;
+- missing configured sources fail unless `on_missing_source="warn"` explicitly permits typed
+  null/default substitution;
 - reserved parser output names may not already exist;
 - keys must be existing, unique, unambiguous non-empty names; and
 - `column_prefix` must be non-empty.
@@ -775,7 +820,7 @@ column directly, or perform a full target write, when the job must materialize e
 | --- | --- |
 | `parsed_df` | Only target columns, aliased to `target_column_name` and ordered like the config. |
 | `results_df` | Selected row keys followed by nested parser audit/identity metadata. |
-| `warnings` | Tuple of recoverable schema warnings, such as missing configured sources. |
+| `warnings` | Tuple of recoverable schema warnings produced by explicit policies such as `on_missing_source="warn"`. |
 | `key_columns` | Effective ordered result-key names. |
 | `result_columns` | Names of the three parser result columns. |
 | `persist(storage_level=MEMORY_AND_DISK)` | Persist the shared plan and return the same object. Useful before materializing both projections. |
@@ -791,7 +836,8 @@ Databricks system tests do this with `RecordId`) or add it before the handoff.
 | --- | ---: | --- | --- |
 | `df` | Yes | — | Bronze Spark DataFrame. Configured present sources must be top-level strings. |
 | `config` | Yes | — | With the service API: compiled config, YAML text/path, or mapping. The lower-level runtime requires `ParserConfig`. |
-| `key_columns` | No | All input columns | Ordered non-empty row identity used by `results_df`; declaring keys starts no action. |
+| `key_columns` | Yes | — | Explicit ordered non-empty row identity used by `results_df`; declaring keys starts no action. |
+| `on_missing_source` | No | `fail` | `fail` rejects a missing configured source during binding; `warn` emits `SchemaWarning` and substitutes a typed null/default. |
 | `column_prefix` | No | `spark_parser` | Prefix for reserved result fields. |
 
 `results_df` fields are:

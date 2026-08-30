@@ -4,7 +4,19 @@ from pathlib import Path
 
 import pytest
 
-from spark_parser import CompilationError, ParserType, SparkParserService, parser
+from spark_parser import (
+    CompilationError,
+    ParserType,
+    SparkParserService,
+    YamlParserConfigCompiler,
+    parser,
+)
+from spark_parser.defaults import (
+    BUILTIN_DATETIME_FORMAT_SHAPES,
+    DEFAULT_DATE_FORMATS,
+    DEFAULT_TIMESTAMP_FORMATS,
+    DEFAULT_TIMESTAMP_NTZ_FORMATS,
+)
 
 TEST_CONFIG_PATH = Path(__file__).resolve().parents[1] / "fixtures" / "test_config.yaml"
 
@@ -136,3 +148,40 @@ columns:
     boolean_check = boolean_report.validation_checks[-1]
     assert boolean_check["status"] == "PASS"
     assert "1 Boolean parser node" in boolean_check["detail"]
+
+
+def test_review_warns_when_global_null_markers_are_never_enabled() -> None:
+    report = parser.review_yaml(
+        """
+parser_config_id: inert_markers
+parser_config_name: Inert Markers
+version: "1"
+globals:
+  null_markers: [NA, N/A]
+columns:
+  - source_column_name: value
+    target_column_name: Value
+    expected_data_type: string
+    parser: string
+"""
+    )
+
+    assert report.is_valid is True
+    assert any("markers are inert" in warning for warning in report.warnings)
+
+
+def test_compiler_keys_and_datetime_guards_match_published_contracts() -> None:
+    compiler = YamlParserConfigCompiler()
+    for parser_type in ParserType:
+        allowed = compiler._parser_allowed_keys(parser_type, allow_audit=True)
+        documented = {
+            argument["name"] for argument in parser.describe(parser_type.value)["arguments"]
+        }
+        assert allowed == documented
+
+    configured_formats = {
+        *DEFAULT_DATE_FORMATS,
+        *DEFAULT_TIMESTAMP_FORMATS,
+        *DEFAULT_TIMESTAMP_NTZ_FORMATS,
+    }
+    assert configured_formats == set(BUILTIN_DATETIME_FORMAT_SHAPES)

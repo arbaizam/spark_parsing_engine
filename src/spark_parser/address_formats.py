@@ -130,9 +130,7 @@ _NAME_EXCEPTIONS = {
 }
 
 # Canonical USPS abbreviations for the 50 states. Washington, DC is included because it appears in
-# the same address field in real US source data, even though it is not a state. Territories are
-# intentionally excluded: adding them should be an explicit domain decision rather than an
-# accidental expansion of a field documented as a state code.
+# the same address field in real US source data, even though it is not a state.
 _US_STATE_NAMES = {
     "alabama": "AL",
     "alaska": "AK",
@@ -189,6 +187,19 @@ _US_STATE_NAMES = {
     "washington d c": "DC",
 }
 
+# USPS territory abbreviations used in domestic address data. Common long-form variants remain
+# explicit so punctuation cleanup cannot turn an unrelated token into a valid territory.
+_US_TERRITORY_NAMES = {
+    "american samoa": "AS",
+    "guam": "GU",
+    "northern mariana islands": "MP",
+    "commonwealth of the northern mariana islands": "MP",
+    "puerto rico": "PR",
+    "virgin islands": "VI",
+    "us virgin islands": "VI",
+    "united states virgin islands": "VI",
+}
+
 # Conventional abbreviations still appear in older operational systems and manually entered
 # addresses. They remain an explicit allow-list so punctuation cleanup cannot turn arbitrary
 # three-letter values into states. Periods and commas are removed before lookup, making ``Ill.``
@@ -234,8 +245,12 @@ _US_STATE_CONVENTIONAL_ABBREVIATIONS = {
 # comparison expression; values always use the canonical uppercase two-letter representation.
 _US_STATE_TOKENS = {
     **_US_STATE_NAMES,
+    **_US_TERRITORY_NAMES,
     **_US_STATE_CONVENTIONAL_ABBREVIATIONS,
-    **{abbreviation.lower(): abbreviation for abbreviation in _US_STATE_NAMES.values()},
+    **{
+        abbreviation.lower(): abbreviation
+        for abbreviation in (*_US_STATE_NAMES.values(), *_US_TERRITORY_NAMES.values())
+    },
 }
 
 
@@ -361,35 +376,52 @@ def format_county(value: Column) -> Column:
     ).otherwise(F.lit(None).cast("string"))
 
 
-def format_state_us(value: Column) -> Column:
-    """Return a canonical two-letter US state/DC abbreviation.
-
-    ``value`` is expected to have passed common whitespace normalization. Matching is
-    case-insensitive for full names, USPS codes, common conventional abbreviations, and harmless
-    periods/commas. Unknown non-null values return null so the ordinary string parser error policy
-    can fail, preserve the raw token, return null, or assign a configured default.
-    """
+def _format_state_us_scalar(value: Column) -> Column:
+    """Return one canonical two-letter US state, territory, or DC abbreviation."""
     comparable = F.trim(F.regexp_replace(F.lower(value), r"[,.]", ""))
     comparable = F.regexp_replace(comparable, r"\s+", " ")
     return _map_lookup(_US_STATE_TOKENS, comparable)
 
 
-def format_zip(value: Column) -> Column:
-    """Return ZIP5 or ZIP+4, padding short components with leading zeroes.
+def format_state_us(value: Column) -> Column:
+    """Return one or more canonical US state, territory, or DC abbreviations.
 
-    The return type is string so leading zeroes survive. Malformed input becomes null and is later
-    resolved by the configured parse-error policy.
+    ``value`` is expected to have passed common whitespace normalization. Matching is
+    case-insensitive for full names, USPS codes, common conventional abbreviations, and harmless
+    periods/commas. Comma-separated property values are parsed independently and rejoined with
+    canonical ``, `` spacing. Unknown non-null values return null so the ordinary string parser
+    error policy can fail, preserve the raw token, return null, or assign a configured default.
     """
+    scalar = _format_state_us_scalar(value)
+    # Preserve the only supported state/DC spelling whose own punctuation contains the list
+    # delimiter before splitting a multi-property field.
+    list_source = F.regexp_replace(
+        value,
+        r"(?i)washington\s*,\s*d\.?\s*c\.?",
+        "DC",
+    )
+    parts = F.split(list_source, r"\s*,\s*", -1)
+    parsed_parts = F.transform(parts, lambda part: _format_state_us_scalar(F.trim(part)))
+    valid_list = (F.size(parts) > 1) & ~F.exists(parsed_parts, lambda part: part.isNull())
+    return (
+        F.when(scalar.isNotNull(), scalar)
+        .when(valid_list, F.concat_ws(", ", parsed_parts))
+        .otherwise(F.lit(None).cast("string"))
+    )
+
+
+def _format_zip_scalar(value: Column) -> Column:
+    """Return one ZIP5 or ZIP+4, padding short components with leading zeroes."""
     compact = F.regexp_replace(value, r"\s+", "")
     # Classify first, then construct output only from a matching shape. This avoids permissive
     # substring extraction accidentally accepting letters or multiple hyphens.
     hyphenated = compact.rlike(r"^\d{1,5}-\d{1,4}$")
     digits_five_or_less = compact.rlike(r"^\d{1,5}$")
-    digits_plus_four = compact.rlike(r"^\d{6,9}$")
+    digits_plus_four = compact.rlike(r"^\d{9}$")
     base = F.substring_index(compact, "-", 1)
     extension = F.substring_index(compact, "-", -1)
-    digits_base = F.regexp_extract(compact, r"^(\d{1,5})(\d{4})$", 1)
-    digits_extension = F.regexp_extract(compact, r"^(\d{1,5})(\d{4})$", 2)
+    digits_base = F.regexp_extract(compact, r"^(\d{5})(\d{4})$", 1)
+    digits_extension = F.regexp_extract(compact, r"^(\d{5})(\d{4})$", 2)
     return (
         F.when(
             hyphenated,
@@ -398,11 +430,25 @@ def format_zip(value: Column) -> Column:
         .when(digits_five_or_less, F.lpad(compact, 5, "0"))
         .when(
             digits_plus_four,
-            F.concat(
-                F.lpad(digits_base, 5, "0"),
-                F.lit("-"),
-                digits_extension,
-            ),
+            F.concat(digits_base, F.lit("-"), digits_extension),
         )
+        .otherwise(F.lit(None).cast("string"))
+    )
+
+
+def format_zip(value: Column) -> Column:
+    """Return one or more ZIP5/ZIP+4 values as a canonical comma-separated string.
+
+    Each comma-separated component is parsed independently. The return type remains string so
+    leading zeroes survive and the target schema does not vary with property count. Malformed input
+    in any component makes the whole value null for the configured parse-error policy to resolve.
+    """
+    scalar = _format_zip_scalar(value)
+    parts = F.split(value, r"\s*,\s*", -1)
+    parsed_parts = F.transform(parts, lambda part: _format_zip_scalar(F.trim(part)))
+    valid_list = (F.size(parts) > 1) & ~F.exists(parsed_parts, lambda part: part.isNull())
+    return (
+        F.when(scalar.isNotNull(), scalar)
+        .when(valid_list, F.concat_ws(", ", parsed_parts))
         .otherwise(F.lit(None).cast("string"))
     )

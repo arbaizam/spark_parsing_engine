@@ -37,7 +37,30 @@ US_MONTH_FIRST_12_HOUR_FORMAT: Final = "MM/dd/yyyy hh:mm a"
 US_MONTH_FIRST_12_HOUR_SECONDS_FORMAT: Final = "MM/dd/yyyy hh:mm:ss a"
 ISO_LOCAL_TIMESTAMP_FORMAT: Final = "yyyy-MM-dd'T'HH:mm:ss[.SSSSSS]"
 ISO_OFFSET_TIMESTAMP_FORMAT: Final = "yyyy-MM-dd'T'HH:mm:ss[.SSSSSS]XXX"
-# Date inputs often arrive from two predictable bronze contracts: an ISO date string or a US
+SQL_LOCAL_TIMESTAMP_FORMAT: Final = "yyyy-MM-dd HH:mm:ss[.SSSSSS]"
+# Spark 3.5's default EXCEPTION time-parser policy can throw even through try_to_timestamp when one
+# pattern accepts only a prefix. Keep every built-in pattern paired with a full-token shape so
+# defaults and runtime guards cannot drift apart.
+BUILTIN_DATETIME_FORMAT_SHAPES: Final[dict[str, str]] = {
+    "yyyy-MM-dd": r"^\d{4}-\d{2}-\d{2}$",
+    ISO_LOCAL_TIMESTAMP_FORMAT: (
+        r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?$"
+    ),
+    ISO_OFFSET_TIMESTAMP_FORMAT: (
+        r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?"
+        r"(?:Z|[+-]\d{2}:\d{2})$"
+    ),
+    SQL_LOCAL_TIMESTAMP_FORMAT: (
+        r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{1,6})?$"
+    ),
+    US_MONTH_FIRST_12_HOUR_FORMAT: (
+        r"^\d{2}/\d{2}/\d{4} \d{2}:\d{2} [AaPp][Mm]$"
+    ),
+    US_MONTH_FIRST_12_HOUR_SECONDS_FORMAT: (
+        r"^\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2} [AaPp][Mm]$"
+    ),
+}
+# Date inputs often arrive as an ISO date/local timestamp, a SQL-style local timestamp, or a US
 # reporting-system timestamp whose time is irrelevant to the target date. Keep ISO first because it
 # is unambiguous. Offset-bearing timestamps are intentionally excluded: converting an instant to a
 # date would depend on ``spark.sql.session.timeZone`` and could shift the calendar day. The
@@ -46,6 +69,7 @@ ISO_OFFSET_TIMESTAMP_FORMAT: Final = "yyyy-MM-dd'T'HH:mm:ss[.SSSSSS]XXX"
 DEFAULT_DATE_FORMATS: Final[tuple[str, ...]] = (
     "yyyy-MM-dd",
     ISO_LOCAL_TIMESTAMP_FORMAT,
+    SQL_LOCAL_TIMESTAMP_FORMAT,
     US_MONTH_FIRST_12_HOUR_FORMAT,
     US_MONTH_FIRST_12_HOUR_SECONDS_FORMAT,
 )
@@ -55,13 +79,13 @@ DEFAULT_DATE_FORMATS: Final[tuple[str, ...]] = (
 DEFAULT_TIMESTAMP_FORMATS: Final[tuple[str, ...]] = (
     ISO_OFFSET_TIMESTAMP_FORMAT,
     ISO_LOCAL_TIMESTAMP_FORMAT,
-    "yyyy-MM-dd HH:mm:ss[.SSSSSS]",
+    SQL_LOCAL_TIMESTAMP_FORMAT,
     US_MONTH_FIRST_12_HOUR_FORMAT,
     US_MONTH_FIRST_12_HOUR_SECONDS_FORMAT,
 )
 DEFAULT_TIMESTAMP_NTZ_FORMATS: Final[tuple[str, ...]] = (
     ISO_LOCAL_TIMESTAMP_FORMAT,
-    "yyyy-MM-dd HH:mm:ss[.SSSSSS]",
+    SQL_LOCAL_TIMESTAMP_FORMAT,
     US_MONTH_FIRST_12_HOUR_FORMAT,
     US_MONTH_FIRST_12_HOUR_SECONDS_FORMAT,
 )

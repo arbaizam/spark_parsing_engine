@@ -391,7 +391,8 @@ class SparkParserService:
         df: Any,
         config: ParserConfig | str | Path | Mapping[str, Any],
         *,
-        key_columns: Sequence[str] | None = None,
+        key_columns: Sequence[str],
+        on_missing_source: str = "fail",
         column_prefix: str = "spark_parser",
     ):
         """Compile when necessary and build lazy parsed/audit Spark projections.
@@ -406,6 +407,7 @@ class SparkParserService:
             df,
             resolved,
             key_columns=key_columns,
+            on_missing_source=on_missing_source,
             column_prefix=column_prefix,
         )
 
@@ -493,6 +495,13 @@ class SparkParserService:
         all_options = [
             options for column in config.columns for options in _walk_parser_options(column.parser)
         ]
+        if config.globals.null_markers and not any(
+            options.replace_null_markers for options in all_options
+        ):
+            report_warnings.append(
+                "Global null_markers are configured, but no parser node enables "
+                "replace_null_markers; the configured markers are inert."
+            )
         boolean_columns = [
             options for options in all_options if options.parser_type is ParserType.BOOLEAN
         ]

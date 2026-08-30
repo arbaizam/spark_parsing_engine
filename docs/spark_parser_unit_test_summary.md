@@ -2,9 +2,9 @@
 
 Sources: `tests/unit/` and `tests/integration/`. Shared test data lives under `tests/fixtures/`.
 
-The suite contains **56 explicit test functions** and collects **79 pytest cases** after parameter
-expansion. Of those cases, **53** are Spark-independent compiler, serializer, and service unit
-tests. The remaining **26** are Spark integration tests; 25 materialize a real Spark session and
+The suite contains **62 explicit test functions** and collects **85 pytest cases** after parameter
+expansion. Of those cases, **56** are Spark-independent compiler, serializer, and service unit
+tests. The remaining **29** are Spark integration tests; 28 materialize a real Spark session and
 one verifies serialized timestamp options without starting Spark.
 
 The Databricks system-test notebook is separate from these counts and is documented in
@@ -15,10 +15,10 @@ The Databricks system-test notebook is separate from these counts and is documen
 | Area | Explicit Tests | Collected Cases | Current Contract Covered |
 | --- | ---: | ---: | --- |
 | YAML compilation and datatype grammar | 24 | 47 | Strict YAML shapes and scalar types, recursive Spark DDL, all scalar and complex parser contracts, typed defaults, Boolean vocabulary inheritance, duplicate-key rejection, source fan-out, target uniqueness, metadata normalization, and canonical parser/type aliases. |
-| Serialization | 1 | 1 | Deterministic mappings, canonical JSON, content hashing, caller detachment, and recompilation of resolved configuration. |
-| Service and configuration review | 5 | 5 | Discoverable parser/config metadata, public error behavior, valid and invalid review reports, resolved options, Markdown/JSON artifacts, paths, and evidence-based validation results. |
-| Native Spark runtime | 26 | 26 | Scalar and recursive complex parsing, string formats, date/time fallbacks, ANSI parity, all error policies, strict JSON, nested audit paths, schema warnings and guards, wide configurations, custom output prefixes, and lazy fail-mode materialization. |
-| **Total** | **56** | **79** | |
+| Serialization | 2 | 2 | Deterministic mappings, canonical JSON, semantic/order-sensitive content hashing, caller detachment, and recompilation of resolved configuration. |
+| Service and configuration review | 7 | 7 | Discoverable parser/config metadata, public error behavior, valid and invalid review reports, inert-null-marker warnings, compiler/metadata invariants, datetime-guard invariants, resolved options, Markdown/JSON artifacts, paths, and evidence-based validation results. |
+| Native Spark runtime | 29 | 29 | Scalar and recursive complex parsing, territory and multi-property string formats, strict ZIP shapes, signed byte boundaries, date/time fallbacks and custom-format policy, ANSI parity, all error policies, strict JSON, nested audit paths, fail-closed schema guards, wide configurations, custom output prefixes, and lazy fail-mode materialization. |
+| **Total** | **62** | **85** | |
 
 The previous Databricks notebook/config layout checks were removed with the release-test workflow.
 Notebook packaging and workspace layout are not unit behavior; the replacement Databricks system

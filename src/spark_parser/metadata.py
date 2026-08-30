@@ -310,8 +310,8 @@ _SPECIFIC_BEHAVIORS = {
         "pascal removes spaces after init-capitalization; it is intended for identifiers, not names.",
         "address_us_v1 uses contextual USPS-style suffixes/directionals and smart-cases Mc, apostrophe, and hyphen names.",
         "county smart-cases the name and ensures exactly one trailing 'County'.",
-        "state_us maps US state names, postal codes, conventional abbreviations, and Washington, DC to uppercase two-letter codes; periods and commas are ignored for lookup.",
-        "zip returns ZIP5 or ZIP+4 as a string and pads short numeric components with leading zeroes.",
+        "state_us maps one or more comma-separated US state and territory names, postal codes, conventional state abbreviations, and Washington, DC to uppercase two-letter codes.",
+        "zip parses one or more comma-separated ZIP5 or ZIP+4 values, retains string output, and pads short numeric components with leading zeroes.",
     ],
     ParserType.BOOLEAN: [
         "Matching occurs after whitespace normalization.",
@@ -320,7 +320,7 @@ _SPECIFIC_BEHAVIORS = {
     ],
     ParserType.DATE: [
         "Formats cascade in order; format inference is not performed.",
-        "The defaults accept an ISO date/local timestamp or a US month-first 12-hour timestamp, with or without seconds, and return only the date.",
+        "The defaults accept an ISO date/local timestamp, a SQL-style local timestamp, or a US month-first 12-hour timestamp, with or without seconds, and return only the date.",
     ],
     ParserType.TIMESTAMP: [
         "Formats cascade in order; format inference is not performed.",
@@ -353,8 +353,9 @@ _SPECIFIC_GOTCHAS = {
         "address_us_v1 is deterministic display normalization, not postal validation or deliverability verification.",
         "title uses Spark initcap semantics; it does not apply address/name exceptions such as McLean.",
         "county is for jurisdictions named County; it does not infer Parish, Borough, or Census Area.",
-        "state_us excludes US territories and treats unknown non-null values as parse errors.",
-        "zip rejects non-digits (except one ZIP+4 hyphen) and values containing more than nine digits.",
+        "state_us includes the 50 states, Washington DC, AS, GU, MP, PR, and VI; other unknown non-null values are parse errors.",
+        "state_us and zip treat a comma as a property-value separator and fail the whole value when any component is invalid.",
+        "zip rejects compact six-to-eight-digit values instead of guessing a ZIP+4 split.",
     ],
     ParserType.DECIMAL: [
         "expected_data_type must include precision and scale; Spark precision is limited to 38.",
@@ -370,15 +371,18 @@ _SPECIFIC_GOTCHAS = {
         "Spark datetime patterns are not Python strptime patterns.",
         "The built-in slash-date fallback is explicitly MM/dd/yyyy, not dd/MM/yyyy.",
         "Offset-bearing ISO timestamps are not date defaults because their calendar date depends on the Spark session timezone.",
+        "Custom formats require spark.sql.legacy.timeParserPolicy=CORRECTED when binding a DataFrame.",
     ],
     ParserType.TIMESTAMP: [
         "Timestamp interpretation follows the active Spark SQL session timezone.",
         "The built-in slash-date fallback is explicitly MM/dd/yyyy, not dd/MM/yyyy.",
+        "Custom formats require spark.sql.legacy.timeParserPolicy=CORRECTED when binding a DataFrame.",
     ],
     ParserType.TIMESTAMP_NTZ: [
         "Use timestamp when the value represents an absolute instant rather than local wall-clock time.",
         "Offset-bearing inputs and typed defaults are rejected instead of silently discarding timezone information.",
         "The built-in slash-date fallback is explicitly MM/dd/yyyy, not dd/MM/yyyy.",
+        "Custom formats require spark.sql.legacy.timeParserPolicy=CORRECTED when binding a DataFrame.",
     ],
     ParserType.ARRAY: [
         "Delimited input treats the delimiter literally and does not implement CSV quoting.",

@@ -17,8 +17,8 @@ tests and does not run pytest itself.
 | ST-004 | Error policies and lazy execution | Null, default, preserve, and nested child-error policies produce their configured values and actions, while `fail` raises only when the parsed value is materialized. |
 | ST-005 | Spark SQL mode | Fully materialized handled target and audit outputs are identical with ANSI mode enabled and disabled. |
 | ST-006 | DataFrame output contract | Target order, result keys, prefixed result columns, parser identity, content hash, engine version, and ordered audit fields match the public contract. |
-| ST-007 | Recoverable input-schema drift | A missing configured source produces a typed null plus both a DataFrame warning and row-level audit evidence. |
-| ST-008 | Input-schema safety | Non-string configured sources, reserved result-column collisions, and ambiguous default row keys fail before parser expressions are constructed. |
+| ST-007 | Explicitly recoverable input-schema drift | With `on_missing_source="warn"`, a missing configured source produces a typed null plus both a DataFrame warning and row-level audit evidence. |
+| ST-008 | Input-schema safety | Non-string configured sources, reserved result-column collisions, and omitted explicit row keys fail before parser expressions are constructed. |
 
 ## Execution Contract
 
