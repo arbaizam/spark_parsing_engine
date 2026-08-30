@@ -8,6 +8,9 @@ Spark-free: a team can review resolved behavior before binding a configuration t
 from __future__ import annotations
 
 import json
+import string
+import unicodedata
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
@@ -18,13 +21,35 @@ import yaml
 
 from spark_parser.compiler_yaml import YamlParserConfigCompiler
 from spark_parser.data_types import parse_spark_data_type
-from spark_parser.defaults import PARSER_DEFAULTS
+from spark_parser.defaults import parser_defaults
 from spark_parser.enums import ParserType
 from spark_parser.exceptions import CompilationError
 from spark_parser.metadata import config_description, parser_description
-from spark_parser.models import ColumnParser, ParserConfig, ParserOptions
+from spark_parser.models import ColumnParser, ParserConfig, ParserOptions, iter_parser_options
 from spark_parser.serializer import ParserConfigSerializer
 from spark_parser.version import __version__
+
+_MARKDOWN_PUNCTUATION_ENTITIES = str.maketrans(
+    {character: f"&#{ord(character)};" for character in string.punctuation}
+)
+
+
+def _visible_text(value: str, *, preserve_line_feeds: bool = False) -> str:
+    """Escape invisible/control code points that can corrupt or reorder review output."""
+    rendered: list[str] = []
+    for character in value:
+        if preserve_line_feeds and character == "\n":
+            rendered.append(character)
+            continue
+        category = unicodedata.category(character)
+        if category in {"Cc", "Cf", "Cs", "Zl", "Zp"}:
+            code_point = ord(character)
+            escape = "u" if code_point <= 0xFFFF else "U"
+            width = 4 if code_point <= 0xFFFF else 8
+            rendered.append(f"\\{escape}{code_point:0{width}x}")
+        else:
+            rendered.append(character)
+    return "".join(rendered)
 
 
 def _markdown_text(value: Any) -> str:
@@ -35,27 +60,38 @@ def _markdown_text(value: Any) -> str:
         rendered = json.dumps(value, ensure_ascii=False, default=str)
     else:
         rendered = str(value)
-    # Pipes would create extra columns and line breaks would break the row. Escape/flatten only the
-    # structural Markdown characters; otherwise preserve the human-readable representation.
-    return rendered.replace("|", "\\|").replace("\n", " ")
+    # Either CommonMark line-ending form can break a table row or heading. Character references
+    # preserve every ASCII punctuation mark visibly while preventing links, images, emphasis,
+    # inline HTML, escapes, and table delimiters from becoming active Markdown.
+    rendered = rendered.replace("\r\n", "\n").replace("\r", "\n").replace("\n", " ")
+    return _visible_text(rendered).translate(_MARKDOWN_PUNCTUATION_ENTITIES)
 
 
-def _walk_parser_options(options: ParserOptions):
-    """Yield a parser node followed by every recursive child in deterministic order."""
-    yield options
-    if options.element_parser is not None:
-        yield from _walk_parser_options(options.element_parser.parser)
-    for field in options.field_parsers:
-        yield from _walk_parser_options(field.parser)
-    if options.value_parser is not None:
-        yield from _walk_parser_options(options.value_parser.parser)
+def _schema_name(value: str) -> str:
+    """Quote an authored schema name without allowing it to add tree lines."""
+    return _visible_text(json.dumps(value, ensure_ascii=False))
+
+
+def _fenced_code(content: str, language: str) -> str:
+    """Wrap arbitrary text in a CommonMark fence longer than embedded backtick runs."""
+    content = _visible_text(content, preserve_line_feeds=True)
+    longest_run = 0
+    current_run = 0
+    for character in content:
+        if character == "`":
+            current_run += 1
+            longest_run = max(longest_run, current_run)
+        else:
+            current_run = 0
+    fence = "`" * max(3, longest_run + 1)
+    return f"{fence}{language}\n{content}\n{fence}"
 
 
 def _schema_tree(column: ColumnParser) -> str:
     """Render one column's recursive source-to-target parser tree as plain text."""
     lines = [
-        f"{column.target_column_name}: {column.expected_data_type} "
-        f"[{column.parser.parser_type.value}] <- {column.source_column_name}"
+        f"{_schema_name(column.target_column_name)}: {column.expected_data_type} "
+        f"[{column.parser.parser_type.value}] <- {_schema_name(column.source_column_name)}"
     ]
 
     def append(options: ParserOptions, prefix: str) -> None:
@@ -69,8 +105,8 @@ def _schema_tree(column: ColumnParser) -> str:
             append(element.parser, prefix + "  ")
         for field in options.field_parsers:
             lines.append(
-                f"{prefix}.{field.target_field_name}: {field.expected_data_type} "
-                f"[{field.parser.parser_type.value}] <- {field.source_field_name}"
+                f"{prefix}.{_schema_name(field.target_field_name)}: {field.expected_data_type} "
+                f"[{field.parser.parser_type.value}] <- {_schema_name(field.source_field_name)}"
             )
             append(field.parser, prefix + "  ")
         if options.value_parser is not None:
@@ -87,11 +123,13 @@ def _schema_tree(column: ColumnParser) -> str:
 
 @dataclass(frozen=True)
 class ConfigReviewReport:
-    """Immutable structured result of reviewing one parser configuration.
+    """Stable structured result of reviewing one parser configuration.
 
     Invalid reports carry authoring errors without raising, which makes them suitable for review
     UIs and CI artifacts. Valid reports include the complete resolved configuration so reviewers do
-    not have to infer inherited defaults from source shorthand.
+    not have to infer inherited defaults from source shorthand. The dataclass fields cannot be
+    rebound, but its JSON-shaped nested containers remain mutable for public API compatibility;
+    :meth:`to_mapping` returns a detached copy for callers that need an isolated working value.
     """
 
     is_valid: bool
@@ -123,8 +161,10 @@ class ConfigReviewReport:
         )
 
     def to_json(self, *, indent: int = 2) -> str:
-        """Render UTF-8-friendly JSON for durable review artifacts and automation."""
-        return json.dumps(self.to_mapping(), indent=indent, ensure_ascii=False, default=str)
+        """Render display-safe JSON for durable review artifacts and automation."""
+        # ASCII escapes keep bidi controls and other invisible Unicode from visually reordering a
+        # human-reviewed artifact. JSON consumers reconstruct the exact authored strings.
+        return json.dumps(self.to_mapping(), indent=indent, ensure_ascii=True, default=str)
 
     def write_json(self, path: str | Path, *, indent: int = 2) -> Path:
         """Write the structured report as newline-terminated UTF-8 JSON and return its path."""
@@ -213,7 +253,7 @@ class ConfigReviewReport:
                 "",
                 *(
                     f"### {_markdown_text(column['target_column_name'])}\n\n"
-                    f"```text\n{column['schema_tree']}\n```\n"
+                    f"{_fenced_code(column['schema_tree'], 'text')}\n"
                     for column in self.column_reviews
                 ),
                 "## Resolved parser options",
@@ -254,7 +294,9 @@ class ConfigReviewReport:
         resolved_yaml = yaml.safe_dump(
             self.resolved_config,
             sort_keys=False,
-            allow_unicode=True,
+            # ASCII escapes keep every Unicode control/format character copy-safe while preserving
+            # its exact value when the displayed YAML is compiled again.
+            allow_unicode=False,
             default_flow_style=False,
         ).rstrip()
         lines.extend(
@@ -263,9 +305,7 @@ class ConfigReviewReport:
                 "",
                 "This copy-ready YAML includes inherited values and every effective default.",
                 "",
-                "```yaml",
-                resolved_yaml,
-                "```",
+                _fenced_code(resolved_yaml, "yaml"),
                 "",
             ]
         )
@@ -350,7 +390,7 @@ class SparkParserService:
     @staticmethod
     def defaults() -> dict[str, Any]:
         """Return a detached view of all compiler defaults safe for caller mutation."""
-        return deepcopy(PARSER_DEFAULTS)
+        return parser_defaults()
 
     @staticmethod
     def normalize_data_type(value: str) -> str:
@@ -453,17 +493,8 @@ class SparkParserService:
 
         # Reusing one bronze source for multiple target interpretations is allowed. Report it so a
         # reviewer can distinguish an intentional fan-out from accidental duplicate authoring.
-        repeated_sources = sorted(
-            {
-                column.source_column_name
-                for column in config.columns
-                if sum(
-                    candidate.source_column_name == column.source_column_name
-                    for candidate in config.columns
-                )
-                > 1
-            }
-        )
+        source_counts = Counter(column.source_column_name for column in config.columns)
+        repeated_sources = sorted(name for name, count in source_counts.items() if count > 1)
         column_reviews: list[dict[str, Any]] = []
         resolved_columns = resolved["columns"]
         for column, resolved_column in zip(config.columns, resolved_columns, strict=True):
@@ -493,7 +524,7 @@ class SparkParserService:
         # Flatten the recursive parser forest once so validation evidence includes nested parser
         # nodes rather than reporting only top-level columns.
         all_options = [
-            options for column in config.columns for options in _walk_parser_options(column.parser)
+            options for column in config.columns for options in iter_parser_options(column.parser)
         ]
         if config.globals.null_markers and not any(
             options.replace_null_markers for options in all_options
@@ -616,7 +647,14 @@ class SparkParserService:
         if isinstance(source, Path):
             return str(source)
         if isinstance(source, str):
-            return "inline YAML" if "\n" in source or "\r" in source else source
+            if "\n" not in source and "\r" not in source:
+                try:
+                    path = Path(source)
+                    if path.is_file() or path.suffix.lower() in {".yaml", ".yml"}:
+                        return str(path)
+                except OSError:
+                    pass
+            return "inline YAML"
         return None
 
 

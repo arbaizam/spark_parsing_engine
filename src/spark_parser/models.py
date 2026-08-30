@@ -7,6 +7,7 @@ Frozen instances also make configuration hashing and lazy Spark-plan constructio
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -96,7 +97,7 @@ class ParserOptions:
     delimiter: str | None = None
     # These three references are the edges of the recursive parser tree. Adding another child kind
     # is a cross-cutting schema change: update compiler recursion, serializer.parser_mapping,
-    # service._walk_parser_options/schema reporting, and Spark runtime nested dispatch together.
+    # iter_parser_options/schema reporting, and Spark runtime nested dispatch together.
     # Keeping that coordination note beside the model makes the dependency visible at the place a
     # maintainer is most likely to begin such a change.
     element_parser: NestedValueParser | None = None
@@ -165,3 +166,22 @@ class ParserConfig:
     description: str | None = None
     owner: str | None = None
     owner_department: str | None = None
+
+
+def iter_parser_options(options: ParserOptions) -> Iterator[ParserOptions]:
+    """Yield one compiled parser tree in stable pre-order.
+
+    An explicit stack keeps reporting and runtime validation aligned on the model's recursive
+    edges without adding a second recursion limit to the compiler's bounded contract.
+    """
+    pending = [options]
+    while pending:
+        current = pending.pop()
+        yield current
+        children: list[ParserOptions] = []
+        if current.element_parser is not None:
+            children.append(current.element_parser.parser)
+        children.extend(field.parser for field in current.field_parsers)
+        if current.value_parser is not None:
+            children.append(current.value_parser.parser)
+        pending.extend(reversed(children))

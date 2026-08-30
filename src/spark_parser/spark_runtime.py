@@ -17,10 +17,17 @@ from datetime import date, datetime
 from typing import Any
 from uuid import uuid4
 
+from pyspark.errors import AnalysisException, PySparkException
 from pyspark.sql import Column, DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql import types as T
 
+from spark_parser._spark_columns import literal_column as _column
+from spark_parser._text_patterns import (
+    UNICODE_EDGE_WHITESPACE_PATTERN,
+    UNICODE_LIST_DELIMITER_PATTERN,
+    UNICODE_WHITESPACE_PATTERN,
+)
 from spark_parser.address_formats import (
     format_address_us_v1,
     format_county,
@@ -47,6 +54,7 @@ from spark_parser.models import (
     ParserConfig,
     ParserOptions,
     StructFieldParser,
+    iter_parser_options,
 )
 from spark_parser.serializer import ParserConfigSerializer
 from spark_parser.version import __version__
@@ -81,14 +89,18 @@ PARSE_RESULT_STRUCT = T.StructType(
 )
 PARSE_RESULT_ARRAY = T.ArrayType(PARSE_RESULT_STRUCT, containsNull=True)
 
-# Spark's ordinary ``trim`` behavior does not cover every whitespace character handled here. The
-# patterns include non-breaking space because it commonly appears in copied source data.
-_WHITESPACE_PATTERN = r"[\s\u00A0]+"
-_EDGE_WHITESPACE_PATTERN = r"^[\s\u00A0]+|[\s\u00A0]+$"
-
 # Numeric child values are decoded through strict JSON to obtain ANSI-safe casts. This pattern
 # rejects partial tokens and non-JSON spellings before Spark attempts the typed conversion.
 _JSON_NUMBER_PATTERN = r"^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$"
+# Bronze numeric input deliberately accepts a small set of useful non-JSON spellings before they
+# are normalized above: a leading plus, leading zeroes, a leading decimal point, or a trailing
+# decimal point. Requiring at least one digit prevents punctuation-only values such as ``.`` and
+# ``-.e2`` from being rewritten into a valid zero.
+_BRONZE_NUMBER_PATTERN = r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$"
+# Match the same padded standard alphabet accepted by ``base64.b64decode(validate=True)`` during
+# compilation. Spark's native decoder deliberately ignores whitespace and missing padding, so it
+# needs this lexical guard to keep runtime values on the same contract.
+_BASE64_PATTERN = r"^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
 
 # ``PERMISSIVE`` gives a null result instead of throwing for malformed containers. The runtime can
 # then apply the user's explicit fail/null/default policy in a consistent way.
@@ -98,14 +110,15 @@ _STRICT_JSON_OPTIONS = {
     "allowSingleQuotes": "false",
     "allowUnquotedFieldNames": "false",
     "allowNumericLeadingZeros": "false",
+    "allowNonNumericNumbers": "false",
 }
 # Audit values must be stable, printable strings. Explicit formats prevent session settings from
 # changing the JSON representation of dates and timestamps.
 _AUDIT_JSON_OPTIONS = {
     "ignoreNullFields": "false",
     "dateFormat": "yyyy-MM-dd",
-    "timestampFormat": "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
-    "timestampNTZFormat": "yyyy-MM-dd'T'HH:mm:ss.SSS",
+    "timestampFormat": "yyyy-MM-dd'T'HH:mm:ss.SSSSSSXXX",
+    "timestampNTZFormat": "yyyy-MM-dd'T'HH:mm:ss.SSSSSS",
 }
 
 # Spark names these formats differently from the public enum. Keeping the translation in one place
@@ -171,14 +184,184 @@ class _ComplexDecode:
     failed: Column
 
 
-def _column(name: str) -> Column:
-    """Resolve one top-level column literally, even when its name contains dots/backticks."""
-    return F.col(f"`{name.replace('`', '``')}`")
-
-
 def _quoted_identifier(name: str) -> str:
     """Quote one top-level name for safe interpolation into a Spark SQL expression."""
     return f"`{name.replace('`', '``')}`"
+
+
+def _is_well_formed_unicode(value: str) -> bool:
+    """Return whether a public name can cross Py4J's UTF-8 boundary safely."""
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _ascii_resolver_key(value: str, *, case_sensitive: bool) -> str:
+    """Return the exact Catalyst resolver key for already-verified ASCII names."""
+    return value if case_sensitive else value.lower()
+
+
+def _analysis_error_class(exc: AnalysisException) -> str:
+    """Return Spark's structured analysis condition across supported PySpark releases."""
+    for method_name in ("getCondition", "getErrorClass"):
+        getter = getattr(exc, method_name, None)
+        if callable(getter):
+            condition = getter()
+            if condition:
+                return str(condition)
+    message = str(exc)
+    closing_bracket = message.find("]")
+    return message[1:closing_bracket] if message.startswith("[") and closing_bracket > 1 else ""
+
+
+_SAFE_JSON_PATH_FIELD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
+def _static_json_path_segment(name: str) -> str:
+    """Return one unambiguous path segment for a configured struct field."""
+    if _SAFE_JSON_PATH_FIELD.fullmatch(name):
+        return f".{name}"
+    # JSON escaping handles backslashes, quotes, and control characters. The path convention uses
+    # single-quoted bracket notation, so apostrophes need one additional escape.
+    escaped = json.dumps(name, ensure_ascii=False)[1:-1].replace("'", r"\'")
+    return f"['{escaped}']"
+
+
+def _resolve_input_fields(
+    df: DataFrame,
+    names: Sequence[str],
+    *,
+    case_sensitive: bool,
+) -> tuple[dict[str, T.StructField], list[str], list[str]]:
+    """Resolve top-level fields through Spark and classify ambiguous or missing references.
+
+    Catalyst's case-insensitive resolver is Java ``equalsIgnoreCase``, which neither Python
+    ``lower`` nor ``casefold`` reproduces for all Unicode. A public, metadata-only ``select`` uses
+    the session's real resolver without an action or private JVM coupling. Exact case-sensitive and
+    ASCII-only comparisons stay in Python; Unicode fallback usually takes one combined analysis,
+    with individual analysis reserved for an already-invalid schema.
+    """
+    unique_names = tuple(dict.fromkeys(names))
+    if not unique_names:
+        return {}, [], []
+    input_fields = tuple(df.schema.fields)
+    if case_sensitive or (
+        all(name.isascii() for name in unique_names)
+        and all(field.name.isascii() for field in input_fields)
+    ):
+        grouped: dict[str, list[T.StructField]] = {}
+        for field in input_fields:
+            grouped.setdefault(
+                _ascii_resolver_key(field.name, case_sensitive=case_sensitive),
+                [],
+            ).append(field)
+        resolved: dict[str, T.StructField] = {}
+        ambiguous: list[str] = []
+        missing: list[str] = []
+        for name in unique_names:
+            matches = grouped.get(
+                _ascii_resolver_key(name, case_sensitive=case_sensitive),
+                [],
+            )
+            if len(matches) > 1:
+                ambiguous.append(name)
+            elif matches:
+                resolved[name] = matches[0]
+            else:
+                missing.append(name)
+        return resolved, sorted(ambiguous), sorted(missing)
+
+    try:
+        selected_fields = df.select(*(_column(name) for name in unique_names)).schema.fields
+    except AnalysisException:
+        resolved = {}
+        ambiguous = []
+        missing = []
+        for name in unique_names:
+            try:
+                resolved[name] = df.select(_column(name)).schema.fields[0]
+            except AnalysisException as exc:
+                if _analysis_error_class(exc).startswith("AMBIGUOUS_REFERENCE"):
+                    ambiguous.append(name)
+                else:
+                    missing.append(name)
+        return resolved, sorted(ambiguous), sorted(missing)
+
+    return (
+        dict(zip(unique_names, selected_fields, strict=True)),
+        [],
+        [],
+    )
+
+
+def _resolver_duplicates(
+    df: DataFrame,
+    names: Sequence[str],
+    *,
+    case_sensitive: bool,
+) -> list[str]:
+    """Return aliases that collide under this Spark session's active identifier resolver."""
+    if len(names) < 2:
+        return []
+    if case_sensitive or all(name.isascii() for name in names):
+        grouped: dict[str, list[str]] = {}
+        for name in names:
+            grouped.setdefault(
+                _ascii_resolver_key(name, case_sensitive=case_sensitive),
+                [],
+            ).append(name)
+        return sorted({name for group in grouped.values() if len(group) > 1 for name in group})
+    probe = df.sparkSession.range(1).select(
+        *(F.lit(None).cast("string").alias(name) for name in names)
+    )
+    unique_names = tuple(dict.fromkeys(names))
+    try:
+        _ = probe.select(*(_column(name) for name in unique_names)).schema
+        return []
+    except AnalysisException:
+        collisions: list[str] = []
+        for name in unique_names:
+            try:
+                _ = probe.select(_column(name)).schema
+            except AnalysisException:
+                collisions.append(name)
+        return sorted(collisions)
+
+
+def _reserved_output_conflicts(
+    df: DataFrame,
+    names: Sequence[str],
+    *,
+    case_sensitive: bool,
+) -> list[str]:
+    """Return generated output aliases that collide with existing input fields."""
+    input_names = tuple(df.columns)
+    if case_sensitive or all(name.isascii() for name in (*input_names, *names)):
+        input_keys = {
+            _ascii_resolver_key(name, case_sensitive=case_sensitive) for name in input_names
+        }
+        return sorted(
+            name
+            for name in names
+            if _ascii_resolver_key(name, case_sensitive=case_sensitive) in input_keys
+        )
+    probe = df.select(
+        "*",
+        *(F.lit(None).cast("string").alias(name) for name in names),
+    )
+    try:
+        _ = probe.select(*(_column(name) for name in names)).schema
+        return []
+    except AnalysisException:
+        conflicts: list[str] = []
+        for name in names:
+            try:
+                _ = probe.select(_column(name)).schema
+            except AnalysisException:
+                conflicts.append(name)
+        return sorted(conflicts)
 
 
 class SparkDataFrameParser:
@@ -214,7 +397,9 @@ class SparkDataFrameParser:
             raise TypeError("config must be a ParserConfig.")
         if not isinstance(column_prefix, str) or not column_prefix:
             raise ValueError("column_prefix must be a non-empty string.")
-        normalized_keys, schema_warnings = self._validate_schema(
+        if not _is_well_formed_unicode(column_prefix):
+            raise ValueError("column_prefix must contain well-formed Unicode.")
+        normalized_keys, schema_warnings, missing_sources = self._validate_schema(
             df,
             config,
             key_columns,
@@ -227,7 +412,7 @@ class SparkDataFrameParser:
         plans = tuple(
             self._runtime_plan(
                 column_config,
-                source_missing=column_config.source_column_name not in df.columns,
+                source_missing=column_config.source_column_name in missing_sources,
             )
             for column_config in config.columns
         )
@@ -322,7 +507,7 @@ class SparkDataFrameParser:
         key_columns: Sequence[str],
         on_missing_source: str,
         column_prefix: str,
-    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    ) -> tuple[tuple[str, ...], tuple[str, ...], frozenset[str]]:
         """Validate the bronze schema and return normalized result keys plus recoverable warnings.
 
         Schema inspection is metadata-only and does not trigger a Spark action. Missing configured
@@ -333,13 +518,43 @@ class SparkDataFrameParser:
             raise TypeError("on_missing_source must be 'fail' or 'warn'.")
         if on_missing_source not in {"fail", "warn"}:
             raise ValueError("on_missing_source must be 'fail' or 'warn'.")
+        if key_columns is None:
+            raise SchemaValidationError("key_columns is required and must be supplied explicitly.")
+        if isinstance(key_columns, (str, bytes)):
+            raise TypeError("key_columns must be a sequence, not a string.")
+        try:
+            normalized_keys = tuple(key_columns)
+        except TypeError as exc:
+            raise TypeError("key_columns must be a sequence of column names.") from exc
+        if not normalized_keys:
+            raise SchemaValidationError("key_columns must contain at least one column name.")
+        invalid_keys = [name for name in normalized_keys if not isinstance(name, str) or not name]
+        if invalid_keys:
+            raise SchemaValidationError("key_columns must contain only non-empty strings.")
+        if any(not _is_well_formed_unicode(name) for name in normalized_keys):
+            raise SchemaValidationError("key_columns must contain well-formed Unicode.")
+
+        case_sensitive_setting = df.sparkSession.conf.get(
+            "spark.sql.caseSensitive",
+            "false",
+        )
+        case_sensitive = (case_sensitive_setting or "false").lower() == "true"
         self._validate_custom_datetime_policy(df, config)
-        duplicates = sorted({name for name in df.columns if df.columns.count(name) > 1})
         configured_names = {column.source_column_name for column in config.columns}
-        ambiguous = sorted(configured_names & set(duplicates))
+        configured_output_names = {column.target_column_name for column in config.columns}
+        if any(
+            not _is_well_formed_unicode(name) for name in configured_names | configured_output_names
+        ):
+            raise SchemaValidationError(
+                "Configured source and target column names must contain well-formed Unicode."
+            )
+        resolved_sources, ambiguous, missing = _resolve_input_fields(
+            df,
+            sorted(configured_names),
+            case_sensitive=case_sensitive,
+        )
         if ambiguous:
             raise SchemaValidationError(f"Configured input columns are ambiguous: {ambiguous}.")
-        missing = sorted(configured_names - set(df.columns))
         schema_warnings: list[str] = []
         if missing:
             if on_missing_source == "fail":
@@ -354,57 +569,122 @@ class SparkDataFrameParser:
             )
             schema_warnings.append(message)
             python_warnings.warn(message, SchemaWarning, stacklevel=3)
-        field_types = {field.name: field.dataType for field in df.schema.fields}
         non_string = {
-            name: field_types[name].simpleString()
+            name: resolved_sources[name].dataType.simpleString()
             for name in sorted(configured_names - set(missing))
-            if not isinstance(field_types[name], T.StringType)
+            if not isinstance(resolved_sources[name].dataType, T.StringType)
         }
         if non_string:
             raise SchemaValidationError(
                 f"Configured bronze columns must have Spark string type; found {non_string}."
             )
 
-        output_names = {
+        output_names = (
             f"{column_prefix}_parse_results",
             f"{column_prefix}_config",
             f"{column_prefix}_engine_version",
-        }
-        conflicts = sorted(output_names & set(df.columns))
+        )
+        conflicts = _reserved_output_conflicts(
+            df,
+            output_names,
+            case_sensitive=case_sensitive,
+        )
         if conflicts:
             raise SchemaValidationError(
                 f"Input contains reserved parser output columns: {conflicts}."
             )
-        if key_columns is None:
-            raise SchemaValidationError("key_columns is required and must be supplied explicitly.")
-        if isinstance(key_columns, (str, bytes)):
-            raise TypeError("key_columns must be a sequence, not a string.")
-        try:
-            normalized_keys = tuple(key_columns)
-        except TypeError as exc:
-            raise TypeError("key_columns must be a sequence of column names.") from exc
-        if not normalized_keys:
-            raise SchemaValidationError("key_columns must contain at least one column name.")
-        invalid_keys = [name for name in normalized_keys if not isinstance(name, str) or not name]
-        if invalid_keys:
-            raise SchemaValidationError("key_columns must contain only non-empty strings.")
-        duplicate_keys = sorted(
-            {name for name in normalized_keys if normalized_keys.count(name) > 1}
+        target_names = tuple(column.target_column_name for column in config.columns)
+        target_conflicts = _resolver_duplicates(
+            df,
+            target_names,
+            case_sensitive=case_sensitive,
+        )
+        if target_conflicts:
+            raise SchemaValidationError(
+                "Configured target columns collide under Spark's active identifier resolver: "
+                f"{target_conflicts}."
+            )
+        duplicate_keys = _resolver_duplicates(
+            df,
+            normalized_keys,
+            case_sensitive=case_sensitive,
         )
         if duplicate_keys:
             raise SchemaValidationError(f"key_columns contains duplicates: {duplicate_keys}.")
-        missing_keys = sorted(set(normalized_keys) - set(df.columns))
+        _, ambiguous_keys, missing_keys = _resolve_input_fields(
+            df,
+            normalized_keys,
+            case_sensitive=case_sensitive,
+        )
         if missing_keys:
             raise SchemaValidationError(f"key_columns are missing: {missing_keys}.")
-        ambiguous_keys = sorted(set(normalized_keys) & set(duplicates))
         if ambiguous_keys:
             raise SchemaValidationError(f"key_columns are ambiguous: {ambiguous_keys}.")
-        result_key_conflicts = sorted(set(normalized_keys) & output_names)
+        result_key_conflicts = _resolver_duplicates(
+            df,
+            (*normalized_keys, *output_names),
+            case_sensitive=case_sensitive,
+        )
+        result_key_conflicts = sorted(set(normalized_keys) & set(result_key_conflicts))
         if result_key_conflicts:
             raise SchemaValidationError(
                 f"key_columns conflict with parser result columns: {result_key_conflicts}."
             )
-        return normalized_keys, tuple(schema_warnings)
+        self._validate_nested_resolver_contracts(
+            df,
+            config,
+            case_sensitive=case_sensitive,
+        )
+        return normalized_keys, tuple(schema_warnings), frozenset(missing)
+
+    @classmethod
+    def _validate_nested_resolver_contracts(
+        cls,
+        df: DataFrame,
+        config: ParserConfig,
+        *,
+        case_sensitive: bool,
+    ) -> None:
+        """Reject nested struct aliases that Spark would resolve ambiguously at runtime."""
+        collision_cache: dict[tuple[str, ...], list[str]] = {}
+
+        def collisions(names: tuple[str, ...]) -> list[str]:
+            if names not in collision_cache:
+                collision_cache[names] = _resolver_duplicates(
+                    df,
+                    names,
+                    case_sensitive=case_sensitive,
+                )
+            return collision_cache[names]
+
+        for column in config.columns:
+            for options in iter_parser_options(column.parser):
+                if options.parser_type is not ParserType.STRUCT:
+                    continue
+                source_names = tuple(field.source_field_name for field in options.field_parsers)
+                if any(not _is_well_formed_unicode(name) for name in source_names):
+                    raise SchemaValidationError(
+                        "Nested struct source fields must contain well-formed Unicode."
+                    )
+                source_conflicts = collisions(source_names)
+                if source_conflicts:
+                    raise SchemaValidationError(
+                        "Nested struct source fields collide under Spark's active identifier "
+                        f"resolver for target column {column.target_column_name!r}: "
+                        f"{source_conflicts}."
+                    )
+                target_names = tuple(field.target_field_name for field in options.field_parsers)
+                if any(not _is_well_formed_unicode(name) for name in target_names):
+                    raise SchemaValidationError(
+                        "Nested struct target fields must contain well-formed Unicode."
+                    )
+                target_conflicts = collisions(target_names)
+                if target_conflicts:
+                    raise SchemaValidationError(
+                        "Nested struct target fields collide under Spark's active identifier "
+                        f"resolver for target column {column.target_column_name!r}: "
+                        f"{target_conflicts}."
+                    )
 
     @classmethod
     def _validate_custom_datetime_policy(cls, df: DataFrame, config: ParserConfig) -> None:
@@ -413,7 +693,7 @@ class SparkDataFrameParser:
             {
                 datetime_format
                 for column in config.columns
-                for options in cls._walk_parser_options(column.parser)
+                for options in iter_parser_options(column.parser)
                 if options.parser_type
                 in {ParserType.DATE, ParserType.TIMESTAMP, ParserType.TIMESTAMP_NTZ}
                 for datetime_format in options.formats
@@ -422,7 +702,11 @@ class SparkDataFrameParser:
         )
         if not custom_formats:
             return
-        policy = df.sparkSession.conf.get("spark.sql.legacy.timeParserPolicy", "EXCEPTION").upper()
+        policy_setting = df.sparkSession.conf.get(
+            "spark.sql.legacy.timeParserPolicy",
+            "EXCEPTION",
+        )
+        policy = (policy_setting or "EXCEPTION").upper()
         if policy != "CORRECTED":
             raise SchemaValidationError(
                 "Custom datetime formats require "
@@ -430,17 +714,20 @@ class SparkDataFrameParser:
                 f"configured parser error policy; current policy is {policy!r}. Custom formats: "
                 f"{custom_formats}."
             )
-
-    @classmethod
-    def _walk_parser_options(cls, options: ParserOptions):
-        """Yield one fully resolved parser tree without importing authoring-service helpers."""
-        yield options
-        if options.element_parser is not None:
-            yield from cls._walk_parser_options(options.element_parser.parser)
-        for field in options.field_parsers:
-            yield from cls._walk_parser_options(field.parser)
-        if options.value_parser is not None:
-            yield from cls._walk_parser_options(options.value_parser.parser)
+        for datetime_format in custom_formats:
+            try:
+                # ``schema`` stops at analysis, where Spark has not yet compiled the formatter.
+                # Public ``inputFiles`` reaches optimization without executing a Spark job, so an
+                # invalid extension pattern fails here instead of escaping on_parse_error later.
+                probe = df.sparkSession.range(0).select(
+                    F.try_to_timestamp(F.lit(""), F.lit(datetime_format)).alias("parsed")
+                )
+                probe.inputFiles()
+            except PySparkException as exc:
+                raise SchemaValidationError(
+                    f"Custom datetime format {datetime_format!r} is invalid for the active "
+                    "Spark runtime."
+                ) from exc
 
     @staticmethod
     def _runtime_plan(
@@ -486,14 +773,14 @@ class SparkDataFrameParser:
         # The compiler resolves outer complex parsers to collapse_whitespace=false. Trust that
         # invariant here so the rule has one executable source of truth.
         whitespace_normalized = (
-            F.regexp_replace(source, _WHITESPACE_PATTERN, " ")
+            F.regexp_replace(source, UNICODE_WHITESPACE_PATTERN, " ")
             if options.collapse_whitespace
             else source
         )
         if options.trim_whitespace:
             whitespace_normalized = F.regexp_replace(
                 whitespace_normalized,
-                _EDGE_WHITESPACE_PATTERN,
+                UNICODE_EDGE_WHITESPACE_PATTERN,
                 "",
             )
         # Coalesce each Boolean predicate to false so SQL three-valued null logic never leaks into
@@ -642,11 +929,23 @@ class SparkDataFrameParser:
                 decoded.failed,
                 F.lit(None).cast(column_config.expected_data_type),
             ).otherwise(nested.value)
+            nested_errors = F.when(
+                decoded.failed,
+                self._empty_error_paths(),
+            ).otherwise(nested.error_paths)
+            nested_defaults = F.when(
+                decoded.failed,
+                self._empty_error_paths(),
+            ).otherwise(nested.default_on_null_paths)
+            nested_zeros = F.when(
+                decoded.failed,
+                self._empty_error_paths(),
+            ).otherwise(nested.zero_invalidated_paths)
             return _CandidateParse(
                 candidate,
-                F.concat(nested.error_paths, container_errors),
-                nested.default_on_null_paths,
-                nested.zero_invalidated_paths,
+                F.concat(nested_errors, container_errors),
+                nested_defaults,
+                nested_zeros,
             )
         # Top-level and nested leaves deliberately use the same conversion helper. This is a
         # contract invariant: a token such as ``1d`` must not succeed or fail solely because it is
@@ -691,7 +990,7 @@ class SparkDataFrameParser:
             # ``from_json`` may accept a valid prefix in some runtime combinations. The explicit
             # full-token regex prevents wrapper injection and trailing garbage from slipping through.
             parsed = F.when(
-                json_number.rlike(_JSON_NUMBER_PATTERN),
+                normalized.rlike(_BRONZE_NUMBER_PATTERN) & json_number.rlike(_JSON_NUMBER_PATTERN),
                 parsed,
             ).otherwise(F.lit(None).cast(data_type.canonical))
             if parser_type is ParserType.BYTE:
@@ -709,7 +1008,16 @@ class SparkDataFrameParser:
                 ).otherwise(parsed)
             return parsed
         if parser_type is ParserType.BINARY:
-            return F.try_to_binary(normalized, F.lit(_BINARY_FORMATS[options.binary_encoding]))
+            parsed = F.try_to_binary(
+                normalized,
+                F.lit(_BINARY_FORMATS[options.binary_encoding]),
+            )
+            if options.binary_encoding is BinaryEncoding.BASE64:
+                return F.when(
+                    normalized.rlike(_BASE64_PATTERN),
+                    parsed,
+                ).otherwise(F.lit(None).cast(data_type.canonical))
+            return parsed
         if parser_type is ParserType.BOOLEAN:
             # Compiler overlap validation guarantees a token cannot satisfy both branches.
             comparable = normalized if options.boolean_case_sensitive else F.lower(normalized)
@@ -763,7 +1071,11 @@ class SparkDataFrameParser:
             # Lowercasing first makes output deterministic for mixed-case bronze values.
             return F.initcap(F.lower(normalized))
         if string_format is StringFormat.PASCAL:
-            return F.regexp_replace(F.initcap(F.lower(normalized)), r"\s+", "")
+            return F.regexp_replace(
+                F.initcap(F.lower(normalized)),
+                UNICODE_WHITESPACE_PATTERN,
+                "",
+            )
         if string_format is StringFormat.ADDRESS_US_V1:
             return format_address_us_v1(normalized)
         if string_format is StringFormat.COUNTY:
@@ -802,11 +1114,13 @@ class SparkDataFrameParser:
         data_type: SparkDataType,
         options: ParserOptions,
     ) -> _ComplexDecode:
-        """Decode one complex value and separately flag malformed container syntax.
+        """Decode one complete complex value and separately flag malformed syntax.
 
-        The typed decode supplies raw child strings for recursive parsing. A second broad decode is
-        used as a syntax validator so a malformed object cannot masquerade as a successful struct
-        whose fields are all null.
+        Spark's permissive JSON reader accepts a valid prefix and can ignore trailing content. A
+        small Catalyst-native boundary scan therefore verifies that the source contains exactly one
+        complete array or object token; ``from_json`` remains responsible for JSON grammar and type
+        validation. Keeping both checks as column expressions avoids Python UDFs and driver-side
+        collection.
         """
         if (
             options.parser_type is ParserType.ARRAY
@@ -825,18 +1139,72 @@ class SparkDataFrameParser:
             self._raw_type_ddl(data_type, options),
             _STRICT_JSON_OPTIONS,
         )
-        validation_type = (
-            "array<string>" if options.parser_type is ParserType.ARRAY else "map<string,string>"
+        wrapper = F.from_json(
+            F.concat(F.lit('{"value":'), normalized, F.lit("}")),
+            "map<string,string>",
+            _STRICT_JSON_OPTIONS,
         )
-        validation = F.from_json(normalized, validation_type, _STRICT_JSON_OPTIONS)
-        invalid = validation.isNull()
+        wrapper_keys = F.map_keys(wrapper)
+        wrapper_valid = F.coalesce(
+            (F.size(wrapper_keys) == F.lit(1))
+            & (F.size(F.array_distinct(wrapper_keys)) == F.lit(1))
+            & F.array_contains(wrapper_keys, "value"),
+            F.lit(False),
+        )
+        complete_token = self._is_complete_json_container(normalized, options.parser_type)
+        invalid = value.isNull() | ~wrapper_valid | ~complete_token
+        if options.parser_type is ParserType.STRUCT:
+            # A malformed object may decode as a non-null all-null struct in PERMISSIVE mode.
+            # Decoding the same object as a map gives us a schema-independent syntax probe and
+            # also exposes duplicate source fields, whose winner would otherwise vary by runtime.
+            object_probe = F.from_json(
+                normalized,
+                "map<string,string>",
+                _STRICT_JSON_OPTIONS,
+            )
+            object_keys = F.map_keys(object_probe)
+            duplicate_object_fields = F.size(object_keys) != F.size(F.array_distinct(object_keys))
+            invalid = (
+                invalid | object_probe.isNull() | F.coalesce(duplicate_object_fields, F.lit(False))
+            )
         if options.parser_type is ParserType.MAP:
-            # Spark's map construction fails on duplicate keys. Detect them while the value is still
-            # an array-like decoded representation so the configured container policy can handle it.
-            keys = F.map_keys(validation)
+            # Spark can retain duplicate JSON map keys in its internal map representation, but a
+            # later map reconstruction may fail. Classify the entire container before that point.
+            keys = F.map_keys(value)
             duplicate_keys = F.size(keys) != F.size(F.array_distinct(keys))
             invalid = invalid | F.coalesce(duplicate_keys, F.lit(False))
         return _ComplexDecode(value, normalized.isNotNull() & invalid)
+
+    @staticmethod
+    def _is_complete_json_container(normalized: Column, parser_type: ParserType) -> Column:
+        """Return whether text is exactly one balanced JSON array or object token.
+
+        This deliberately checks only structural token boundaries. Complete quoted strings are
+        removed before scanning so their braces and brackets do not affect nesting. Spark's strict
+        ``from_json`` calls validate matching delimiters, escapes, scalar grammar, and the requested
+        schema. The accumulator is one integer rather than a struct so recursively nested parser
+        plans remain compact enough for Spark code generation and executor transport.
+        """
+        expected_opener = "[" if parser_type is ParserType.ARRAY else "{"
+        without_strings = F.regexp_replace(normalized, r'"(?:\\.|[^"\\])*"', "")
+        delimiters = F.regexp_replace(without_strings, r"[^\[\]\{\}]", "")
+
+        def advance(depth: Column, delimiter: Column) -> Column:
+            # ``-1`` means the outer container has finished; any later structural delimiter
+            # changes it to the permanently invalid ``-2`` state.
+            return (
+                F.when(depth < F.lit(0), F.lit(-2))
+                .when(
+                    depth == F.lit(0),
+                    F.when(delimiter == F.lit(expected_opener), F.lit(1)).otherwise(F.lit(-2)),
+                )
+                .when(delimiter.isin("[", "{"), depth + F.lit(1))
+                .when(depth == F.lit(1), F.lit(-1))
+                .otherwise(depth - F.lit(1))
+            )
+
+        final_depth = F.aggregate(F.split(delimiters, ""), F.lit(0), advance)
+        return F.coalesce(final_depth == F.lit(-1), F.lit(False))
 
     def _parse_nested_complex(
         self,
@@ -899,17 +1267,29 @@ class SparkDataFrameParser:
             default_applied = default_applied & ~(
                 decoded.failed & F.lit(child_error_mode is ChildErrorMode.DROP)
             )
+            descendant_errors = F.when(
+                decoded.failed,
+                self._empty_error_paths(),
+            ).otherwise(state.error_paths)
+            descendant_defaults = F.when(
+                decoded.failed,
+                self._empty_error_paths(),
+            ).otherwise(state.default_on_null_paths)
+            descendant_zeros = F.when(
+                decoded.failed,
+                self._empty_error_paths(),
+            ).otherwise(state.zero_invalidated_paths)
             # Error paths are diagnostic history, not just unresolved failures. Preserve handled
             # child paths even when the final value becomes a default or the parent later drops it.
             return _NestedParse(
                 value,
                 decoded.failed,
-                F.concat(state.error_paths, self._paths_when(decoded.failed, path)),
+                F.concat(descendant_errors, self._paths_when(decoded.failed, path)),
                 F.concat(
-                    state.default_on_null_paths,
+                    descendant_defaults,
                     self._paths_when(default_applied, path),
                 ),
-                state.zero_invalidated_paths,
+                descendant_zeros,
             )
 
         normalized = self._normalized_value(raw, nested.parser)
@@ -957,14 +1337,15 @@ class SparkDataFrameParser:
         root_config: ColumnParser,
     ) -> _NestedParse:
         """Parse array elements with zero-based paths and apply drop/null/distinct behavior."""
-        assert options.element_parser is not None
+        element_parser = options.element_parser
+        assert element_parser is not None
 
         def parse_element(element: Column, index: Column) -> Column:
             """Return a temporary record so value and diagnostics travel through one transform."""
             element_path = F.concat(path, F.lit("["), index.cast("string"), F.lit("]"))
             parsed = self._parse_nested_value(
                 element,
-                options.element_parser,
+                element_parser,
                 element_path,
                 root_config,
                 child_error_mode=options.on_element_error,
@@ -1020,7 +1401,10 @@ class SparkDataFrameParser:
         defaults: list[Column] = []
         zeros: list[Column] = []
         for field in options.field_parsers:
-            field_path = F.concat(path, F.lit("."), F.lit(field.target_field_name))
+            field_path = F.concat(
+                path,
+                F.lit(_static_json_path_segment(field.target_field_name)),
+            )
             parsed = self._parse_nested_value(
                 raw.getField(field.source_field_name),
                 field,
@@ -1051,18 +1435,28 @@ class SparkDataFrameParser:
         root_config: ColumnParser,
     ) -> _NestedParse:
         """Parse map values while preserving keys and recording key-specific error paths."""
-        assert options.value_parser is not None
+        value_parser = options.value_parser
+        assert value_parser is not None
 
         def parse_entry(entry: Column) -> Column:
             """Attach the key, parsed value, failure flag, and paths to one temporary entry."""
             key = entry.getField("key")
-            # Quote map keys in JSONPath-like diagnostics. Escaping an embedded apostrophe keeps one
-            # key distinguishable from multiple path segments (for example ``a']['b``).
-            escaped_key = F.regexp_replace(key, "'", r"\\'")
+            # Let Spark's JSON encoder escape backslashes, quotes, control characters, and Unicode
+            # consistently. Remove the surrounding one-element array syntax, then add the extra
+            # apostrophe escape required by this package's single-quoted bracket convention.
+            escaped_key = F.regexp_replace(
+                F.regexp_replace(
+                    F.to_json(F.array(key)),
+                    r'^\["|"\]$',
+                    "",
+                ),
+                "'",
+                r"\\'",
+            )
             value_path = F.concat(path, F.lit("['"), escaped_key, F.lit("']"))
             parsed = self._parse_nested_value(
                 entry.getField("value"),
-                options.value_parser,
+                value_parser,
                 value_path,
                 root_config,
                 child_error_mode=options.on_value_error,
@@ -1076,7 +1470,9 @@ class SparkDataFrameParser:
                 parsed.zero_invalidated_paths.alias("zero_invalidated_paths"),
             )
 
-        records = F.transform(F.map_entries(raw), parse_entry)
+        # MapType does not promise iteration order. Sort the permissively decoded raw string pairs
+        # before parsing so target construction and diagnostic path arrays are reproducible.
+        records = F.transform(F.array_sort(F.map_entries(raw)), parse_entry)
         retained = (
             F.filter(records, lambda record: ~record.getField("failed"))
             if options.on_value_error is ChildErrorMode.DROP
@@ -1265,16 +1661,42 @@ class SparkDataFrameParser:
     ) -> Column:
         """Recursively convert a compiler-validated Python default into native Spark literals."""
         if value is None:
+            if not options.is_nullable and options.default_on_null is not None:
+                return self._typed_value_literal(
+                    options.default_on_null,
+                    data_type,
+                    options,
+                )
             return F.lit(None).cast(data_type.canonical)
+        if (
+            data_type.parser_type in NUMERIC_PARSER_TYPES
+            and not options.zero_is_valid
+            and value == 0
+        ):
+            # A scalar embedded in a parent complex default still obeys its own final-value
+            # contract. Route an invalid zero through that child's null/default behavior.
+            return self._typed_value_literal(None, data_type, options)
+        if data_type.parser_type is ParserType.DATE:
+            assert isinstance(value, date) and not isinstance(value, datetime)
+            # Sending Python date/datetime objects through Py4J uses host-timezone/platform
+            # conversion and can fail at boundary years. Spark-owned ISO parsing is deterministic.
+            return F.lit(value.isoformat()).cast(data_type.canonical)
+        if data_type.parser_type in {ParserType.TIMESTAMP, ParserType.TIMESTAMP_NTZ}:
+            assert isinstance(value, datetime)
+            # Naive text is interpreted in spark.sql.session.timeZone, while an authored offset is
+            # preserved for TimestampType. TimestampNTZ compilation rejects offsets.
+            return F.lit(value.isoformat(sep=" ")).cast(data_type.canonical)
         if data_type.parser_type is ParserType.BINARY:
             return F.try_to_binary(F.lit(value), F.lit(_BINARY_FORMATS[options.binary_encoding]))
         if data_type.parser_type is ParserType.ARRAY:
-            assert data_type.element_type is not None and options.element_parser is not None
+            element_type = data_type.element_type
+            element_parser = options.element_parser
+            assert element_type is not None and element_parser is not None
             items = [
                 self._typed_value_literal(
                     item,
-                    data_type.element_type,
-                    options.element_parser.parser,
+                    element_type,
+                    element_parser.parser,
                 )
                 for item in value
             ]
@@ -1293,16 +1715,19 @@ class SparkDataFrameParser:
             ]
             return F.struct(*fields).cast(data_type.canonical)
         if data_type.parser_type is ParserType.MAP:
-            assert data_type.value_type is not None and options.value_parser is not None
+            value_type = data_type.value_type
+            value_parser = options.value_parser
+            assert value_type is not None and value_parser is not None
             pairs: list[Column] = []
-            for key, item in value.items():
+            for key in sorted(value):
+                item = value[key]
                 pairs.extend(
                     (
                         F.lit(key),
                         self._typed_value_literal(
                             item,
-                            data_type.value_type,
-                            options.value_parser.parser,
+                            value_type,
+                            value_parser.parser,
                         ),
                     )
                 )
@@ -1344,30 +1769,30 @@ class SparkDataFrameParser:
         options = column_config.parser
         parse_to_null = parse_failed & F.lit(options.on_parse_error is ParseErrorMode.NULL)
         parse_default = parse_failed & F.lit(options.on_parse_error is ParseErrorMode.DEFAULT)
-        parse_preserved = parse_failed & F.lit(
-            options.on_parse_error is ParseErrorMode.PRESERVE
-        )
+        parse_preserved = parse_failed & F.lit(options.on_parse_error is ParseErrorMode.PRESERVE)
         # A top-level malformed container is already represented by parse_failed. Only separately
         # label nested resolution when one or more child paths failed inside a valid container.
         nested_failed = (F.size(nested_error_paths) > 0) & ~parse_failed
         nested_defaulted = F.size(nested_default_on_null_paths) > 0
         nested_zero_invalidated = F.size(nested_zero_invalidated_paths) > 0
         is_zip = options.string_format is StringFormat.ZIP
-        zip_source_parts = F.split(normalized, r"\s*,\s*", -1)
-        zip_candidate_parts = F.split(candidate, r"\s*,\s*", -1)
+        zip_source_parts = F.split(normalized, UNICODE_LIST_DELIMITER_PATTERN, -1)
+        zip_candidate_parts = F.split(candidate, UNICODE_LIST_DELIMITER_PATTERN, -1)
         zip_padding_flags = F.zip_with(
             zip_source_parts,
             zip_candidate_parts,
-            lambda source_part, candidate_part: F.length(
-                F.regexp_replace(source_part, r"\D", "")
-            )
-            < F.length(F.regexp_replace(candidate_part, r"\D", "")),
+            lambda source_part, candidate_part: (
+                F.length(F.regexp_replace(source_part, r"\D", ""))
+                < F.length(F.regexp_replace(candidate_part, r"\D", ""))
+            ),
         )
         zip_plus4_flags = F.zip_with(
             zip_source_parts,
             zip_candidate_parts,
-            lambda source_part, candidate_part: candidate_part.contains("-")
-            & (candidate_part != F.regexp_replace(source_part, r"\s+", "")),
+            lambda source_part, candidate_part: (
+                candidate_part.contains("-")
+                & (candidate_part != F.regexp_replace(source_part, UNICODE_WHITESPACE_PATTERN, ""))
+            ),
         )
         zip_plus4 = (
             F.coalesce(F.exists(zip_plus4_flags, lambda changed: changed), F.lit(False))

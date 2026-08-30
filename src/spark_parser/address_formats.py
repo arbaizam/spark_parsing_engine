@@ -10,6 +10,13 @@ from __future__ import annotations
 from pyspark.sql import Column
 from pyspark.sql import functions as F
 
+from spark_parser._text_patterns import (
+    UNICODE_EDGE_WHITESPACE_PATTERN,
+    UNICODE_LIST_DELIMITER_PATTERN,
+    UNICODE_WHITESPACE_CLASS,
+    UNICODE_WHITESPACE_PATTERN,
+)
+
 # Directionals are recognized case-insensitively after punctuation cleanup.
 _DIRECTIONALS = {
     "n": "N",
@@ -269,6 +276,11 @@ def _clean_token(token: Column) -> Column:
     return F.regexp_replace(F.lower(token), r"[,.]", "")
 
 
+def _trim_whitespace(value: Column) -> Column:
+    """Trim the complete Unicode White_Space set used by common normalization."""
+    return F.regexp_replace(value, UNICODE_EDGE_WHITESPACE_PATTERN, "")
+
+
 def _smart_token(
     token: Column,
     *,
@@ -333,9 +345,9 @@ def format_address_us_v1(value: Column) -> Column:
     """Return a USPS-oriented display representation using native Spark expressions.
 
     The input is expected to have already passed common whitespace normalization. Nulls remain
-    null, and empty punctuation-only tokens are removed before joining the final value.
+    null, and tokens made empty by comma/period cleanup are removed before joining the final value.
     """
-    tokens = F.split(value, " ")
+    tokens = F.split(value, UNICODE_WHITESPACE_PATTERN)
     # ``array_position(reverse(...))`` identifies the final suffix candidate without collecting
     # the token array. Spark array positions are one-based, while transform indices are zero-based.
     suffix_flags = F.transform(tokens, lambda token: _clean_token(token).isin(*_SUFFIXES))
@@ -363,11 +375,21 @@ def format_county(value: Column) -> Column:
     becomes a default.
     """
     # Remove at most the semantic trailing suffix before rebuilding one canonical suffix.
-    core = F.trim(F.regexp_replace(value, r"(?i)(?:^|\s+)county\.?$", ""))
+    trimmed = _trim_whitespace(value)
+    core = _trim_whitespace(
+        F.regexp_replace(
+            trimmed,
+            r"(?i)(?:^|" + UNICODE_WHITESPACE_CLASS + r"+)county\.?$",
+            "",
+        )
+    )
     formatted = F.concat_ws(
         " ",
         F.filter(
-            F.transform(F.split(core, " "), lambda token: _smart_token(token, address=False)),
+            F.transform(
+                F.split(core, UNICODE_WHITESPACE_PATTERN),
+                lambda token: _smart_token(token, address=False),
+            ),
             lambda token: token != "",
         ),
     )
@@ -378,8 +400,8 @@ def format_county(value: Column) -> Column:
 
 def _format_state_us_scalar(value: Column) -> Column:
     """Return one canonical two-letter US state, territory, or DC abbreviation."""
-    comparable = F.trim(F.regexp_replace(F.lower(value), r"[,.]", ""))
-    comparable = F.regexp_replace(comparable, r"\s+", " ")
+    comparable = _trim_whitespace(F.regexp_replace(F.lower(value), r"[,.]", ""))
+    comparable = F.regexp_replace(comparable, UNICODE_WHITESPACE_PATTERN, " ")
     return _map_lookup(_US_STATE_TOKENS, comparable)
 
 
@@ -397,11 +419,19 @@ def format_state_us(value: Column) -> Column:
     # delimiter before splitting a multi-property field.
     list_source = F.regexp_replace(
         value,
-        r"(?i)washington\s*,\s*d\.?\s*c\.?",
+        (
+            r"(?i)washington"
+            + UNICODE_WHITESPACE_CLASS
+            + "*,"
+            + UNICODE_WHITESPACE_CLASS
+            + r"*d\.?(?:"
+            + UNICODE_WHITESPACE_CLASS
+            + r")*c\.?"
+        ),
         "DC",
     )
-    parts = F.split(list_source, r"\s*,\s*", -1)
-    parsed_parts = F.transform(parts, lambda part: _format_state_us_scalar(F.trim(part)))
+    parts = F.split(list_source, UNICODE_LIST_DELIMITER_PATTERN, -1)
+    parsed_parts = F.transform(parts, lambda part: _format_state_us_scalar(_trim_whitespace(part)))
     valid_list = (F.size(parts) > 1) & ~F.exists(parsed_parts, lambda part: part.isNull())
     return (
         F.when(scalar.isNotNull(), scalar)
@@ -412,7 +442,7 @@ def format_state_us(value: Column) -> Column:
 
 def _format_zip_scalar(value: Column) -> Column:
     """Return one ZIP5 or ZIP+4, padding short components with leading zeroes."""
-    compact = F.regexp_replace(value, r"\s+", "")
+    compact = F.regexp_replace(value, UNICODE_WHITESPACE_PATTERN, "")
     # Classify first, then construct output only from a matching shape. This avoids permissive
     # substring extraction accidentally accepting letters or multiple hyphens.
     hyphenated = compact.rlike(r"^\d{1,5}-\d{1,4}$")
@@ -444,8 +474,8 @@ def format_zip(value: Column) -> Column:
     in any component makes the whole value null for the configured parse-error policy to resolve.
     """
     scalar = _format_zip_scalar(value)
-    parts = F.split(value, r"\s*,\s*", -1)
-    parsed_parts = F.transform(parts, lambda part: _format_zip_scalar(F.trim(part)))
+    parts = F.split(value, UNICODE_LIST_DELIMITER_PATTERN, -1)
+    parsed_parts = F.transform(parts, lambda part: _format_zip_scalar(_trim_whitespace(part)))
     valid_list = (F.size(parts) > 1) & ~F.exists(parsed_parts, lambda part: part.isNull())
     return (
         F.when(scalar.isNotNull(), scalar)

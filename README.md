@@ -163,8 +163,8 @@ the DataFrame runtime.
 
 - [`serializer.py`](src/spark_parser/serializer.py) converts a compiled config into a fully
   resolved, JSON-compatible mapping. It also produces deterministic canonical JSON and the SHA-256
-  content hash, so identity follows runtime behavior rather than the shorthand used in the source
-  YAML.
+  content hash, so identity covers the complete resolved configuration rather than the shorthand
+  used in the source YAML.
 
 ### Spark execution
 
@@ -263,7 +263,9 @@ report_payload = report.to_mapping()
 `validation_checks`, `column_reviews`, and `resolved_config`. Use `to_mapping()` or `to_json()` for
 automation and `to_markdown()` for a review document. `write_json()` and `write_markdown()` save
 UTF-8 files and return the destination `Path`. Invalid configs still produce a report: errors are
-included in the result and the Markdown status is `FAIL`.
+included in the result and the Markdown status is `FAIL`. For public API compatibility, the frozen
+report shell contains mutable JSON-shaped dictionaries; treat them as report-owned, or use
+`to_mapping()` when an independently mutable copy is needed.
 
 ## Testing
 
@@ -282,6 +284,13 @@ SPARK_PARSER_REQUIRE_JAVA=1 python -m pytest tests/integration -q
 To run both pytest suites in one command:
 
 ```text
+SPARK_PARSER_REQUIRE_JAVA=1 python -m pytest tests/unit tests/integration -q
+```
+
+On PowerShell:
+
+```powershell
+$env:SPARK_PARSER_REQUIRE_JAVA = "1"
 python -m pytest tests/unit tests/integration -q
 ```
 
@@ -332,8 +341,8 @@ load them as Boolean values instead of the source strings the parser expects.
 
 | Argument | Required | Default | Behavior |
 | --- | ---: | --- | --- |
-| `source_column_name` | Yes | — | Exact top-level bronze name. It may be reused by multiple mappings. A missing source fails DataFrame binding unless the caller explicitly selects `on_missing_source="warn"`. |
-| `target_column_name` | Yes | — | Non-empty, unique name emitted by `parsed_df`. Duplicate target names fail compilation. |
+| `source_column_name` | Yes | — | Top-level bronze name resolved with Spark's active identifier resolver (exact when `spark.sql.caseSensitive=true`). It may be reused by multiple mappings. A missing source fails DataFrame binding unless the caller explicitly selects `on_missing_source="warn"`. |
+| `target_column_name` | Yes | — | Non-empty authored name emitted by `parsed_df`. Exact duplicates fail compilation; resolver-sensitive collisions fail DataFrame binding. |
 | `expected_data_type` | Yes | — | Exact target Spark DDL type. Scalars and recursively nested `array<T>`, `struct<field:T,...>`, and `map<string,T>` are supported. |
 | `parser` | Yes | — | Matching scalar or complex parser name, or a mapping containing `type` and options. |
 
@@ -434,8 +443,8 @@ spaces, but it does not know the `Mc`, apostrophe, hyphen, street-suffix, or uni
   (`Apt 4b` → `Apt 4B`, `Apt #4b` → `Apt #4B`).
 
 Only the last suffix-like token is treated as a street suffix. That keeps an address such as
-`123 Center Street` from turning into `123 Ctr St`. Punctuation-only tokens are removed before the
-address is joined back together, and null stays null.
+`123 Center Street` from turning into `123 Ctr St`. Tokens made empty by comma/period cleanup are
+removed before the address is joined back together, and null stays null.
 
 Suffixes are punctuation-free (`St`, not `St.`), following
 [USPS Publication 28 conventions](https://pe.usps.com/text/pub28/28apc_002.htm). This formatter is
@@ -552,9 +561,12 @@ zero. Both support `zero_is_valid`. Use decimal when exact base-10 representatio
 ### Binary
 
 Binary adds `encoding`, with `base64` as the default. `hex` and `utf8` are also supported.
-Invalid base64 or hexadecimal input follows `on_parse_error`; UTF-8 accepts every normalized
-string. The typed target value is Spark `binary`, while audit `parsed_value` is always canonical
-base64 so audit storage remains printable and encoding-independent.
+Base64 uses the standard alphabet and requires correct padding; embedded whitespace, missing or
+excess padding, and non-alphabet characters are invalid. Hexadecimal accepts an empty or odd-length
+digit sequence, matching Spark, but rejects whitespace and non-ASCII digits. Invalid base64 or
+hexadecimal input follows `on_parse_error`; UTF-8 accepts every normalized string. The typed target
+value is Spark `binary`, while audit `parsed_value` is always canonical base64 so audit storage
+remains printable and encoding-independent.
 
 ### Boolean
 
@@ -596,7 +608,9 @@ Formats are tried in order. The parser does not guess because forms such as `MM/
 `dd/MM/yyyy` can both be valid while meaning different dates. These are Spark datetime patterns,
 not Python `strptime` patterns. `timestamp` represents an instant and follows the active Spark SQL
 session timezone. `timestamp_ntz` represents local wall-clock time, so it does no timezone
-conversion and rejects offset-bearing defaults at compile time.
+conversion and rejects offset-bearing defaults at compile time. Timestamp defaults use strict ISO
+text; offset-aware defaults are canonicalized to the equivalent UTC instant, while naive timestamp
+and timestamp-NTZ defaults retain their authored local wall-clock value.
 
 The built-in formats cover ISO text, optional microseconds, `Z` or numeric offsets for
 `timestamp`, SQL-style local timestamps, and known US exports such as `09/30/2026 8:08 AM`.
@@ -718,21 +732,27 @@ supported scalar or nested datatype.
     audit: true
 ```
 
-Map error paths include the source key, for example `$['principal']`. Duplicate JSON keys make the
-whole map invalid and follow `on_parse_error`, or the parent's child-error policy for a nested map.
-Handling the duplicate at this boundary avoids Spark's `DUPLICATED_MAP_KEY` runtime failure. A
-`struct` still follows Spark's last-value-wins behavior for duplicate fields.
+Map error paths include the source key, for example `$['principal']`. Duplicate keys make the whole
+JSON map or struct invalid and follow `on_parse_error`, or the parent's child-error policy when
+nested. Struct detection covers the complete source object, including fields the configured schema
+does not select. Handling duplicates at this boundary avoids Spark's `DUPLICATED_MAP_KEY` failure
+and runtime-dependent struct winners.
 
 ### Recursive nesting and complex defaults
 
-Complex parsers can be nested without a package-defined depth limit. An
+Complex parsers are recursive. YAML composition depth (counted as syntax nodes) and Spark datatype
+nesting (counted as complex containers) are each capped at 64 so hostile inputs fail deterministically
+before exhausting Python or Spark planning. An
 `array<struct<...>>`, a `map<string,array<decimal(18,2)>>`, and a struct containing other complex
 types all go through the same recursive compiler and runtime. Struct fields follow the order in
 `expected_data_type`; arrays keep source order unless values are dropped or deduplicated.
 
 Complex defaults use YAML lists for arrays and mappings for structs or maps. A struct default must
 contain its full target field set. The compiler checks every nested value and range before the
-runtime turns the default into a typed Spark literal.
+runtime turns the default into a typed Spark literal. Each authored default is capped at 10,000
+expanded nodes, counting containers, elements, scalar or null values, and map keys. Shared YAML
+aliases count at every emitted position and cyclic containers are rejected, preventing a compact
+authoring graph from expanding into an unsafe Spark literal.
 
 Supported datatypes follow Spark's
 [SQL datatype model](https://spark.apache.org/docs/3.5.7/sql-ref-datatypes.html). Complex decoding
@@ -798,14 +818,16 @@ Before Spark starts, compilation checks:
 - global/column null-marker modes; and
 - non-empty, non-overlapping effective Boolean vocabularies.
 
-When a config is bound to a DataFrame, the runtime checks:
+When a config is bound to a DataFrame, names follow Spark's active identifier resolver: matching is
+exact when `spark.sql.caseSensitive=true` and case-insensitive otherwise. The runtime checks:
 
-- duplicate configured source names in the input schema are ambiguous and fail;
+- ambiguous configured sources, including source-schema collisions, fail;
 - present configured sources must have Spark `string` type or fail;
 - missing configured sources fail unless `on_missing_source="warn"` explicitly permits typed
   null/default substitution;
-- reserved parser output names may not already exist;
-- keys must be existing, unique, unambiguous non-empty names; and
+- configured targets and nested struct source/target fields may not collide under the resolver;
+- reserved parser output names may not already exist or collide with keys;
+- keys must be existing, unique, unambiguous non-empty names under the resolver; and
 - `column_prefix` must be non-empty.
 
 A bad value under `on_parse_error: fail` raises only when Spark evaluates that target expression.
@@ -880,8 +902,8 @@ entries or set `changed` on their own.
 ## Defaults and exhaustive YAML reference
 
 All defaults come from [`spark_parser.defaults`](src/spark_parser/defaults.py). `PARSER_DEFAULTS`
-is the public module mapping and should be treated as read-only; `parser.defaults()` returns a copy
-that callers can safely change. Compilation fills in omitted and inherited values, and both
+is an immutable public mapping; `parser.defaults()` returns a JSON-shaped copy that callers can
+safely change. Compilation fills in omitted and inherited values, and both
 serialization and review reports show the result.
 
 [`examples/all_parsers.yaml`](examples/all_parsers.yaml) shows every top-level, global, column,

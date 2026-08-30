@@ -1,5 +1,6 @@
 """Native-Spark behavioral tests for the complete runtime contract."""
 
+import json
 import os
 import shutil
 import sys
@@ -482,6 +483,74 @@ columns:
     assert audit.actions_applied == ["zip_padded"]
 
 
+def test_location_formats_recognize_the_complete_unicode_whitespace_set(
+    spark: SparkSession,
+) -> None:
+    """Treat non-ASCII White_Space consistently in scalar and list-oriented profiles."""
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: unicode_location_whitespace
+parser_config_name: Unicode Location Whitespace
+version: "1"
+columns:
+  - source_column_name: address
+    target_column_name: Address
+    expected_data_type: string
+    parser:
+      type: string
+      format: address_us_v1
+      collapse_whitespace: false
+      trim_whitespace: false
+  - source_column_name: county
+    target_column_name: County
+    expected_data_type: string
+    parser:
+      type: string
+      format: county
+      collapse_whitespace: false
+      trim_whitespace: false
+  - source_column_name: state
+    target_column_name: State
+    expected_data_type: string
+    parser:
+      type: string
+      format: state_us
+      collapse_whitespace: false
+      trim_whitespace: false
+  - source_column_name: zip_code
+    target_column_name: ZipCode
+    expected_data_type: string
+    parser:
+      type: string
+      format: zip
+      collapse_whitespace: false
+      trim_whitespace: false
+"""
+    )
+    df = spark.range(1).select(
+        F.lit("\u2003123\u2003main\u202fstreet\u3000").alias("address"),
+        F.lit("\u2003o'brien\u202fcounty\u3000").alias("county"),
+        F.lit("illinois\u202f,\u3000new\u2003york").alias("state"),
+        F.lit("123\u202f,\u300012345\u2003-\u20036789").alias("zip_code"),
+    )
+
+    row = (
+        SparkDataFrameParser()
+        .parse_dataframe(
+            df,
+            config,
+            key_columns=["address"],
+        )
+        .parsed_df.first()
+    )
+    assert row.asDict() == {
+        "Address": "123 Main St",
+        "County": "O'Brien County",
+        "State": "IL, NY",
+        "ZipCode": "00123, 12345-6789",
+    }
+
+
 def test_zip_rejects_ambiguous_compact_six_to_eight_digit_values(
     spark: SparkSession,
 ) -> None:
@@ -574,10 +643,7 @@ columns:
     assert audits["Profile"].nested_error_paths == ["$.state"]
     assert audits["States"].nested_error_paths == ["$[1]"]
     assert audits["StateMap"].nested_error_paths == ["$['other']"]
-    assert all(
-        item.actions_applied == ["nested_parse_errors_resolved"]
-        for item in audits.values()
-    )
+    assert all(item.actions_applied == ["nested_parse_errors_resolved"] for item in audits.values())
 
 
 def test_datetime_defaults_accept_iso_and_us_12_hour_timestamp(spark: SparkSession) -> None:
@@ -702,16 +768,21 @@ columns:
             ).alias("value"),
         )
 
-        parsed_df = SparkDataFrameParser().parse_dataframe(
-            bronze_df,
-            config,
-            key_columns=["row_id"],
-        ).parsed_df
+        parsed_df = (
+            SparkDataFrameParser()
+            .parse_dataframe(
+                bronze_df,
+                config,
+                key_columns=["row_id"],
+            )
+            .parsed_df
+        )
         # Render timestamps inside Spark. Collecting TimestampType as a Python datetime uses the
         # host process timezone, which is separate from spark.sql.session.timeZone and would make
         # this assertion test the workstation rather than the parser expression.
         rows = (
-            parsed_df.orderBy("row_id").select(
+            parsed_df.orderBy("row_id")
+            .select(
                 "EventDate",
                 F.date_format("EventTimestamp", "yyyy-MM-dd HH:mm:ss.SSSSSS").alias(
                     "EventTimestampText"
@@ -719,7 +790,8 @@ columns:
                 F.date_format("EventTimestampNtz", "yyyy-MM-dd HH:mm:ss.SSSSSS").alias(
                     "EventTimestampNtzText"
                 ),
-            ).collect()
+            )
+            .collect()
         )
 
         assert rows[0].EventDate.isoformat() == "2026-09-30"
@@ -735,6 +807,142 @@ columns:
     finally:
         spark.conf.set("spark.sql.session.timeZone", previous_timezone)
         spark.conf.set("spark.sql.legacy.timeParserPolicy", previous_time_parser_policy)
+
+
+def test_temporal_default_literals_are_spark_timezone_owned_and_boundary_safe(
+    spark: SparkSession,
+) -> None:
+    """Avoid driver-local datetime conversion for naive, offset-aware, and year-one defaults."""
+    previous_timezone = spark.conf.get("spark.sql.session.timeZone")
+    spark.conf.set("spark.sql.session.timeZone", "UTC")
+    try:
+        config = YamlParserConfigCompiler().compile_text(
+            """
+parser_config_id: temporal_default_literals
+parser_config_name: Temporal Default Literals
+version: "1"
+columns:
+  - source_column_name: date_boundary
+    target_column_name: DateBoundary
+    expected_data_type: date
+    parser:
+      type: date
+      is_nullable: false
+      default_on_null: "0001-01-01"
+  - source_column_name: naive_timestamp
+    target_column_name: NaiveTimestamp
+    expected_data_type: timestamp
+    parser:
+      type: timestamp
+      is_nullable: false
+      default_on_null: "1970-01-01T00:00:00"
+  - source_column_name: aware_timestamp
+    target_column_name: AwareTimestamp
+    expected_data_type: timestamp
+    parser:
+      type: timestamp
+      is_nullable: false
+      default_on_null: "1970-01-01T00:00:00+05:00"
+  - source_column_name: local_timestamp
+    target_column_name: LocalTimestamp
+    expected_data_type: timestamp_ntz
+    parser:
+      type: timestamp_ntz
+      is_nullable: false
+      default_on_null: "1970-01-01T00:00:00"
+  - source_column_name: timestamp_boundary
+    target_column_name: TimestampBoundary
+    expected_data_type: timestamp
+    parser:
+      type: timestamp
+      is_nullable: false
+      default_on_null: "0001-01-01T00:00:00"
+"""
+        )
+        df = spark.range(1).select(
+            F.col("id").alias("row_id"),
+            *(
+                F.lit(None).cast("string").alias(name)
+                for name in (
+                    "date_boundary",
+                    "naive_timestamp",
+                    "aware_timestamp",
+                    "local_timestamp",
+                    "timestamp_boundary",
+                )
+            ),
+        )
+
+        parsed = (
+            SparkDataFrameParser()
+            .parse_dataframe(
+                df,
+                config,
+                key_columns=["row_id"],
+            )
+            .parsed_df
+        )
+        row = parsed.select(
+            F.date_format("DateBoundary", "yyyy-MM-dd").alias("DateBoundary"),
+            F.date_format("NaiveTimestamp", "yyyy-MM-dd HH:mm:ss").alias("NaiveTimestamp"),
+            F.date_format("AwareTimestamp", "yyyy-MM-dd HH:mm:ss").alias("AwareTimestamp"),
+            F.date_format("LocalTimestamp", "yyyy-MM-dd HH:mm:ss").alias("LocalTimestamp"),
+            F.date_format("TimestampBoundary", "yyyy-MM-dd HH:mm:ss").alias("TimestampBoundary"),
+        ).first()
+        assert row.asDict() == {
+            "DateBoundary": "0001-01-01",
+            "NaiveTimestamp": "1970-01-01 00:00:00",
+            "AwareTimestamp": "1969-12-31 19:00:00",
+            "LocalTimestamp": "1970-01-01 00:00:00",
+            "TimestampBoundary": "0001-01-01 00:00:00",
+        }
+    finally:
+        spark.conf.set("spark.sql.session.timeZone", previous_timezone)
+
+
+def test_complex_audit_preserves_timestamp_microseconds(spark: SparkSession) -> None:
+    """Serialize nested timestamp and timestamp_ntz values without millisecond truncation."""
+    previous_timezone = spark.conf.get("spark.sql.session.timeZone")
+    spark.conf.set("spark.sql.session.timeZone", "UTC")
+    try:
+        config = YamlParserConfigCompiler().compile_text(
+            """
+parser_config_id: timestamp_audit_precision
+parser_config_name: Timestamp Audit Precision
+version: "1"
+columns:
+  - source_column_name: payload
+    target_column_name: Payload
+    expected_data_type: struct<event:timestamp,local:timestamp_ntz>
+    parser:
+      type: struct
+      fields:
+        - {source_field_name: event, target_field_name: event, parser: timestamp}
+        - {source_field_name: local, target_field_name: local, parser: timestamp_ntz}
+      audit: true
+"""
+        )
+        df = spark.range(1).select(
+            F.lit(
+                '{"event":"2026-08-30T01:02:03.123456Z","local":"2026-08-30T01:02:03.654321"}'
+            ).alias("payload")
+        )
+
+        audit = (
+            SparkDataFrameParser()
+            .parse_dataframe(
+                df,
+                config,
+                key_columns=["payload"],
+            )
+            .results_df.first()
+            .spark_parser_parse_results[0]
+        )
+        assert audit.parsed_value == (
+            '{"event":"2026-08-30T01:02:03.123456Z","local":"2026-08-30T01:02:03.654321"}'
+        )
+    finally:
+        spark.conf.set("spark.sql.session.timeZone", previous_timezone)
 
 
 def test_top_level_and_nested_double_share_one_numeric_token_contract(
@@ -760,7 +968,24 @@ columns:
       on_element_error: null
 """
     )
-    tokens = ["1d", "1f", "0x1p3", "1e5", ".5", "+1.5", "007"]
+    tokens = [
+        "1d",
+        "1f",
+        "0x1p3",
+        ".",
+        "+.",
+        "-.",
+        ".e2",
+        "+.e2",
+        "-.e2",
+        "1e5",
+        ".5",
+        "-.5",
+        "+1.5",
+        "1.",
+        "1.e2",
+        "007",
+    ]
     bronze_df = spark.range(len(tokens)).select(
         F.col("id").cast("integer").alias("row_id"),
         F.element_at(
@@ -780,16 +1005,26 @@ columns:
         .collect()
     )
 
-    assert [row.Scalar for row in rows] == [None, None, None, 100000.0, 0.5, 1.5, 7.0]
-    assert [row.Nested[0] for row in rows] == [
+    expected = [
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
         None,
         None,
         None,
         100000.0,
         0.5,
+        -0.5,
         1.5,
+        1.0,
+        100.0,
         7.0,
     ]
+    assert [row.Scalar for row in rows] == expected
+    assert [row.Nested[0] for row in rows] == expected
 
 
 def test_ansi_and_non_ansi_modes_produce_identical_handled_outputs(
@@ -933,7 +1168,7 @@ columns:
     parsing = SparkDataFrameParser().parse_dataframe(
         spark.range(1).select(
             F.lit(1).cast("integer").alias("row_id"),
-            F.lit("{\"a'b\":\"bad\"}").alias("values"),
+            F.lit('{"a\'b":"bad"}').alias("values"),
         ),
         config,
         key_columns=["row_id"],
@@ -1016,6 +1251,215 @@ columns:
         SparkDataFrameParser().parse_dataframe(df, config, key_columns=["duplicate"])
 
 
+def test_schema_preflight_uses_sparks_active_case_resolver(spark: SparkSession) -> None:
+    """Reject resolver collisions before analysis while allowing exact names in strict mode."""
+    compiler = YamlParserConfigCompiler()
+    base_config = compiler.compile_text(
+        """
+parser_config_id: resolver_base
+parser_config_name: Resolver Base
+version: "1"
+columns:
+  - source_column_name: VALUE
+    target_column_name: Parsed
+    expected_data_type: string
+    parser: string
+"""
+    )
+    target_collision_config = compiler.compile_text(
+        """
+parser_config_id: resolver_targets
+parser_config_name: Resolver Targets
+version: "1"
+columns:
+  - source_column_name: Value
+    target_column_name: Output
+    expected_data_type: string
+    parser: string
+  - source_column_name: Value
+    target_column_name: output
+    expected_data_type: string
+    parser: string
+"""
+    )
+    unicode_distinct_config = compiler.compile_text(
+        """
+parser_config_id: resolver_unicode_distinct
+parser_config_name: Resolver Unicode Distinct
+version: "1"
+columns:
+  - source_column_name: ß
+    target_column_name: ß
+    expected_data_type: string
+    parser: string
+  - source_column_name: ss
+    target_column_name: ss
+    expected_data_type: string
+    parser: string
+"""
+    )
+    unicode_target_collision_config = compiler.compile_text(
+        """
+parser_config_id: resolver_unicode_targets
+parser_config_name: Resolver Unicode Targets
+version: "1"
+columns:
+  - source_column_name: Value
+    target_column_name: K
+    expected_data_type: string
+    parser: string
+  - source_column_name: Value
+    target_column_name: k
+    expected_data_type: string
+    parser: string
+"""
+    )
+    nested_source_collision_config = compiler.compile_text(
+        """
+parser_config_id: resolver_nested_sources
+parser_config_name: Resolver Nested Sources
+version: "1"
+columns:
+  - source_column_name: payload
+    target_column_name: Payload
+    expected_data_type: struct<x:string,y:string>
+    parser:
+      type: struct
+      fields:
+        - {source_field_name: A, target_field_name: x, parser: string}
+        - {source_field_name: a, target_field_name: y, parser: string}
+"""
+    )
+    nested_target_collision_config = compiler.compile_text(
+        """
+parser_config_id: resolver_nested_targets
+parser_config_name: Resolver Nested Targets
+version: "1"
+columns:
+  - source_column_name: payload
+    target_column_name: Payload
+    expected_data_type: struct<`K`:string,k:string>
+    parser:
+      type: struct
+      fields:
+        - {source_field_name: first, target_field_name: K, parser: string}
+        - {source_field_name: second, target_field_name: k, parser: string}
+"""
+    )
+    safe_df = spark.sql("SELECT 'ok' AS VALUE")
+    with pytest.raises(ValueError, match="column_prefix.*well-formed Unicode"):
+        SparkDataFrameParser().parse_dataframe(
+            safe_df,
+            base_config,
+            key_columns=["VALUE"],
+            column_prefix="bad\ud800prefix",
+        )
+    with pytest.raises(SchemaValidationError, match="key_columns.*well-formed Unicode"):
+        SparkDataFrameParser().parse_dataframe(
+            safe_df,
+            base_config,
+            key_columns=["bad\ud800key"],
+        )
+
+    previous_case_sensitive = spark.conf.get("spark.sql.caseSensitive")
+    try:
+        spark.conf.set("spark.sql.caseSensitive", "false")
+        case_mismatch = spark.sql("SELECT 'ok' AS value, 'key' AS row_id")
+        parsing = SparkDataFrameParser().parse_dataframe(
+            case_mismatch,
+            base_config,
+            key_columns=["ROW_ID"],
+        )
+        assert parsing.key_columns == ("ROW_ID",)
+        assert parsing.results_df.columns[0] == "ROW_ID"
+        assert parsing.parsed_df.first().Parsed == "ok"
+
+        ambiguous_source = spark.sql("SELECT 'one' AS Value, 'two' AS value")
+        with pytest.raises(
+            SchemaValidationError,
+            match="Configured input columns are ambiguous",
+        ):
+            SparkDataFrameParser().parse_dataframe(
+                ambiguous_source,
+                base_config,
+                key_columns=["Value"],
+            )
+
+        ambiguous_key = spark.sql("SELECT 'payload' AS VALUE, 'one' AS Key, 'two' AS key")
+        with pytest.raises(SchemaValidationError, match="key_columns are ambiguous"):
+            SparkDataFrameParser().parse_dataframe(
+                ambiguous_key,
+                base_config,
+                key_columns=["KEY"],
+            )
+
+        reserved_collision = spark.sql("SELECT 'ok' AS VALUE, 'occupied' AS SPARK_PARSER_CONFIG")
+        with pytest.raises(
+            SchemaValidationError,
+            match="reserved parser output columns",
+        ):
+            SparkDataFrameParser().parse_dataframe(
+                reserved_collision,
+                base_config,
+                key_columns=["VALUE"],
+            )
+
+        with pytest.raises(SchemaValidationError, match="target columns collide"):
+            SparkDataFrameParser().parse_dataframe(
+                spark.sql("SELECT 'one' AS Value"),
+                target_collision_config,
+                key_columns=["Value"],
+            )
+
+        unicode_distinct = SparkDataFrameParser().parse_dataframe(
+            spark.range(1).select(
+                F.lit("eszett").alias("ß"),
+                F.lit("double-s").alias("ss"),
+            ),
+            unicode_distinct_config,
+            key_columns=["ß"],
+        )
+        assert unicode_distinct.parsed_df.first().asDict() == {
+            "ß": "eszett",
+            "ss": "double-s",
+        }
+
+        with pytest.raises(SchemaValidationError, match="target columns collide"):
+            SparkDataFrameParser().parse_dataframe(
+                spark.sql("SELECT 'one' AS Value"),
+                unicode_target_collision_config,
+                key_columns=["Value"],
+            )
+
+        nested_df = spark.range(1).select(
+            F.lit("key").alias("row_id"),
+            F.lit('{"A":"one","a":"two"}').alias("payload"),
+        )
+        with pytest.raises(SchemaValidationError, match="struct source fields collide"):
+            SparkDataFrameParser().parse_dataframe(
+                nested_df,
+                nested_source_collision_config,
+                key_columns=["row_id"],
+            )
+        with pytest.raises(SchemaValidationError, match="struct target fields collide"):
+            SparkDataFrameParser().parse_dataframe(
+                nested_df,
+                nested_target_collision_config,
+                key_columns=["row_id"],
+            )
+
+        spark.conf.set("spark.sql.caseSensitive", "true")
+        exact = SparkDataFrameParser().parse_dataframe(
+            ambiguous_source,
+            target_collision_config,
+            key_columns=["value"],
+        )
+        assert exact.parsed_df.columns == ["Output", "output"]
+        assert exact.parsed_df.first().asDict() == {"Output": "one", "output": "one"}
+    finally:
+        spark.conf.set("spark.sql.caseSensitive", previous_case_sensitive)
+
+
 def test_fail_default_boolean_trim_and_decimal_runtime_contracts(
     spark: SparkSession,
 ) -> None:
@@ -1076,6 +1520,10 @@ columns:
     target_column_name: NbspValue
     expected_data_type: string
     parser: string
+  - source_column_name: unicode_space_value
+    target_column_name: UnicodeSpaceValue
+    expected_data_type: string
+    parser: string
   - source_column_name: decimal_value
     target_column_name: DecimalValue
     expected_data_type: decimal(18,2)
@@ -1091,7 +1539,7 @@ SELECT
   concat(char(160), 'x', char(160)) AS nbsp_value,
   '1.239' AS decimal_value
 """
-    )
+    ).withColumn("unicode_space_value", F.lit("\u2003A\u202fB\u3000"))
     parsing = SparkDataFrameParser().parse_dataframe(
         df,
         behavior_config,
@@ -1102,6 +1550,7 @@ SELECT
     assert row.BooleanValue is True
     assert row.TrimValue == "x"
     assert row.NbspValue == "x"
+    assert row.UnicodeSpaceValue == "A B"
     assert str(row.DecimalValue) == "1.24"
     audit = parsing.results_df.first().spark_parser_parse_results[0]
     assert audit.actions_applied == ["parse_error_default_applied"]
@@ -1332,6 +1781,56 @@ columns:
     assert bytes(row.Utf8Value) == b"Hi"
     audit = parsing.results_df.first().spark_parser_parse_results[0]
     assert audit.parsed_value == "SGk="
+
+
+def test_base64_runtime_uses_the_compilers_strict_padded_alphabet(
+    spark: SparkSession,
+) -> None:
+    """Reject Spark decoder extensions that are invalid for compiled Base64 defaults."""
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: strict_base64
+parser_config_name: Strict Base64
+version: "1"
+columns:
+  - source_column_name: value
+    target_column_name: Value
+    expected_data_type: binary
+    parser:
+      type: binary
+      encoding: base64
+      empty_is_null: false
+      on_parse_error: null
+"""
+    )
+    tokens = ["", "SGk=", "AAAA", "SGk", "S Gk=", "SG\tk=", "SGk!", "AAAA="]
+    rows = (
+        SparkDataFrameParser()
+        .parse_dataframe(
+            spark.range(len(tokens)).select(
+                F.col("id").alias("row_id"),
+                F.element_at(
+                    F.array(*(F.lit(token) for token in tokens)),
+                    (F.col("id") + 1).cast("integer"),
+                ).alias("value"),
+            ),
+            config,
+            key_columns=["row_id"],
+        )
+        .parsed_df.orderBy("row_id")
+        .collect()
+    )
+
+    assert [None if row.Value is None else bytes(row.Value) for row in rows] == [
+        b"",
+        b"Hi",
+        b"\x00\x00\x00",
+        None,
+        None,
+        None,
+        None,
+        None,
+    ]
 
 
 def test_integral_boundaries_reject_byte_wraparound(spark: SparkSession) -> None:
@@ -1576,6 +2075,40 @@ columns:
         spark.conf.set("spark.sql.legacy.timeParserPolicy", previous_policy)
 
 
+def test_invalid_custom_datetime_pattern_fails_during_dataframe_binding(
+    spark: SparkSession,
+) -> None:
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: invalid_custom_datetime
+parser_config_name: Invalid Custom Datetime
+version: "1"
+columns:
+  - source_column_name: occurred_at
+    target_column_name: OccurredAt
+    expected_data_type: timestamp
+    parser:
+      type: timestamp
+      formats: ['invalid[']
+      on_parse_error: null
+"""
+    )
+    previous_policy = spark.conf.get("spark.sql.legacy.timeParserPolicy")
+    try:
+        spark.conf.set("spark.sql.legacy.timeParserPolicy", "CORRECTED")
+        with pytest.raises(
+            SchemaValidationError,
+            match=r"Custom datetime format 'invalid\[' is invalid",
+        ):
+            SparkDataFrameParser().parse_dataframe(
+                spark.sql("SELECT 'anything' AS occurred_at"),
+                config,
+                key_columns=["occurred_at"],
+            )
+    finally:
+        spark.conf.set("spark.sql.legacy.timeParserPolicy", previous_policy)
+
+
 def test_nested_numeric_parser_rejects_json_wrapper_injection(spark: SparkSession) -> None:
     config = YamlParserConfigCompiler().compile_text(
         """
@@ -1633,6 +2166,15 @@ columns:
         - {source_field_name: a, target_field_name: a, parser: integer}
       on_parse_error: null
       audit: true
+  - source_column_name: duplicate_object
+    target_column_name: DuplicateObject
+    expected_data_type: struct<a:integer>
+    parser:
+      type: struct
+      fields:
+        - {source_field_name: a, target_field_name: a, parser: integer}
+      on_parse_error: null
+      audit: true
   - source_column_name: empty_array
     target_column_name: EmptyArray
     expected_data_type: array<string>
@@ -1646,7 +2188,10 @@ columns:
     expected_data_type: map<string,integer>
     parser:
       type: map
-      value_parser: integer
+      value_parser:
+        type: integer
+        is_nullable: false
+        default_on_null: -1
       on_parse_error: null
       audit: true
   - source_column_name: duplicate_map
@@ -1662,22 +2207,29 @@ columns:
     expected_data_type: array<map<string,integer>>
     parser:
       type: array
-      element_parser: {type: map, value_parser: integer}
+      element_parser:
+        type: map
+        value_parser:
+          type: integer
+          is_nullable: false
+          default_on_null: -1
       on_element_error: null
       audit: true
 """
     )
     df = spark.range(1).select(
         F.lit("{'a':1}").alias("object"),
+        F.lit('{"a":1,"unused":1,"unused":2}').alias("duplicate_object"),
         F.lit("[]").alias("empty_array"),
         F.lit("{}").alias("empty_map"),
-        F.lit('{"a":1,"a":2}').alias("duplicate_map"),
-        F.lit('[{"a":1,"a":2}]').alias("nested_duplicate_map"),
+        F.lit('{"a":null,"a":2}').alias("duplicate_map"),
+        F.lit('[{"a":null,"a":2}]').alias("nested_duplicate_map"),
     )
 
     parsing = SparkDataFrameParser().parse_dataframe(df, config, key_columns=["object"])
     row = parsing.parsed_df.first()
     assert row.Object is None
+    assert row.DuplicateObject is None
     assert row.EmptyArray == []
     assert row.EmptyMap == {}
     assert row.DuplicateMap is None
@@ -1689,9 +2241,127 @@ columns:
     }
     assert audits["Object"].nested_error_paths == ["$"]
     assert audits["Object"].actions_applied == ["parse_error_to_null"]
+    assert audits["DuplicateObject"].nested_error_paths == ["$"]
+    assert audits["DuplicateObject"].actions_applied == ["parse_error_to_null"]
     assert audits["DuplicateMap"].nested_error_paths == ["$"]
+    assert audits["DuplicateMap"].nested_default_on_null_paths == []
     assert audits["DuplicateMap"].actions_applied == ["parse_error_to_null"]
     assert audits["NestedDuplicateMap"].nested_error_paths == ["$[0]"]
+    assert audits["NestedDuplicateMap"].nested_default_on_null_paths == []
+    assert audits["NestedDuplicateMap"].actions_applied == ["nested_parse_errors_resolved"]
+
+
+def test_json_requires_one_complete_standard_container_token(spark: SparkSession) -> None:
+    """Reject valid prefixes, appended documents, and non-standard numeric tokens."""
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: strict_complete_json
+parser_config_name: Strict Complete JSON
+version: "1"
+columns:
+  - source_column_name: array_trailing
+    target_column_name: ArrayTrailing
+    expected_data_type: array<integer>
+    parser: {type: array, element_parser: integer, on_parse_error: null, audit: true}
+  - source_column_name: struct_trailing
+    target_column_name: StructTrailing
+    expected_data_type: struct<a:integer>
+    parser:
+      type: struct
+      fields:
+        - {source_field_name: a, target_field_name: a, parser: integer}
+      on_parse_error: null
+  - source_column_name: map_trailing
+    target_column_name: MapTrailing
+    expected_data_type: map<string,integer>
+    parser: {type: map, value_parser: integer, on_parse_error: null}
+  - source_column_name: array_early_close
+    target_column_name: ArrayEarlyClose
+    expected_data_type: array<integer>
+    parser: {type: array, element_parser: integer, on_parse_error: null, audit: true}
+  - source_column_name: struct_member_injection
+    target_column_name: StructMemberInjection
+    expected_data_type: struct<a:integer>
+    parser:
+      type: struct
+      fields:
+        - {source_field_name: a, target_field_name: a, parser: integer}
+      on_parse_error: null
+      audit: true
+  - source_column_name: map_member_injection
+    target_column_name: MapMemberInjection
+    expected_data_type: map<string,integer>
+    parser: {type: map, value_parser: integer, on_parse_error: null, audit: true}
+  - source_column_name: escaped_array
+    target_column_name: EscapedArray
+    expected_data_type: array<string>
+    parser: {type: array, element_parser: string, on_parse_error: null}
+  - source_column_name: nonfinite_array
+    target_column_name: NonfiniteArray
+    expected_data_type: array<string>
+    parser: {type: array, element_parser: string, on_parse_error: null}
+  - source_column_name: nonfinite_map
+    target_column_name: NonfiniteMap
+    expected_data_type: map<string,string>
+    parser: {type: map, value_parser: string, on_parse_error: null}
+  - source_column_name: nested_nonfinite
+    target_column_name: NestedNonfinite
+    expected_data_type: struct<payload:array<string>>
+    parser:
+      type: struct
+      fields:
+        - source_field_name: payload
+          target_field_name: payload
+          parser: {type: array, element_parser: string, on_parse_error: null}
+      audit: true
+"""
+    )
+    df = spark.range(1).select(
+        F.lit("[1] trailing").alias("array_trailing"),
+        F.lit('{"a":1}{"a":2}').alias("struct_trailing"),
+        F.lit('{"a":1} trailing').alias("map_trailing"),
+        F.lit("[]} ignored []").alias("array_early_close"),
+        F.lit('{"a":1}, "junk":1').alias("struct_member_injection"),
+        F.lit('{"a":1}, "junk":1').alias("map_member_injection"),
+        F.lit(json.dumps(["]", "{", 'quote " and slash \\'])).alias("escaped_array"),
+        F.lit("[NaN]").alias("nonfinite_array"),
+        F.lit('{"a":Infinity}').alias("nonfinite_map"),
+        F.lit('{"payload":"[NaN]"}').alias("nested_nonfinite"),
+    )
+
+    parsing = SparkDataFrameParser().parse_dataframe(
+        df,
+        config,
+        key_columns=["array_trailing"],
+    )
+    row = parsing.parsed_df.first()
+    assert row.asDict(recursive=True) == {
+        "ArrayTrailing": None,
+        "StructTrailing": None,
+        "MapTrailing": None,
+        "ArrayEarlyClose": None,
+        "StructMemberInjection": None,
+        "MapMemberInjection": None,
+        "EscapedArray": ["]", "{", 'quote " and slash \\'],
+        "NonfiniteArray": None,
+        "NonfiniteMap": None,
+        "NestedNonfinite": {"payload": None},
+    }
+    audits = {
+        item.target_column_name: item
+        for item in parsing.results_df.first().spark_parser_parse_results
+    }
+    assert audits["ArrayTrailing"].nested_error_paths == ["$"]
+    assert audits["ArrayTrailing"].actions_applied == ["parse_error_to_null"]
+    for target in (
+        "ArrayEarlyClose",
+        "StructMemberInjection",
+        "MapMemberInjection",
+    ):
+        assert audits[target].nested_error_paths == ["$"]
+        assert audits[target].actions_applied == ["parse_error_to_null"]
+    assert audits["NestedNonfinite"].nested_error_paths == ["$.payload"]
+    assert audits["NestedNonfinite"].actions_applied == ["nested_parse_errors_resolved"]
 
 
 def test_nested_delimited_arrays_honor_their_input_format(spark: SparkSession) -> None:
@@ -1745,13 +2415,17 @@ columns:
       audit: true
 """
     )
-    df = spark.range(1).select(
-        F.lit(1).alias("id"),
-        F.lit("null").alias("payload"),
-    ).union(
-        spark.range(1).select(
-            F.lit(2).alias("id"),
-            F.lit("NULL").alias("payload"),
+    df = (
+        spark.range(1)
+        .select(
+            F.lit(1).alias("id"),
+            F.lit("null").alias("payload"),
+        )
+        .union(
+            spark.range(1).select(
+                F.lit(2).alias("id"),
+                F.lit("NULL").alias("payload"),
+            )
         )
     )
 
@@ -1760,9 +2434,153 @@ columns:
         ["NULL_DEFAULT"],
         ["ERROR_DEFAULT"],
     ]
-    audits = {
-        row.id: row.spark_parser_parse_results[0]
-        for row in parsing.results_df.collect()
-    }
+    audits = {row.id: row.spark_parser_parse_results[0] for row in parsing.results_df.collect()}
     assert audits[1].actions_applied == ["json_null_to_null", "default_on_null_applied"]
     assert audits[2].actions_applied == ["parse_error_default_applied"]
+
+
+def test_complex_defaults_apply_recursive_child_final_value_contracts(
+    spark: SparkSession,
+) -> None:
+    """Apply child null defaults and zero invalidation inside parent complex defaults."""
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: recursive_complex_defaults
+parser_config_name: Recursive Complex Defaults
+version: "1"
+columns:
+  - source_column_name: array_value
+    target_column_name: ArrayValue
+    expected_data_type: array<integer>
+    parser:
+      type: array
+      element_parser:
+        type: integer
+        zero_is_valid: false
+        is_nullable: false
+        default_on_null: -1
+      is_nullable: false
+      default_on_null: [null, 0, 2]
+  - source_column_name: struct_value
+    target_column_name: StructValue
+    expected_data_type: struct<a:integer,values:array<integer>>
+    parser:
+      type: struct
+      fields:
+        - source_field_name: a
+          target_field_name: a
+          parser: {type: integer, is_nullable: false, default_on_null: 5}
+        - source_field_name: values
+          target_field_name: values
+          parser:
+            type: array
+            element_parser:
+              type: integer
+              zero_is_valid: false
+              is_nullable: false
+              default_on_null: 6
+      is_nullable: false
+      default_on_null: {a: null, values: [0, null]}
+  - source_column_name: map_value
+    target_column_name: MapValue
+    expected_data_type: map<string,integer>
+    parser:
+      type: map
+      value_parser:
+        type: integer
+        zero_is_valid: false
+        is_nullable: false
+        default_on_null: -1
+      is_nullable: false
+      default_on_null: {z: 0, a: null, m: 2}
+      audit: true
+"""
+    )
+    df = spark.range(1).select(
+        F.col("id").alias("row_id"),
+        F.lit(None).cast("string").alias("array_value"),
+        F.lit(None).cast("string").alias("struct_value"),
+        F.lit(None).cast("string").alias("map_value"),
+    )
+
+    parsing = SparkDataFrameParser().parse_dataframe(df, config, key_columns=["row_id"])
+    row = parsing.parsed_df.first()
+    assert row.ArrayValue == [-1, -1, 2]
+    assert row.StructValue.asDict(recursive=True) == {"a": 5, "values": [6, 6]}
+    assert row.MapValue == {"a": -1, "m": 2, "z": -1}
+    audit = parsing.results_df.first().spark_parser_parse_results[0]
+    assert audit.parsed_value == '{"a":-1,"m":2,"z":-1}'
+
+
+def test_nested_paths_and_map_results_are_unambiguous_and_deterministic(
+    spark: SparkSession,
+) -> None:
+    """Sort map keys and escape every unsafe dynamic or configured path segment."""
+    config = YamlParserConfigCompiler().compile_mapping(
+        {
+            "parser_config_id": "deterministic_paths",
+            "parser_config_name": "Deterministic Paths",
+            "version": "1",
+            "columns": [
+                {
+                    "source_column_name": "map_value",
+                    "target_column_name": "MapValue",
+                    "expected_data_type": "map<string,integer>",
+                    "parser": {
+                        "type": "map",
+                        "value_parser": "integer",
+                        "on_value_error": "null",
+                        "audit": True,
+                    },
+                },
+                {
+                    "source_column_name": "struct_value",
+                    "target_column_name": "StructValue",
+                    "expected_data_type": "struct<`a.b`:integer>",
+                    "parser": {
+                        "type": "struct",
+                        "fields": [
+                            {
+                                "source_field_name": "raw",
+                                "target_field_name": "a.b",
+                                "parser": {"type": "integer", "on_parse_error": "null"},
+                            }
+                        ],
+                        "audit": True,
+                    },
+                },
+            ],
+        }
+    )
+    map_value = {
+        "z": "bad",
+        "a.b": "bad",
+        "O'Brien": "bad",
+        "back\\slash": "bad",
+        "line\nbreak": "bad",
+        "雪": "bad",
+        "m": "1",
+    }
+    df = spark.range(1).select(
+        F.lit(json.dumps(map_value, ensure_ascii=False)).alias("map_value"),
+        F.lit('{"raw":"bad"}').alias("struct_value"),
+    )
+
+    parsing = SparkDataFrameParser().parse_dataframe(
+        df,
+        config,
+        key_columns=["map_value"],
+    )
+    audits = {
+        item.target_column_name: item
+        for item in parsing.results_df.first().spark_parser_parse_results
+    }
+    assert audits["MapValue"].nested_error_paths == [
+        "$['O\\'Brien']",
+        "$['a.b']",
+        "$['back\\\\slash']",
+        "$['line\\nbreak']",
+        "$['z']",
+        "$['雪']",
+    ]
+    assert audits["StructValue"].nested_error_paths == ["$['a.b']"]

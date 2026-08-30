@@ -11,14 +11,8 @@ from collections.abc import Sequence
 
 from pyspark import StorageLevel
 from pyspark.sql import DataFrame
-from pyspark.sql import functions as F
 
-
-def _column(name: str):
-    """Resolve one top-level column literally, including names containing dots or backticks."""
-    # Bare ``F.col(name)`` treats dots as nested-field separators. Backtick quoting keeps source and
-    # generated internal names literal and doubles embedded backticks using Spark SQL rules.
-    return F.col(f"`{name.replace('`', '``')}`")
+from spark_parser._spark_columns import literal_column as _column
 
 
 class DataFrameParsing:

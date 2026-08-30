@@ -26,8 +26,8 @@ globals:                                   # [optional; default: {}]
 
 columns:                                   # [required] Non-empty ordered list.
   # String parser
-  - source_column_name: string_value       # [required] Exact top-level bronze name.
-    target_column_name: StringValue        # [required] Non-empty, unique target name.
+  - source_column_name: string_value       # [required] Top-level name; Spark resolver applies.
+    target_column_name: StringValue        # [required] Exact duplicates/collisions are rejected.
     expected_data_type: string             # [required] Exact target Spark datatype.
     parser:                                # [required] Mapping or scalar `string`.
       type: string                         # [required in mapping form]
@@ -248,8 +248,13 @@ columns:                                   # [required] Non-empty ordered list.
       on_parse_error: fail
       # default_on_error: 1970-01-01
       audit: false
-      # US month-first defaults accept timestamps both with and without seconds.
-      formats: [yyyy-MM-dd, "MM/dd/yyyy h:mm a", "MM/dd/yyyy h:mm:ss a"] # [optional]
+      # Built-in defaults cover guarded ISO/SQL timestamps and both US month-first forms.
+      formats:                               # [optional; compiler defaults shown below]
+        - yyyy-MM-dd
+        - "yyyy-MM-dd'T'HH:mm:ss[.SSSSSS]"
+        - "yyyy-MM-dd HH:mm:ss[.SSSSSS]"
+        - "MM/dd/yyyy h:mm a"
+        - "MM/dd/yyyy h:mm:ss a"
 
   # Timestamp parser. Formats cascade in list order; the first successful parse wins.
   - source_column_name: timestamp_value
@@ -269,8 +274,13 @@ columns:                                   # [required] Non-empty ordered list.
       on_parse_error: fail
       # default_on_error: 1970-01-01T00:00:00
       audit: false
-      # US month-first defaults accept timestamps both with and without seconds.
-      formats: [yyyy-MM-dd HH:mm:ss, "MM/dd/yyyy h:mm a", "MM/dd/yyyy h:mm:ss a"] # [optional]
+      # Built-in defaults cover guarded ISO/SQL timestamps and both US month-first forms.
+      formats:                               # [optional; compiler defaults shown below]
+        - "yyyy-MM-dd'T'HH:mm:ss[.SSSSSS]XXX"
+        - "yyyy-MM-dd'T'HH:mm:ss[.SSSSSS]"
+        - "yyyy-MM-dd HH:mm:ss[.SSSSSS]"
+        - "MM/dd/yyyy h:mm a"
+        - "MM/dd/yyyy h:mm:ss a"
 
   # Timestamp without timezone. Represents local wall-clock time.
   - source_column_name: timestamp_ntz_value
@@ -290,8 +300,12 @@ columns:                                   # [required] Non-empty ordered list.
       on_parse_error: fail
       # default_on_error: 1970-01-01T00:00:00
       audit: false
-      # US month-first defaults accept timestamps both with and without seconds.
-      formats: [yyyy-MM-dd HH:mm:ss, "MM/dd/yyyy h:mm a", "MM/dd/yyyy h:mm:ss a"] # [optional]
+      # Built-in defaults cover guarded local timestamps and both US month-first forms.
+      formats:                               # [optional; compiler defaults shown below]
+        - "yyyy-MM-dd'T'HH:mm:ss[.SSSSSS]"
+        - "yyyy-MM-dd HH:mm:ss[.SSSSSS]"
+        - "MM/dd/yyyy h:mm a"
+        - "MM/dd/yyyy h:mm:ss a"
 
   # Array parser. JSON supports recursive element types; delimited supports scalar elements.
   - source_column_name: array_value

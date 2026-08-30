@@ -43,8 +43,7 @@ root = next(
     (
         path
         for path in [Path.cwd(), *Path.cwd().parents]
-        if (path / "pyproject.toml").is_file()
-        and (path / "src" / "spark_parser").is_dir()
+        if (path / "pyproject.toml").is_file() and (path / "src" / "spark_parser").is_dir()
     ),
     None,
 )
@@ -163,8 +162,9 @@ assert parser.normalize_data_type(" array < struct < amount : decimal(10, 2) > >
 # MAGIC - `version`
 # MAGIC - a non-empty ordered `columns` list
 # MAGIC
-# MAGIC Every column declares an exact source name, unique target name, expected Spark datatype, and
-# MAGIC parser. Global null and Boolean vocabularies are inherited by columns unless a column
+# MAGIC Every column declares a top-level source name, unique target name, expected Spark datatype,
+# MAGIC and parser. Source lookup and collision checks follow Spark's active case-sensitivity
+# MAGIC setting. Global null and Boolean vocabularies are inherited by columns unless a column
 # MAGIC explicitly replaces or extends them.
 # MAGIC
 # MAGIC This example deliberately demonstrates successful values, handled errors, recursive JSON,
@@ -505,8 +505,7 @@ display(target_df.orderBy("RecordId"))
 target_df.printSchema()
 
 target_rows = {
-    row.RecordId: row.asDict(recursive=True)
-    for row in target_df.orderBy("RecordId").collect()
+    row.RecordId: row.asDict(recursive=True) for row in target_df.orderBy("RecordId").collect()
 }
 
 successful = target_rows["customer-1"]
@@ -574,10 +573,7 @@ flattened_audit_df = audit_df.select(
 display(flattened_audit_df.orderBy("record_id", "target_column_name"))
 
 audit_rows = {
-    row.record_id: {
-        result.target_column_name: result
-        for result in row.spark_parser_parse_results
-    }
+    row.record_id: {result.target_column_name: result for result in row.spark_parser_parse_results}
     for row in audit_df.collect()
 }
 
@@ -619,7 +615,7 @@ assert handled_audit["Aliases"].actions_applied == ["parse_error_default_applied
 # MAGIC | `fail` | Raise when Spark materializes the failed parsed value. |
 # MAGIC | `null` | Replace the failed value with null. |
 # MAGIC | `default` | Use the required typed `default_on_error`. |
-# MAGIC | `preserve` | Keep the normalized string token; valid only for string positions. |
+# MAGIC | `preserve` | Keep the exact pre-normalization source token; valid only for string positions. |
 # MAGIC
 # MAGIC Arrays, structs, and maps also have child-error policies such as `drop`, `null`, and
 # MAGIC `fail`. Their audit paths are consolidated into the owning top-level audit record.

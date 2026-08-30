@@ -1,7 +1,10 @@
 """Focused tests for the strict YAML authoring contract."""
 
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from types import MappingProxyType
+from typing import Any
 
 import pytest
 
@@ -12,6 +15,7 @@ from spark_parser import (
     CompilationError,
     NullMarkersMode,
     ParseErrorMode,
+    ParserConfig,
     ParserConfigSerializer,
     ParserType,
     StringFormat,
@@ -26,6 +30,35 @@ from spark_parser.defaults import (
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TEST_CONFIG_PATH = REPO_ROOT / "tests" / "fixtures" / "test_config.yaml"
+
+
+def _compile_default(
+    expected_data_type: str,
+    value: Any,
+    **parser_options: Any,
+) -> ParserConfig:
+    """Compile one non-nullable column with a typed default through the public mapping API."""
+    parser_type = expected_data_type.split("<", 1)[0].split("(", 1)[0]
+    return YamlParserConfigCompiler().compile_mapping(
+        {
+            "parser_config_id": "default_test",
+            "parser_config_name": "Default Test",
+            "version": "1",
+            "columns": [
+                {
+                    "source_column_name": "value",
+                    "target_column_name": "Value",
+                    "expected_data_type": expected_data_type,
+                    "parser": {
+                        "type": parser_type,
+                        "is_nullable": False,
+                        "default_on_null": value,
+                        **parser_options,
+                    },
+                }
+            ],
+        }
+    )
 
 
 def test_recursive_spark_datatype_grammar_is_canonical() -> None:
@@ -188,9 +221,7 @@ def test_repository_example_compiles_with_resolved_options() -> None:
 
 
 def test_all_supported_parsers_compile() -> None:
-    config = YamlParserConfigCompiler().compile_path(
-        REPO_ROOT / "examples" / "all_parsers.yaml"
-    )
+    config = YamlParserConfigCompiler().compile_path(REPO_ROOT / "examples" / "all_parsers.yaml")
 
     assert [column.parser.parser_type for column in config.columns] == list(ParserType)
     assert config.columns[3].parser.on_parse_error is ParseErrorMode.FAIL
@@ -233,9 +264,7 @@ columns:
     assert PARSER_DEFAULTS["common"]["collapse_whitespace"] is True
     assert PARSER_DEFAULTS["date"]["formats"] == list(DEFAULT_DATE_FORMATS)
     assert PARSER_DEFAULTS["timestamp"]["formats"] == list(DEFAULT_TIMESTAMP_FORMATS)
-    assert PARSER_DEFAULTS["timestamp_ntz"]["formats"] == list(
-        DEFAULT_TIMESTAMP_NTZ_FORMATS
-    )
+    assert PARSER_DEFAULTS["timestamp_ntz"]["formats"] == list(DEFAULT_TIMESTAMP_NTZ_FORMATS)
 
 
 @pytest.mark.parametrize("value", ["1.0e+300", "1.0e-100"])
@@ -300,6 +329,45 @@ columns:
     valid = invalid.replace("timestamp_ntz", "timestamp")
     config = YamlParserConfigCompiler().compile_text(valid)
     assert config.columns[0].parser.default_on_null.utcoffset() is not None
+
+
+def test_timestamp_ntz_formats_reject_unquoted_timezone_fields() -> None:
+    compiler = YamlParserConfigCompiler()
+    for zone_field in "VvzOXxZ":
+        with pytest.raises(
+            CompilationError,
+            match="timestamp_ntz must not contain unquoted timezone or offset",
+        ):
+            compiler.compile_text(
+                f"""
+parser_config_id: timestamp_ntz_zone
+parser_config_name: Timestamp NTZ Zone
+version: "1"
+columns:
+  - source_column_name: value
+    target_column_name: Value
+    expected_data_type: timestamp_ntz
+    parser:
+      type: timestamp_ntz
+      formats: ["yyyy-MM-dd HH:mm:ss{zone_field}"]
+"""
+            )
+
+    quoted = compiler.compile_text(
+        """
+parser_config_id: timestamp_ntz_quoted_zone
+parser_config_name: Timestamp NTZ Quoted Zone
+version: "1"
+columns:
+  - source_column_name: value
+    target_column_name: Value
+    expected_data_type: timestamp_ntz
+    parser:
+      type: timestamp_ntz
+      formats: ["yyyy-MM-dd 'zone V' HH:mm:ss"]
+"""
+    )
+    assert quoted.columns[0].parser.formats == ("yyyy-MM-dd 'zone V' HH:mm:ss",)
 
 
 @pytest.mark.parametrize(
@@ -372,8 +440,7 @@ columns:
 
     assert config.columns[0].parser.on_parse_error is ParseErrorMode.PRESERVE
     assert (
-        config.columns[1].parser.field_parsers[0].parser.on_parse_error
-        is ParseErrorMode.PRESERVE
+        config.columns[1].parser.field_parsers[0].parser.on_parse_error is ParseErrorMode.PRESERVE
     )
     assert config.columns[2].parser.on_element_error is ChildErrorMode.PRESERVE
     assert config.columns[3].parser.on_value_error is ChildErrorMode.PRESERVE
@@ -475,7 +542,7 @@ columns:
 
 
 def test_duplicate_yaml_keys_fail() -> None:
-    with pytest.raises(CompilationError, match="Duplicate YAML key"):
+    with pytest.raises(CompilationError, match="Duplicate YAML key") as exc_info:
         YamlParserConfigCompiler().compile_text(
             """
 parser_config_id: duplicate
@@ -485,6 +552,7 @@ version: "1"
 columns: []
 """
         )
+    assert "line 3, column 1" in str(exc_info.value)
 
 
 def test_yaml_merge_keys_fail_with_an_actionable_message() -> None:
@@ -762,3 +830,538 @@ columns:
 
     assert config.columns[0].expected_data_type == canonical
     assert config.columns[0].parser.parser_type.value == canonical
+
+
+def test_ddl_nesting_has_a_deterministic_limit() -> None:
+    deepest_supported = "array<" * 64 + "string" + ">" * 64
+    assert parse_spark_data_type(deepest_supported).canonical == deepest_supported
+
+    too_deep = "array<" * 65 + "string" + ">" * 65
+    with pytest.raises(CompilationError, match="maximum depth of 64"):
+        parse_spark_data_type(too_deep)
+
+
+def test_decimal_parameters_use_bounded_ascii_integer_tokens() -> None:
+    assert parse_spark_data_type("decimal(00038,00002)").canonical == "decimal(38,2)"
+
+    for invalid in ("decimal(٣٨,2)", "decimal(²,2)"):
+        with pytest.raises(CompilationError, match="decimal precision"):
+            parse_spark_data_type(invalid)
+
+    with pytest.raises(CompilationError, match="Decimal precision"):
+        parse_spark_data_type(f"decimal({'9' * 5_000},2)")
+
+
+def test_ddl_unicode_fields_round_trip_and_unpaired_surrogates_fail() -> None:
+    parsed = parse_spark_data_type("struct<`emoji😀`:string>")
+    assert parse_spark_data_type(parsed.canonical) == parsed
+
+    with pytest.raises(CompilationError, match="well-formed Unicode"):
+        parse_spark_data_type("struct<`\ud800`:string>")
+
+
+def test_yaml_key_errors_include_source_location_and_depth_is_bounded() -> None:
+    compiler = YamlParserConfigCompiler()
+    with pytest.raises(CompilationError, match=r"hashable.*line 1, column 3"):
+        compiler.compile_text("? [a, b]\n: value\n")
+
+    with pytest.raises(CompilationError, match="YAML nesting exceeds the maximum depth of 64"):
+        compiler.compile_text("[" * 70 + "value" + "]" * 70)
+
+    huge_integer = "9" * 5_000
+    with pytest.raises(CompilationError):
+        compiler.compile_text(
+            f"""
+parser_config_id: {huge_integer}
+parser_config_name: Huge Integer
+version: "1"
+columns:
+  - source_column_name: value
+    target_column_name: Value
+    expected_data_type: string
+    parser: string
+"""
+        )
+
+
+def test_compiler_rejects_unpaired_surrogates_in_all_string_boundaries() -> None:
+    compiler = YamlParserConfigCompiler()
+    escaped_metadata = """
+parser_config_id: "\\uD800"
+parser_config_name: Invalid Unicode
+version: "1"
+columns:
+  - source_column_name: value
+    target_column_name: Value
+    expected_data_type: string
+    parser: string
+"""
+    with pytest.raises(CompilationError, match="well-formed Unicode"):
+        compiler.compile_text(escaped_metadata)
+
+    with pytest.raises(CompilationError, match="well-formed Unicode"):
+        _compile_default("string", "\ud800")
+
+    with pytest.raises(CompilationError, match="well-formed Unicode"):
+        _compile_default(
+            "map<string,string>",
+            {"\ud800": "value"},
+            value_parser="string",
+        )
+
+    with pytest.raises(CompilationError, match="well-formed Unicode"):
+        _compile_default(
+            "array<string>",
+            ["value"],
+            input_format="delimited",
+            delimiter="\ud800",
+            element_parser="string",
+        )
+
+
+def test_compile_path_reports_malformed_utf8(tmp_path: Path) -> None:
+    config_path = tmp_path / "invalid.yaml"
+    config_path.write_bytes(b"parser_config_id: \xff\n")
+
+    with pytest.raises(CompilationError, match="well-formed UTF-8"):
+        YamlParserConfigCompiler().compile_path(config_path)
+
+
+def test_complex_defaults_are_deeply_frozen_and_round_trip() -> None:
+    config = _compile_default(
+        "array<map<string,string>>",
+        [{"key": "value"}],
+        element_parser={"type": "map", "value_parser": "string"},
+    )
+    compiled_default = config.columns[0].parser.default_on_null
+
+    assert isinstance(compiled_default, tuple)
+    assert isinstance(compiled_default[0], MappingProxyType)
+    with pytest.raises(AttributeError):
+        compiled_default.append({})
+    with pytest.raises(TypeError):
+        compiled_default[0]["key"] = "mutated"
+
+    serializer = ParserConfigSerializer()
+    serialized = serializer.to_mapping(config)
+    round_tripped = YamlParserConfigCompiler().compile_mapping(serialized)
+    assert serializer.content_hash(round_tripped) == serializer.content_hash(config)
+    serialized["columns"][0]["parser"]["default_on_null"][0]["key"] = "changed"
+    assert compiled_default[0]["key"] == "value"
+
+
+def test_expanded_default_size_limit_has_an_exact_round_trip_boundary() -> None:
+    # The array container plus 9,999 scalar elements consumes the complete 10,000-node budget.
+    exact_boundary = list(range(9_999))
+    config = _compile_default(
+        "array<integer>",
+        exact_boundary,
+        element_parser="integer",
+    )
+    serializer = ParserConfigSerializer()
+    round_tripped = YamlParserConfigCompiler().compile_mapping(serializer.to_mapping(config))
+
+    assert len(config.columns[0].parser.default_on_null) == 9_999
+    assert serializer.content_hash(round_tripped) == serializer.content_hash(config)
+
+    with pytest.raises(CompilationError, match=r"default_on_null\[9999\].*10,000 nodes"):
+        _compile_default(
+            "array<integer>",
+            list(range(10_000)),
+            element_parser="integer",
+        )
+    with pytest.raises(CompilationError, match=r"default_on_null\[9999\].*10,000 nodes"):
+        _compile_default(
+            "array<integer>",
+            [None] * 10_000,
+            element_parser="integer",
+        )
+
+
+def test_expanded_default_budget_counts_map_keys_and_values() -> None:
+    oversized = {f"key{index}": index for index in range(5_000)}
+
+    with pytest.raises(CompilationError, match=r'default_on_null\["key4999"\].*10,000 nodes'):
+        _compile_default(
+            "map<string,integer>",
+            oversized,
+            value_parser="integer",
+        )
+
+
+def test_shared_default_aliases_cannot_evade_the_expanded_size_limit() -> None:
+    value: Any = 0
+    data_type = "integer"
+    parser: Any = "integer"
+    for _ in range(6):
+        # Only six unique list objects, but five aliases per level expand beyond 10,000 literals.
+        value = [value] * 5
+        data_type = f"array<{data_type}>"
+        parser = {"type": "array", "element_parser": parser}
+
+    with pytest.raises(
+        CompilationError,
+        match=r"default_on_null\[.*maximum expanded default size of 10,000 nodes",
+    ):
+        _compile_default(
+            data_type,
+            value,
+            element_parser=parser["element_parser"],
+        )
+
+
+def test_complex_default_cycles_report_the_reference_path() -> None:
+    direct_cycle: list[Any] = []
+    direct_cycle.append(direct_cycle)
+    with pytest.raises(CompilationError, match=r"default_on_null\[0\].*cyclic"):
+        _compile_default(
+            "array<array<integer>>",
+            direct_cycle,
+            element_parser={"type": "array", "element_parser": "integer"},
+        )
+
+    indirect_cycle: list[Any] = []
+    middle = [indirect_cycle]
+    indirect_cycle.append(middle)
+    with pytest.raises(CompilationError, match=r"default_on_null\[0\]\[0\].*cyclic"):
+        _compile_default(
+            "array<array<array<integer>>>",
+            indirect_cycle,
+            element_parser={
+                "type": "array",
+                "element_parser": {"type": "array", "element_parser": "integer"},
+            },
+        )
+
+    with pytest.raises(CompilationError, match=r"default_on_null\[0\].*cyclic"):
+        YamlParserConfigCompiler().compile_text(
+            """
+parser_config_id: cyclic_alias
+parser_config_name: Cyclic Alias
+version: "1"
+columns:
+  - source_column_name: value
+    target_column_name: Value
+    expected_data_type: array<array<integer>>
+    parser:
+      type: array
+      element_parser: {type: array, element_parser: integer}
+      is_nullable: false
+      default_on_null: &cycle [*cycle]
+"""
+        )
+
+
+@pytest.mark.parametrize(
+    ("data_type", "value", "element_parser", "expected_path"),
+    [
+        ("array<integer>", [1, "bad", 3], "integer", "default_on_null[1]"),
+        (
+            "array<array<integer>>",
+            [[1], [2, "bad"]],
+            {"type": "array", "element_parser": "integer"},
+            "default_on_null[1][1]",
+        ),
+    ],
+)
+def test_array_default_errors_include_the_full_element_path(
+    data_type: str,
+    value: Any,
+    element_parser: Any,
+    expected_path: str,
+) -> None:
+    with pytest.raises(CompilationError) as exc_info:
+        _compile_default(data_type, value, element_parser=element_parser)
+
+    assert f"{expected_path} for integer must be an integer" in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "expected_path"),
+    [
+        ("a.b", 'default_on_null["a.b"]'),
+        ("line\nbreak", 'default_on_null["line\\nbreak"]'),
+    ],
+)
+def test_struct_default_errors_quote_unsafe_field_paths(
+    field_name: str,
+    expected_path: str,
+) -> None:
+    expected_data_type = f"struct<`{field_name}`:integer>"
+    with pytest.raises(CompilationError) as exc_info:
+        _compile_default(
+            expected_data_type,
+            {field_name: "bad"},
+            fields=[
+                {
+                    "source_field_name": field_name,
+                    "target_field_name": field_name,
+                    "parser": "integer",
+                }
+            ],
+        )
+
+    message = str(exc_info.value)
+    assert f"{expected_path} for integer must be an integer" in message
+    assert "\n" not in message
+
+
+def test_binary_default_errors_quote_unsafe_struct_field_paths() -> None:
+    with pytest.raises(CompilationError) as exc_info:
+        _compile_default(
+            "struct<`a.b`:binary>",
+            {"a.b": "GG"},
+            fields=[
+                {
+                    "source_field_name": "a.b",
+                    "target_field_name": "a.b",
+                    "parser": {"type": "binary", "encoding": "hex"},
+                }
+            ],
+        )
+
+    assert 'default_on_null["a.b"] is not valid hex binary text' in str(exc_info.value)
+
+
+def test_decimal_defaults_are_canonical_at_the_declared_scale() -> None:
+    serializer = ParserConfigSerializer()
+    zero_configs = [_compile_default("decimal(2,2)", value) for value in ("0", "-0", "0E+999")]
+    assert {config.columns[0].parser.default_on_null for config in zero_configs} == {
+        Decimal("0.00")
+    }
+    assert len({serializer.content_hash(config) for config in zero_configs}) == 1
+
+    equivalent_configs = [
+        _compile_default("decimal(8,2)", value) for value in ("1.2", "1.20", "12E-1")
+    ]
+    assert all(
+        config.columns[0].parser.default_on_null == Decimal("1.20") for config in equivalent_configs
+    )
+    assert len({serializer.content_hash(config) for config in equivalent_configs}) == 1
+
+    scientific = _compile_default("decimal(8,2)", "1E+3")
+    assert scientific.columns[0].parser.default_on_null == Decimal("1000.00")
+    trailing_zeroes = _compile_default("decimal(8,2)", "1.2300")
+    assert str(trailing_zeroes.columns[0].parser.default_on_null) == "1.23"
+    with pytest.raises(CompilationError, match=r"does not fit decimal\(8,2\)"):
+        _compile_default("decimal(8,2)", "1.231")
+
+
+@pytest.mark.parametrize("value", ["20260830", "2026-W35-7", "2026-8-30", "2026-02-30"])
+def test_date_string_defaults_use_the_package_iso_grammar(value: str) -> None:
+    with pytest.raises(CompilationError, match="ISO YYYY-MM-DD"):
+        _compile_default("date", value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "2026-08-30",
+        "20260830T010203",
+        "2026-08-30 01:02:03",
+        "2026-08-30T01:02:03.1234567",
+        "2026-08-30T01:02:03+0500",
+        "2026-08-30T01:02:03+01:60",
+        "2026-08-30T01:02:03+01:99",
+        "2026-08-30T01:02:03+18:01",
+        "2026-08-30T01:02:03+23:59",
+        "2026-08-30T01:02:03+24:00",
+    ],
+)
+def test_timestamp_string_defaults_use_the_package_iso_grammar(value: str) -> None:
+    with pytest.raises(CompilationError, match="must use ISO"):
+        _compile_default("timestamp", value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "2026-08-30 01:02:03",
+        "2026-08-30t01:02:03Z",
+        "2026-08-30T01:02:03.1234567",
+    ],
+)
+def test_implicitly_tagged_yaml_timestamps_still_use_package_grammar(value: str) -> None:
+    with pytest.raises(CompilationError, match="must use ISO"):
+        YamlParserConfigCompiler().compile_text(
+            f"""
+parser_config_id: timestamp_default
+parser_config_name: Timestamp Default
+version: "1"
+columns:
+  - source_column_name: value
+    target_column_name: Value
+    expected_data_type: timestamp
+    parser:
+      type: timestamp
+      is_nullable: false
+      default_on_null: {value}
+"""
+        )
+
+
+def test_strict_date_and_timestamp_defaults_accept_canonical_forms() -> None:
+    date_config = _compile_default("date", "2026-08-30")
+    assert date_config.columns[0].parser.default_on_null.isoformat() == "2026-08-30"
+
+    timestamp_config = _compile_default("timestamp", "2026-08-30T01:02:03.123456Z")
+    timestamp_default = timestamp_config.columns[0].parser.default_on_null
+    assert timestamp_default.isoformat() == "2026-08-30T01:02:03.123456+00:00"
+
+    maximum_offset = _compile_default("timestamp", "2026-08-30T01:02:03+18:00")
+    assert maximum_offset.columns[0].parser.default_on_null.isoformat() == (
+        "2026-08-29T07:02:03+00:00"
+    )
+
+    yaml_config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: timestamp_default
+parser_config_name: Timestamp Default
+version: "1"
+columns:
+  - source_column_name: value
+    target_column_name: Value
+    expected_data_type: timestamp
+    parser:
+      type: timestamp
+      is_nullable: false
+      default_on_null: 2026-08-30T01:02:03Z
+"""
+    )
+    assert yaml_config.columns[0].parser.default_on_null == timestamp_default.replace(microsecond=0)
+
+
+def test_datetime_defaults_require_round_trip_safe_timezone_offsets() -> None:
+    invalid_offset = datetime(
+        2026,
+        8,
+        30,
+        1,
+        2,
+        3,
+        tzinfo=timezone(timedelta(seconds=30)),
+    )
+    with pytest.raises(CompilationError, match="whole-minute timezone offset"):
+        _compile_default("timestamp", invalid_offset)
+
+    valid_offset = datetime(
+        2026,
+        8,
+        30,
+        1,
+        2,
+        3,
+        tzinfo=timezone(timedelta(hours=5, minutes=45)),
+    )
+    config = _compile_default("timestamp", valid_offset)
+    assert config.columns[0].parser.default_on_null == datetime(
+        2026,
+        8,
+        29,
+        19,
+        17,
+        3,
+        tzinfo=timezone.utc,
+    )
+    serializer = ParserConfigSerializer()
+    round_tripped = YamlParserConfigCompiler().compile_mapping(serializer.to_mapping(config))
+    assert serializer.content_hash(round_tripped) == serializer.content_hash(config)
+
+
+def test_equivalent_aware_timestamp_offsets_share_content_identity() -> None:
+    offset_config = _compile_default(
+        "timestamp",
+        "2026-08-30T01:02:03.123456+05:45",
+    )
+    utc_config = _compile_default(
+        "timestamp",
+        "2026-08-29T19:17:03.123456Z",
+    )
+    serializer = ParserConfigSerializer()
+
+    assert (
+        offset_config.columns[0].parser.default_on_null
+        == utc_config.columns[0].parser.default_on_null
+    )
+    assert serializer.content_hash(offset_config) == serializer.content_hash(utc_config)
+    assert (
+        serializer.to_mapping(offset_config)["columns"][0]["parser"]["default_on_null"]
+        == "2026-08-29T19:17:03.123456+00:00"
+    )
+
+
+@pytest.mark.parametrize("value", ["", "F", "abc", "ABC12"])
+def test_hex_defaults_follow_spark_unhex_grammar(value: str) -> None:
+    config = _compile_default("binary", value, encoding="hex")
+    assert config.columns[0].parser.default_on_null == value
+
+
+@pytest.mark.parametrize("value", ["01 AF", "0x12", "Ａ", "é"])
+def test_hex_defaults_reject_whitespace_prefixes_and_non_ascii(value: str) -> None:
+    with pytest.raises(CompilationError, match="not valid hex binary text"):
+        _compile_default("binary", value, encoding="hex")
+
+
+def test_float_conversion_range_failures_are_compilation_errors() -> None:
+    with pytest.raises(CompilationError, match="double must be finite"):
+        _compile_default("double", 10**10_000)
+
+    for parser_type in ("float", "double"):
+        with pytest.raises(CompilationError, match="underflows to zero"):
+            _compile_default(parser_type, Decimal("1E-10000"))
+
+
+def test_duplicate_scans_report_each_name_once_in_sorted_order() -> None:
+    with pytest.raises(CompilationError, match=r"duplicate fields: \['a', 'b'\]"):
+        parse_spark_data_type("struct<b:string,a:string,b:string,a:string,b:string>")
+
+    payload = {
+        "parser_config_id": "duplicates",
+        "parser_config_name": "Duplicates",
+        "version": "1",
+        "columns": [
+            {
+                "source_column_name": str(index),
+                "target_column_name": name,
+                "expected_data_type": "string",
+                "parser": "string",
+            }
+            for index, name in enumerate(("b", "a", "b", "a", "b"))
+        ],
+    }
+    with pytest.raises(
+        CompilationError,
+        match=r"Duplicate target_column_name values: \['a', 'b'\]",
+    ):
+        YamlParserConfigCompiler().compile_mapping(payload)
+
+    with pytest.raises(CompilationError, match=r"duplicate source fields \['raw'\]"):
+        YamlParserConfigCompiler().compile_mapping(
+            {
+                "parser_config_id": "struct_duplicates",
+                "parser_config_name": "Struct Duplicates",
+                "version": "1",
+                "columns": [
+                    {
+                        "source_column_name": "object",
+                        "target_column_name": "Object",
+                        "expected_data_type": "struct<a:string,b:string>",
+                        "parser": {
+                            "type": "struct",
+                            "fields": [
+                                {
+                                    "source_field_name": "raw",
+                                    "target_field_name": "a",
+                                    "parser": "string",
+                                },
+                                {
+                                    "source_field_name": "raw",
+                                    "target_field_name": "b",
+                                    "parser": "string",
+                                },
+                            ],
+                        },
+                    }
+                ],
+            }
+        )

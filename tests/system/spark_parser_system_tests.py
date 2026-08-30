@@ -22,8 +22,7 @@ root = next(
     (
         path
         for path in [Path.cwd(), *Path.cwd().parents]
-        if (path / "pyproject.toml").is_file()
-        and (path / "src" / "spark_parser").is_dir()
+        if (path / "pyproject.toml").is_file() and (path / "src" / "spark_parser").is_dir()
     ),
     None,
 )
@@ -65,10 +64,7 @@ def _rows_by_key(df, key):
 def _audit_by_key(df, key, results_column):
     """Index each row's audit structs by target column name."""
     return {
-        row[key]: {
-            result.target_column_name: result
-            for result in row[results_column]
-        }
+        row[key]: {result.target_column_name: result for result in row[results_column]}
         for row in df.collect()
     }
 

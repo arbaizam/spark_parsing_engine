@@ -5,7 +5,8 @@ from this module. A default must never be duplicated as an unrelated literal els
 one here should make the effective behavior and its public description change together.
 """
 
-from typing import Final
+from collections.abc import Mapping
+from typing import Any, Final, NoReturn
 
 from spark_parser.enums import (
     BinaryEncoding,
@@ -43,22 +44,14 @@ SQL_LOCAL_TIMESTAMP_FORMAT: Final = "yyyy-MM-dd HH:mm:ss[.SSSSSS]"
 # defaults and runtime guards cannot drift apart.
 BUILTIN_DATETIME_FORMAT_SHAPES: Final[dict[str, str]] = {
     "yyyy-MM-dd": r"^\d{4}-\d{2}-\d{2}$",
-    ISO_LOCAL_TIMESTAMP_FORMAT: (
-        r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?$"
-    ),
+    ISO_LOCAL_TIMESTAMP_FORMAT: (r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?$"),
     ISO_OFFSET_TIMESTAMP_FORMAT: (
         r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?"
         r"(?:Z|[+-]\d{2}:\d{2})$"
     ),
-    SQL_LOCAL_TIMESTAMP_FORMAT: (
-        r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{1,6})?$"
-    ),
-    US_MONTH_FIRST_12_HOUR_FORMAT: (
-        r"^\d{2}/\d{2}/\d{4} \d{1,2}:\d{2} [AaPp][Mm]$"
-    ),
-    US_MONTH_FIRST_12_HOUR_SECONDS_FORMAT: (
-        r"^\d{2}/\d{2}/\d{4} \d{1,2}:\d{2}:\d{2} [AaPp][Mm]$"
-    ),
+    SQL_LOCAL_TIMESTAMP_FORMAT: (r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{1,6})?$"),
+    US_MONTH_FIRST_12_HOUR_FORMAT: (r"^\d{2}/\d{2}/\d{4} \d{1,2}:\d{2} [AaPp][Mm]$"),
+    US_MONTH_FIRST_12_HOUR_SECONDS_FORMAT: (r"^\d{2}/\d{2}/\d{4} \d{1,2}:\d{2}:\d{2} [AaPp][Mm]$"),
 }
 # Date inputs often arrive as an ISO date/local timestamp, a SQL-style local timestamp, or a US
 # reporting-system timestamp whose time is irrelevant to the target date. Keep ISO first because it
@@ -102,14 +95,15 @@ DEFAULT_DROP_NULL_ELEMENTS: Final = False
 DEFAULT_ARRAY_DISTINCT: Final = False
 DEFAULT_DROP_NULL_VALUES: Final = False
 
-# JSON-compatible public view used by documentation and authoring clients. Lists are intentional
-# here: callers expect JSON-shaped data, while the immutable runtime models use tuples.
-PARSER_DEFAULTS: Final = {
+# Immutable canonical view used by metadata and authoring clients. ``parser.defaults()`` returns a
+# detached JSON-shaped copy with lists, while this exported mapping cannot be mutated process-wide
+# and made to disagree with the compiler's individual constants above.
+_PARSER_DEFAULTS: Final[dict[str, dict[str, Any]]] = {
     "globals": {
-        "null_markers": list(DEFAULT_NULL_MARKERS),
+        "null_markers": DEFAULT_NULL_MARKERS,
         "null_marker_case_sensitive": DEFAULT_NULL_MARKER_CASE_SENSITIVE,
-        "true_values": list(DEFAULT_BOOLEAN_TRUE_VALUES),
-        "false_values": list(DEFAULT_BOOLEAN_FALSE_VALUES),
+        "true_values": DEFAULT_BOOLEAN_TRUE_VALUES,
+        "false_values": DEFAULT_BOOLEAN_FALSE_VALUES,
         "boolean_case_sensitive": DEFAULT_BOOLEAN_CASE_SENSITIVE,
     },
     "common": {
@@ -117,7 +111,7 @@ PARSER_DEFAULTS: Final = {
         "trim_whitespace": DEFAULT_TRIM_WHITESPACE,
         "empty_is_null": DEFAULT_EMPTY_IS_NULL,
         "replace_null_markers": DEFAULT_REPLACE_NULL_MARKERS,
-        "null_markers": list(DEFAULT_NULL_MARKERS),
+        "null_markers": DEFAULT_NULL_MARKERS,
         "null_markers_mode": DEFAULT_NULL_MARKERS_MODE.value,
         "null_marker_case_sensitive": DEFAULT_NULL_MARKER_CASE_SENSITIVE,
         "is_nullable": DEFAULT_IS_NULLABLE,
@@ -126,9 +120,9 @@ PARSER_DEFAULTS: Final = {
     },
     "string": {"format": DEFAULT_STRING_FORMAT},
     "numeric": {"zero_is_valid": DEFAULT_ZERO_IS_VALID},
-    "date": {"formats": list(DEFAULT_DATE_FORMATS)},
-    "timestamp": {"formats": list(DEFAULT_TIMESTAMP_FORMATS)},
-    "timestamp_ntz": {"formats": list(DEFAULT_TIMESTAMP_NTZ_FORMATS)},
+    "date": {"formats": DEFAULT_DATE_FORMATS},
+    "timestamp": {"formats": DEFAULT_TIMESTAMP_FORMATS},
+    "timestamp_ntz": {"formats": DEFAULT_TIMESTAMP_NTZ_FORMATS},
     "binary": {"encoding": DEFAULT_BINARY_ENCODING.value},
     "array": {
         "collapse_whitespace": False,
@@ -148,9 +142,70 @@ PARSER_DEFAULTS: Final = {
         "drop_null_values": DEFAULT_DROP_NULL_VALUES,
     },
     "boolean": {
-        "true_values": list(DEFAULT_BOOLEAN_TRUE_VALUES),
-        "false_values": list(DEFAULT_BOOLEAN_FALSE_VALUES),
+        "true_values": DEFAULT_BOOLEAN_TRUE_VALUES,
+        "false_values": DEFAULT_BOOLEAN_FALSE_VALUES,
         "boolean_case_sensitive": DEFAULT_BOOLEAN_CASE_SENSITIVE,
         "boolean_values_mode": DEFAULT_BOOLEAN_VALUES_MODE.value,
     },
 }
+
+
+class _ImmutableDefaults(dict[str, Any]):
+    """JSON-serializable dictionary that rejects process-wide default mutation."""
+
+    @staticmethod
+    def _reject_mutation(*_args: Any, **_kwargs: Any) -> NoReturn:
+        raise TypeError("PARSER_DEFAULTS is immutable; call parser.defaults() for a mutable copy.")
+
+    __setitem__ = _reject_mutation
+    __delitem__ = _reject_mutation
+    clear = _reject_mutation
+    pop = _reject_mutation
+    popitem = _reject_mutation
+    setdefault = _reject_mutation
+    update = _reject_mutation
+    __ior__ = _reject_mutation
+
+
+class _ImmutableList(list[Any]):
+    """List-compatible default value that cannot mutate shared package state."""
+
+    @staticmethod
+    def _reject_mutation(*_args: Any, **_kwargs: Any) -> NoReturn:
+        raise TypeError("PARSER_DEFAULTS is immutable; call parser.defaults() for a mutable copy.")
+
+    __setitem__ = _reject_mutation
+    __delitem__ = _reject_mutation
+    __iadd__ = _reject_mutation
+    __imul__ = _reject_mutation
+    append = _reject_mutation
+    clear = _reject_mutation
+    extend = _reject_mutation
+    insert = _reject_mutation
+    pop = _reject_mutation
+    remove = _reject_mutation
+    reverse = _reject_mutation
+    sort = _reject_mutation
+
+
+PARSER_DEFAULTS: Final[Mapping[str, Mapping[str, Any]]] = _ImmutableDefaults(
+    {
+        section: _ImmutableDefaults(
+            {
+                key: _ImmutableList(value) if isinstance(value, tuple) else value
+                for key, value in values.items()
+            }
+        )
+        for section, values in _PARSER_DEFAULTS.items()
+    }
+)
+
+
+def parser_defaults() -> dict[str, dict[str, Any]]:
+    """Return a detached JSON-compatible copy of every effective authoring default."""
+    return {
+        section: {
+            key: list(value) if isinstance(value, tuple) else value for key, value in values.items()
+        }
+        for section, values in _PARSER_DEFAULTS.items()
+    }

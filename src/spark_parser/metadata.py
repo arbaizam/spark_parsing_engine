@@ -10,7 +10,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
-from spark_parser.defaults import PARSER_DEFAULTS
+from spark_parser.defaults import parser_defaults
 from spark_parser.enums import (
     NUMERIC_PARSER_TYPES,
     BinaryEncoding,
@@ -20,6 +20,8 @@ from spark_parser.enums import (
     ParserType,
     StringFormat,
 )
+
+_PARSER_DEFAULTS = parser_defaults()
 
 
 def _argument(
@@ -54,12 +56,12 @@ _COMMON_ARGUMENTS = [
     ),
     _argument(
         "collapse_whitespace",
-        default=PARSER_DEFAULTS["common"]["collapse_whitespace"],
+        default=_PARSER_DEFAULTS["common"]["collapse_whitespace"],
         description="Collapse every run of whitespace, including internal whitespace, to one space.",
     ),
     _argument(
         "trim_whitespace",
-        default=PARSER_DEFAULTS["common"]["trim_whitespace"],
+        default=_PARSER_DEFAULTS["common"]["trim_whitespace"],
         description=(
             "Remove leading and trailing spaces, tabs, line breaks, and non-breaking spaces "
             "after collapse_whitespace."
@@ -67,35 +69,35 @@ _COMMON_ARGUMENTS = [
     ),
     _argument(
         "empty_is_null",
-        default=PARSER_DEFAULTS["common"]["empty_is_null"],
+        default=_PARSER_DEFAULTS["common"]["empty_is_null"],
         description="Convert an empty normalized string to null.",
     ),
     _argument(
         "replace_null_markers",
-        default=PARSER_DEFAULTS["common"]["replace_null_markers"],
+        default=_PARSER_DEFAULTS["common"]["replace_null_markers"],
         description="Convert matching null-marker strings to null; markers are inert when false.",
     ),
     _argument(
         "null_markers",
-        default=PARSER_DEFAULTS["common"]["null_markers"],
+        default=_PARSER_DEFAULTS["common"]["null_markers"],
         default_kind="inherited_global",
         description="Column null tokens; inherited from globals when omitted.",
     ),
     _argument(
         "null_markers_mode",
-        default=PARSER_DEFAULTS["common"]["null_markers_mode"],
+        default=_PARSER_DEFAULTS["common"]["null_markers_mode"],
         allowed_values=["replace", "extend"],
         description="Replace or extend global null markers when column null_markers are supplied.",
     ),
     _argument(
         "null_marker_case_sensitive",
-        default=PARSER_DEFAULTS["common"]["null_marker_case_sensitive"],
+        default=_PARSER_DEFAULTS["common"]["null_marker_case_sensitive"],
         default_kind="inherited_global",
         description="Use exact-case null matching when true; compare lowercase values when false.",
     ),
     _argument(
         "is_nullable",
-        default=PARSER_DEFAULTS["common"]["is_nullable"],
+        default=_PARSER_DEFAULTS["common"]["is_nullable"],
         description="Allow the final target value to remain null.",
     ),
     _argument(
@@ -105,7 +107,7 @@ _COMMON_ARGUMENTS = [
     ),
     _argument(
         "on_parse_error",
-        default=PARSER_DEFAULTS["common"]["on_parse_error"],
+        default=_PARSER_DEFAULTS["common"]["on_parse_error"],
         allowed_values=["fail", "null", "default"],
         description=(
             "Raise at Spark action time, return null, or assign default_on_error. String parsers "
@@ -119,7 +121,7 @@ _COMMON_ARGUMENTS = [
     ),
     _argument(
         "audit",
-        default=PARSER_DEFAULTS["common"]["audit"],
+        default=_PARSER_DEFAULTS["common"]["audit"],
         description="Include row-level details for this column in the audit struct array.",
     ),
 ]
@@ -129,7 +131,7 @@ def _zero_is_valid_argument() -> dict[str, Any]:
     """Return a fresh shared numeric-argument description."""
     return _argument(
         "zero_is_valid",
-        default=PARSER_DEFAULTS["numeric"]["zero_is_valid"],
+        default=_PARSER_DEFAULTS["numeric"]["zero_is_valid"],
         description="Keep zero when true; convert zero to null before default_on_null when false.",
     )
 
@@ -141,7 +143,7 @@ _SPECIFIC_ARGUMENTS: dict[ParserType, list[dict[str, Any]]] = {
     ParserType.STRING: [
         _argument(
             "format",
-            default=PARSER_DEFAULTS["string"]["format"],
+            default=_PARSER_DEFAULTS["string"]["format"],
             allowed_values=["null", "none", *(member.value for member in StringFormat)],
             description="Optional deterministic string formatting profile.",
         )
@@ -149,7 +151,7 @@ _SPECIFIC_ARGUMENTS: dict[ParserType, list[dict[str, Any]]] = {
     ParserType.BINARY: [
         _argument(
             "encoding",
-            default=PARSER_DEFAULTS["binary"]["encoding"],
+            default=_PARSER_DEFAULTS["binary"]["encoding"],
             allowed_values=[member.value for member in BinaryEncoding],
             description="Decode the normalized bronze string as base64, hexadecimal, or UTF-8 bytes.",
         )
@@ -157,25 +159,25 @@ _SPECIFIC_ARGUMENTS: dict[ParserType, list[dict[str, Any]]] = {
     ParserType.BOOLEAN: [
         _argument(
             "true_values",
-            default=PARSER_DEFAULTS["boolean"]["true_values"],
+            default=_PARSER_DEFAULTS["boolean"]["true_values"],
             default_kind="inherited_global",
             description="Non-empty tokens mapped to true.",
         ),
         _argument(
             "false_values",
-            default=PARSER_DEFAULTS["boolean"]["false_values"],
+            default=_PARSER_DEFAULTS["boolean"]["false_values"],
             default_kind="inherited_global",
             description="Non-empty tokens mapped to false; may not overlap true_values.",
         ),
         _argument(
             "boolean_values_mode",
-            default=PARSER_DEFAULTS["boolean"]["boolean_values_mode"],
+            default=_PARSER_DEFAULTS["boolean"]["boolean_values_mode"],
             allowed_values=["replace", "extend"],
             description="Replace or extend global Boolean tokens when column tokens are supplied.",
         ),
         _argument(
             "boolean_case_sensitive",
-            default=PARSER_DEFAULTS["boolean"]["boolean_case_sensitive"],
+            default=_PARSER_DEFAULTS["boolean"]["boolean_case_sensitive"],
             default_kind="inherited_global",
             description="Use exact-case Boolean-token matching when true.",
         ),
@@ -183,28 +185,28 @@ _SPECIFIC_ARGUMENTS: dict[ParserType, list[dict[str, Any]]] = {
     ParserType.DATE: [
         _argument(
             "formats",
-            default=PARSER_DEFAULTS["date"]["formats"],
+            default=_PARSER_DEFAULTS["date"]["formats"],
             description="Non-empty Spark datetime patterns tried in list order; first success wins.",
         )
     ],
     ParserType.TIMESTAMP: [
         _argument(
             "formats",
-            default=PARSER_DEFAULTS["timestamp"]["formats"],
+            default=_PARSER_DEFAULTS["timestamp"]["formats"],
             description="Non-empty Spark datetime patterns tried in list order; first success wins.",
         )
     ],
     ParserType.TIMESTAMP_NTZ: [
         _argument(
             "formats",
-            default=PARSER_DEFAULTS["timestamp_ntz"]["formats"],
+            default=_PARSER_DEFAULTS["timestamp_ntz"]["formats"],
             description="Non-empty Spark datetime patterns tried in list order without timezone conversion.",
         )
     ],
     ParserType.ARRAY: [
         _argument(
             "input_format",
-            default=PARSER_DEFAULTS["array"]["input_format"],
+            default=_PARSER_DEFAULTS["array"]["input_format"],
             allowed_values=[member.value for member in ComplexInputFormat],
             description="Parse a JSON array or split a scalar array using a literal delimiter.",
         ),
@@ -220,7 +222,7 @@ _SPECIFIC_ARGUMENTS: dict[ParserType, list[dict[str, Any]]] = {
         ),
         _argument(
             "on_element_error",
-            default=PARSER_DEFAULTS["array"]["on_element_error"],
+            default=_PARSER_DEFAULTS["array"]["on_element_error"],
             allowed_values=[member.value for member in ChildErrorMode],
             description=(
                 "Fail the row, route null through element final-null handling, drop an invalid "
@@ -229,19 +231,19 @@ _SPECIFIC_ARGUMENTS: dict[ParserType, list[dict[str, Any]]] = {
         ),
         _argument(
             "drop_null_elements",
-            default=PARSER_DEFAULTS["array"]["drop_null_elements"],
+            default=_PARSER_DEFAULTS["array"]["drop_null_elements"],
             description="Remove source nulls and values resolved to null after parsing.",
         ),
         _argument(
             "distinct",
-            default=PARSER_DEFAULTS["array"]["distinct"],
+            default=_PARSER_DEFAULTS["array"]["distinct"],
             description="Remove duplicate parsed elements while preserving first occurrence order.",
         ),
     ],
     ParserType.STRUCT: [
         _argument(
             "input_format",
-            default=PARSER_DEFAULTS["struct"]["input_format"],
+            default=_PARSER_DEFAULTS["struct"]["input_format"],
             allowed_values=[ComplexInputFormat.JSON.value],
             description="Struct values are parsed from JSON objects.",
         ),
@@ -254,7 +256,7 @@ _SPECIFIC_ARGUMENTS: dict[ParserType, list[dict[str, Any]]] = {
     ParserType.MAP: [
         _argument(
             "input_format",
-            default=PARSER_DEFAULTS["map"]["input_format"],
+            default=_PARSER_DEFAULTS["map"]["input_format"],
             allowed_values=[ComplexInputFormat.JSON.value],
             description="Map values are parsed from JSON objects with string keys.",
         ),
@@ -265,7 +267,7 @@ _SPECIFIC_ARGUMENTS: dict[ParserType, list[dict[str, Any]]] = {
         ),
         _argument(
             "on_value_error",
-            default=PARSER_DEFAULTS["map"]["on_value_error"],
+            default=_PARSER_DEFAULTS["map"]["on_value_error"],
             allowed_values=[member.value for member in ChildErrorMode],
             description=(
                 "Fail the row, route null through value final-null handling, drop an invalid "
@@ -274,7 +276,7 @@ _SPECIFIC_ARGUMENTS: dict[ParserType, list[dict[str, Any]]] = {
         ),
         _argument(
             "drop_null_values",
-            default=PARSER_DEFAULTS["map"]["drop_null_values"],
+            default=_PARSER_DEFAULTS["map"]["drop_null_values"],
             description="Remove entries whose parsed value is null.",
         ),
     ],
@@ -388,7 +390,10 @@ _SPECIFIC_GOTCHAS = {
         "Delimited input treats the delimiter literally and does not implement CSV quoting.",
         "Nested child audit is consolidated into the top-level column audit entry.",
     ],
-    ParserType.STRUCT: ["Duplicate JSON fields follow Spark's last-value-wins behavior."],
+    ParserType.STRUCT: [
+        "Duplicate JSON object keys, including unselected fields, make the whole container a parse "
+        "error handled by on_parse_error or the parent child-error policy."
+    ],
     ParserType.MAP: [
         "Duplicate JSON object keys make the whole container a parse error handled by "
         "on_parse_error or the parent child-error policy."
@@ -429,9 +434,7 @@ def parser_description(parser_type: ParserType) -> dict[str, Any]:
     if is_complex:
         for argument in arguments:
             if argument["name"] == "collapse_whitespace":
-                argument["default"] = PARSER_DEFAULTS[parser_type.value][
-                    "collapse_whitespace"
-                ]
+                argument["default"] = _PARSER_DEFAULTS[parser_type.value]["collapse_whitespace"]
                 argument["description"] = (
                     "Always resolves to false for the outer complex container; recursive leaf "
                     "parsers control their own whitespace collapse."
@@ -478,22 +481,22 @@ def config_description() -> dict[str, Any]:
             _argument("null_markers", default=[], description="Default null-token list."),
             _argument(
                 "null_marker_case_sensitive",
-                default=PARSER_DEFAULTS["globals"]["null_marker_case_sensitive"],
+                default=_PARSER_DEFAULTS["globals"]["null_marker_case_sensitive"],
                 description="Default exact-case null matching behavior.",
             ),
             _argument(
                 "true_values",
-                default=PARSER_DEFAULTS["globals"]["true_values"],
+                default=_PARSER_DEFAULTS["globals"]["true_values"],
                 description="Global true-token list.",
             ),
             _argument(
                 "false_values",
-                default=PARSER_DEFAULTS["globals"]["false_values"],
+                default=_PARSER_DEFAULTS["globals"]["false_values"],
                 description="Global false-token list.",
             ),
             _argument(
                 "boolean_case_sensitive",
-                default=PARSER_DEFAULTS["globals"]["boolean_case_sensitive"],
+                default=_PARSER_DEFAULTS["globals"]["boolean_case_sensitive"],
                 description="Whether global Boolean-token matching requires exact case.",
             ),
         ],
@@ -501,12 +504,19 @@ def config_description() -> dict[str, Any]:
             _argument(
                 "source_column_name",
                 required=True,
-                description="Exact top-level bronze source name; missing input warns and yields null/default.",
+                description=(
+                    "Top-level bronze source name resolved with Spark's active identifier "
+                    "resolver; missing input fails binding unless the caller explicitly selects "
+                    "on_missing_source='warn'."
+                ),
             ),
             _argument(
                 "target_column_name",
                 required=True,
-                description="Required, unique output name in parsed_df.",
+                description=(
+                    "Required output name in parsed_df; exact duplicates fail compilation and "
+                    "resolver-sensitive collisions fail DataFrame binding."
+                ),
             ),
             _argument(
                 "expected_data_type",

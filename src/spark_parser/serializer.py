@@ -1,8 +1,8 @@
 """Deterministic serialization and hashing for compiled parser configurations.
 
 Serialization deliberately emits effective values, including inherited globals and defaults.
-That makes reports self-contained and ensures a content hash identifies runtime behavior rather
-than the incidental shorthand used in the source YAML.
+That makes reports self-contained and ensures a content hash identifies complete resolved
+configuration content rather than the incidental shorthand used in the source YAML.
 """
 
 from __future__ import annotations
@@ -174,7 +174,7 @@ class ParserConfigSerializer:
         )
 
     def content_hash(self, config: ParserConfig) -> str:
-        """Return the SHA-256 identity of the configuration's resolved behavior."""
+        """Return the SHA-256 identity of the complete resolved configuration content."""
         return hashlib.sha256(self.canonical_json(config).encode("utf-8")).hexdigest()
 
     @staticmethod

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import NoReturn
 
 from spark_parser.enums import COMPLEX_PARSER_TYPES, ParserType
 from spark_parser.exceptions import CompilationError
@@ -16,6 +17,11 @@ from spark_parser.exceptions import CompilationError
 # Unquoted Spark identifiers accepted by this package. Struct fields outside this conservative
 # subset must use Spark-style backticks, which keeps rendering and reparsing unambiguous.
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+# Bound recursive DDL parsing independently of Python's process-wide recursion limit. Sixty-four
+# nested containers is already far beyond a practical Spark schema while still leaving ample stack
+# headroom for deterministic, public compilation errors on hostile input.
+_MAX_DATA_TYPE_NESTING = 64
 
 # Users commonly write Spark SQL aliases. Canonicalizing them here gives the compiler, serializer,
 # runtime, and content hasher one shared vocabulary.
@@ -34,8 +40,8 @@ _TYPE_ALIASES = {
 class SparkStructField:
     """One immutable field in a parsed Spark ``struct`` type.
 
-    ``name`` preserves author-supplied case. ``data_type`` may itself contain an arbitrarily
-    nested array, struct, or map.
+    ``name`` preserves author-supplied case. ``data_type`` may itself contain a recursively nested
+    array, struct, or map within the package's documented safety limit.
     """
 
     name: str
@@ -118,6 +124,13 @@ def parse_spark_data_type(value: str) -> SparkDataType:
     """
     if not isinstance(value, str) or not value.strip():
         raise CompilationError("expected_data_type must be a non-empty string.")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise CompilationError(
+            "expected_data_type must contain well-formed Unicode; "
+            f"invalid code point at character {exc.start + 1}."
+        ) from exc
     parser = _DataTypeParser(value)
     parsed = parser.parse_type()
     parser.skip_whitespace()
@@ -156,25 +169,28 @@ class _DataTypeParser:
         while not self.at_end and self.text[self.position].isspace():
             self.position += 1
 
-    def parse_type(self) -> SparkDataType:
+    def parse_type(self, depth: int = 0) -> SparkDataType:
         """Parse one scalar or recursively parameterized type at the current cursor."""
         type_name = canonical_type_name(self.read_identifier("datatype"))
         if type_name in {"decimal", "dec", "numeric"}:
             return self.parse_decimal()
         if type_name == "array":
+            self.ensure_nesting_depth(depth)
             self.expect("<")
-            element_type = self.parse_type()
+            element_type = self.parse_type(depth + 1)
             self.expect(">")
             return SparkDataType(ParserType.ARRAY, element_type=element_type)
         if type_name == "map":
+            self.ensure_nesting_depth(depth)
             self.expect("<")
-            key_type = self.parse_type()
+            key_type = self.parse_type(depth + 1)
             self.expect(",")
-            value_type = self.parse_type()
+            value_type = self.parse_type(depth + 1)
             self.expect(">")
             return SparkDataType(ParserType.MAP, key_type=key_type, value_type=value_type)
         if type_name == "struct":
-            return self.parse_struct()
+            self.ensure_nesting_depth(depth)
+            return self.parse_struct(depth)
         try:
             parser_type = ParserType(type_name)
         except ValueError as exc:
@@ -201,29 +217,40 @@ class _DataTypeParser:
             raise CompilationError("Decimal scale must be between 0 and its precision.")
         return SparkDataType(ParserType.DECIMAL, precision=precision, scale=scale)
 
-    def parse_struct(self) -> SparkDataType:
+    def parse_struct(self, depth: int) -> SparkDataType:
         """Parse a non-empty ordered struct and reject duplicate field names."""
         self.expect("<")
         fields: list[SparkStructField] = []
+        field_names: set[str] = set()
+        duplicate_fields: set[str] = set()
         self.skip_whitespace()
         if self.peek(">"):
             self.fail("Struct types must contain at least one field")
         while True:
             field_name = self.read_field_name()
             self.expect(":")
-            fields.append(SparkStructField(field_name, self.parse_type()))
+            if field_name in field_names:
+                duplicate_fields.add(field_name)
+            else:
+                field_names.add(field_name)
+            fields.append(SparkStructField(field_name, self.parse_type(depth + 1)))
             self.skip_whitespace()
             if self.peek(">"):
                 self.position += 1
                 break
             self.expect(",")
-        names = [field.name for field in fields]
         # Duplicate struct names make getField resolution ambiguous. Preserve the author's order,
         # but fail compilation rather than allowing Spark to choose a surprising field.
-        duplicates = sorted({name for name in names if names.count(name) > 1})
-        if duplicates:
-            raise CompilationError(f"Struct datatype contains duplicate fields: {duplicates}.")
+        if duplicate_fields:
+            raise CompilationError(
+                f"Struct datatype contains duplicate fields: {sorted(duplicate_fields)}."
+            )
         return SparkDataType(ParserType.STRUCT, fields=tuple(fields))
+
+    def ensure_nesting_depth(self, depth: int) -> None:
+        """Reject schemas whose complex-type nesting exceeds the package safety limit."""
+        if depth >= _MAX_DATA_TYPE_NESTING:
+            self.fail(f"Datatype nesting exceeds the maximum depth of {_MAX_DATA_TYPE_NESTING}")
 
     def read_field_name(self) -> str:
         """Read an ordinary or backtick-quoted struct field name."""
@@ -263,11 +290,15 @@ class _DataTypeParser:
         """Read an unsigned integer token used for decimal precision and scale."""
         self.skip_whitespace()
         start = self.position
-        while not self.at_end and self.text[self.position].isdigit():
+        while not self.at_end and "0" <= self.text[self.position] <= "9":
             self.position += 1
         if start == self.position:
             self.fail(f"Expected {label}")
-        return int(self.text[start : self.position])
+        # Decimal parameters cannot exceed 38. Avoid handing an adversarial, many-thousand-digit
+        # token to ``int`` (whose safety limit otherwise leaks as ValueError) while still accepting
+        # harmless leading zeroes.
+        significant = self.text[start : self.position].lstrip("0") or "0"
+        return 39 if len(significant) > 2 else int(significant)
 
     def expect(self, token: str) -> None:
         """Consume one required punctuation token after optional whitespace."""
@@ -280,7 +311,7 @@ class _DataTypeParser:
         """Check the next characters without advancing the cursor."""
         return self.text.startswith(token, self.position)
 
-    def fail(self, message: str, *, cause: Exception | None = None):
+    def fail(self, message: str, *, cause: Exception | None = None) -> NoReturn:
         """Raise a position-aware public compilation error, preserving an optional cause."""
         error = CompilationError(
             f"Invalid expected_data_type at character {self.position + 1}: {message}. "

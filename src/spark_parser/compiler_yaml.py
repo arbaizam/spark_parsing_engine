@@ -9,13 +9,17 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 import math
+import re
 import struct
 from collections.abc import Mapping
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
+from enum import Enum
 from pathlib import Path
-from typing import Any
+from types import MappingProxyType
+from typing import Any, TypeVar
 
 import yaml
 
@@ -83,6 +87,101 @@ _INTEGER_MAX = 2**31 - 1
 _LONG_MIN = -(2**63)
 _LONG_MAX = 2**63 - 1
 
+# Keep validation independent of permissive or version-dependent standard-library ISO parsing.
+_DATE_DEFAULT_PATTERN = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+_TIMESTAMP_DEFAULT_PATTERN = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T"
+    r"[0-9]{2}:[0-9]{2}:[0-9]{2}"
+    r"(?:\.[0-9]{1,6})?"
+    r"(?:Z|[+-](?:(?:0[0-9]|1[0-7]):[0-5][0-9]|18:00))?"
+)
+_ASCII_HEX_PATTERN = re.compile(r"[0-9A-Fa-f]*")
+_DEFAULT_PATH_IDENTIFIER_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+# Composer recursion happens before constructor validation. Bound it separately so deeply nested
+# untrusted YAML cannot depend on the host interpreter's recursion limit or leak RecursionError.
+_MAX_YAML_COMPOSE_DEPTH = 64
+_MAX_EXPANDED_DEFAULT_NODES = 10_000
+_EnumT = TypeVar("_EnumT", bound=Enum)
+
+
+def _validate_utf8_string(value: str, label: str) -> str:
+    """Require a Python string that can be represented as well-formed UTF-8."""
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise CompilationError(
+            f"{label} must contain well-formed Unicode; "
+            f"invalid code point at character {exc.start + 1}."
+        ) from exc
+    return value
+
+
+def _struct_default_path(label: str, field_name: str) -> str:
+    """Append an unambiguous, single-line struct field to a default diagnostic path."""
+    if _DEFAULT_PATH_IDENTIFIER_PATTERN.fullmatch(field_name):
+        return f"{label}.{field_name}"
+    return _map_default_path(label, field_name)
+
+
+def _map_default_path(label: str, key: str) -> str:
+    """Append one JSON-quoted map key to a default diagnostic path."""
+    return f"{label}[{json.dumps(key, ensure_ascii=False)}]"
+
+
+def _has_unquoted_timezone_pattern(pattern: str) -> bool:
+    """Detect Spark zone/offset fields while respecting quoted pattern literals."""
+    in_literal = False
+    index = 0
+    while index < len(pattern):
+        character = pattern[index]
+        if character == "'":
+            if index + 1 < len(pattern) and pattern[index + 1] == "'":
+                index += 2
+                continue
+            in_literal = not in_literal
+        elif not in_literal and character in "VvzOXxZ":
+            return True
+        index += 1
+    return False
+
+
+class _DefaultTraversal:
+    """Bound one authored default's expanded size and reject active-container cycles."""
+
+    def __init__(self) -> None:
+        self.expanded_nodes = 0
+        self.active_container_ids: set[int] = set()
+
+    def consume(self, path: str) -> None:
+        """Account for one emitted container, element, scalar, null, or map key."""
+        self.expanded_nodes += 1
+        if self.expanded_nodes > _MAX_EXPANDED_DEFAULT_NODES:
+            raise CompilationError(
+                f"{path} exceeds the maximum expanded default size of "
+                f"{_MAX_EXPANDED_DEFAULT_NODES:,} nodes."
+            )
+
+    def enter_container(self, value: Any, path: str) -> int:
+        """Mark a list or mapping active and reject direct or indirect reference cycles."""
+        container_id = id(value)
+        if container_id in self.active_container_ids:
+            raise CompilationError(
+                f"{path} contains a cyclic default container; complex defaults must be acyclic."
+            )
+        self.active_container_ids.add(container_id)
+        return container_id
+
+    def leave_container(self, container_id: int) -> None:
+        """Remove a fully visited container from the active recursion path."""
+        self.active_container_ids.remove(container_id)
+
+
+def _typed_default_null(label: str, *, allow_null: bool) -> None:
+    """Return an allowed nested null or reject a null authored as the root default."""
+    if not allow_null:
+        raise CompilationError(f"{label} must be non-null.")
+
 
 class _UniqueKeyLoader(yaml.SafeLoader):
     """Safe YAML loader that rejects duplicate mapping keys.
@@ -90,6 +189,28 @@ class _UniqueKeyLoader(yaml.SafeLoader):
     Standard YAML loaders silently keep one duplicate value. That is dangerous for parsing rules:
     a reviewer may approve one value while the loader executes another.
     """
+
+    def __init__(self, stream: Any) -> None:
+        """Initialize composition-depth tracking before PyYAML starts reading the stream."""
+        self._compose_depth = 0
+        super().__init__(stream)
+
+    def compose_node(self, parent: yaml.Node | None, index: int) -> yaml.Node:
+        """Compose one YAML node while enforcing a deterministic nesting bound."""
+        if self._compose_depth >= _MAX_YAML_COMPOSE_DEPTH:
+            mark = self.peek_event().start_mark
+            raise CompilationError(
+                "YAML nesting exceeds the maximum depth of "
+                f"{_MAX_YAML_COMPOSE_DEPTH} at line {mark.line + 1}, "
+                f"column {mark.column + 1}."
+            )
+        self._compose_depth += 1
+        try:
+            composed = super().compose_node(parent, index)
+            assert composed is not None
+            return composed
+        finally:
+            self._compose_depth -= 1
 
 
 def _reject_yaml_merge(
@@ -107,6 +228,14 @@ def _reject_yaml_merge(
     )
 
 
+def _construct_timestamp_string(
+    loader: _UniqueKeyLoader,
+    node: yaml.ScalarNode,
+) -> str:
+    """Preserve YAML timestamps as text for the compiler's context-specific strict grammar."""
+    return loader.construct_scalar(node)
+
+
 def _construct_unique_mapping(
     loader: _UniqueKeyLoader,
     node: yaml.MappingNode,
@@ -116,8 +245,15 @@ def _construct_unique_mapping(
     mapping: dict[Any, Any] = {}
     for key_node, value_node in node.value:
         key = loader.construct_object(key_node, deep=deep)
+        location = f"line {key_node.start_mark.line + 1}, column {key_node.start_mark.column + 1}"
+        if isinstance(key, str):
+            _validate_utf8_string(key, f"YAML mapping key at {location}")
+        try:
+            hash(key)
+        except TypeError as exc:
+            raise CompilationError(f"YAML mapping key must be hashable at {location}.") from exc
         if key in mapping:
-            raise CompilationError(f"Duplicate YAML key: {key!r}.")
+            raise CompilationError(f"Duplicate YAML key at {location}: {key!r}.")
         mapping[key] = loader.construct_object(value_node, deep=deep)
     return mapping
 
@@ -128,6 +264,7 @@ _UniqueKeyLoader.add_constructor(
     _construct_unique_mapping,
 )
 _UniqueKeyLoader.add_constructor("tag:yaml.org,2002:merge", _reject_yaml_merge)
+_UniqueKeyLoader.add_constructor("tag:yaml.org,2002:timestamp", _construct_timestamp_string)
 
 
 class YamlParserConfigCompiler:
@@ -141,17 +278,26 @@ class YamlParserConfigCompiler:
         """Read and compile one UTF-8 YAML file, preserving the operating-system error cause."""
         try:
             text = Path(path).read_text(encoding="utf-8")
+        except UnicodeError as exc:
+            raise CompilationError(
+                f"Unable to decode parser config {path!s} as well-formed UTF-8: {exc}"
+            ) from exc
         except OSError as exc:
             raise CompilationError(f"Unable to read parser config {path!s}: {exc}") from exc
         return self.compile_text(text)
 
     def compile_text(self, text: str) -> ParserConfig:
         """Load one YAML document with duplicate-key protection, then compile its mapping."""
+        if not isinstance(text, str):
+            raise CompilationError("parser YAML must be text.")
+        _validate_utf8_string(text, "parser YAML")
         try:
             payload = yaml.load(text, Loader=_UniqueKeyLoader)
         except CompilationError:
             raise
         except yaml.YAMLError as exc:
+            raise CompilationError(f"Invalid parser YAML: {exc}") from exc
+        except (RecursionError, ValueError) as exc:
             raise CompilationError(f"Invalid parser YAML: {exc}") from exc
         return self.compile_mapping(self._ensure_mapping(payload, "parser config"))
 
@@ -559,7 +705,11 @@ class YamlParserConfigCompiler:
                 if options.binary_encoding is BinaryEncoding.BASE64:
                     base64.b64decode(value, validate=True)
                 elif options.binary_encoding is BinaryEncoding.HEX:
-                    bytes.fromhex(value)
+                    # Spark's ``unhex`` accepts empty and odd-length hexadecimal strings (padding
+                    # the leading nibble) but rejects whitespace. ``bytes.fromhex`` has the inverse
+                    # edge behavior, so validate Spark's ASCII grammar directly.
+                    if _ASCII_HEX_PATTERN.fullmatch(value) is None:
+                        raise ValueError("not Spark hexadecimal text")
                 else:
                     value.encode("utf-8")
             except (ValueError, UnicodeError, binascii.Error) as exc:
@@ -583,7 +733,7 @@ class YamlParserConfigCompiler:
                     value[field.target_field_name],
                     field.data_type,
                     field.parser,
-                    f"{label}.{field.target_field_name}",
+                    _struct_default_path(label, field.target_field_name),
                 )
             return
         if data_type.parser_type is ParserType.MAP:
@@ -706,6 +856,17 @@ class YamlParserConfigCompiler:
         formats = self._string_sequence(payload["formats"], "formats", allow_empty_values=False)
         if not formats:
             raise CompilationError("formats must contain at least one Spark datetime pattern.")
+        if parser_type is ParserType.TIMESTAMP_NTZ:
+            timezone_formats = [
+                datetime_format
+                for datetime_format in formats
+                if _has_unquoted_timezone_pattern(datetime_format)
+            ]
+            if timezone_formats:
+                raise CompilationError(
+                    "formats for timestamp_ntz must not contain unquoted timezone or offset "
+                    f"pattern fields: {timezone_formats}."
+                )
         return formats
 
     def _compile_complex_options(
@@ -767,6 +928,7 @@ class YamlParserConfigCompiler:
                     raise CompilationError(
                         f"delimiter for array parser {label!r} must be a non-empty string."
                     )
+                _validate_utf8_string(delimiter, f"delimiter for array parser {label!r}")
                 defaults["delimiter"] = delimiter
             elif "delimiter" in payload:
                 raise CompilationError(
@@ -858,9 +1020,7 @@ class YamlParserConfigCompiler:
                 raise CompilationError(
                     f"Struct parser {label!r} is missing field configs for {missing_fields}."
                 )
-            duplicate_sources = sorted(
-                {name for name in source_names if source_names.count(name) > 1}
-            )
+            duplicate_sources = self._duplicates(source_names)
             if duplicate_sources:
                 raise CompilationError(
                     f"Struct parser {label!r} has duplicate source fields {duplicate_sources}."
@@ -930,9 +1090,7 @@ class YamlParserConfigCompiler:
             raw_value = ChildErrorMode.NULL.value
         mode = self._enum_value(ChildErrorMode, raw_value, key)
         if mode is ChildErrorMode.PRESERVE and child_data_type.parser_type is not ParserType.STRING:
-            raise CompilationError(
-                f"{key}: preserve for {label!r} requires a string child parser."
-            )
+            raise CompilationError(f"{key}: preserve for {label!r} requires a string child parser.")
         return mode
 
     def _compile_boolean_values(
@@ -1034,19 +1192,24 @@ class YamlParserConfigCompiler:
         value: Any,
         data_type: SparkDataType,
         label: str,
+        *,
+        _traversal: _DefaultTraversal | None = None,
+        _allow_null: bool = False,
     ) -> Any:
         """Validate and normalize one scalar or recursively complex default value.
 
         Returned values use precise Python types such as ``Decimal``, ``date``, and ``datetime``.
         The runtime later turns this already-validated tree into native Spark literals.
         """
+        traversal = _traversal if _traversal is not None else _DefaultTraversal()
+        traversal.consume(label)
         if value is None:
-            raise CompilationError(f"{label} must be non-null.")
+            return _typed_default_null(label, allow_null=_allow_null)
         parser_type = data_type.parser_type
         if parser_type is ParserType.STRING:
             if not isinstance(value, str):
                 raise CompilationError(f"{label} for string must be a string.")
-            return value
+            return _validate_utf8_string(value, f"{label} for string")
         if parser_type in {
             ParserType.BYTE,
             ParserType.SHORT,
@@ -1069,49 +1232,75 @@ class YamlParserConfigCompiler:
         if parser_type is ParserType.BINARY:
             if not isinstance(value, str):
                 raise CompilationError(f"{label} for binary must be an encoded string.")
-            return value
+            return _validate_utf8_string(value, f"{label} for binary")
         if parser_type is ParserType.ARRAY:
             if not isinstance(value, list):
                 raise CompilationError(f"{label} for array must be a YAML list.")
             assert data_type.element_type is not None
+            container_id = traversal.enter_container(value, label)
             # Null child items are retained intentionally. Child nullability/default behavior is
             # represented by the nested parser and applied when Spark literals are constructed.
-            return [
-                None if item is None else self._typed_default(item, data_type.element_type, label)
-                for item in value
-            ]
+            try:
+                return tuple(
+                    self._typed_default(
+                        item,
+                        data_type.element_type,
+                        f"{label}[{index}]",
+                        _traversal=traversal,
+                        _allow_null=True,
+                    )
+                    for index, item in enumerate(value)
+                )
+            finally:
+                traversal.leave_container(container_id)
         if parser_type is ParserType.STRUCT:
             mapping = self._ensure_mapping(value, f"{label} for struct")
-            expected = {field.name: field.data_type for field in data_type.fields}
-            # Exact field coverage prevents a default struct from silently diverging from the
-            # configured target schema.
-            unknown = sorted(set(mapping) - set(expected))
-            missing = sorted(set(expected) - set(mapping))
-            if unknown or missing:
-                raise CompilationError(
-                    f"{label} for struct has missing fields {missing} and unknown fields {unknown}."
+            container_id = traversal.enter_container(mapping, label)
+            try:
+                expected = {field.name: field.data_type for field in data_type.fields}
+                # Exact field coverage prevents a default struct from silently diverging from the
+                # configured target schema.
+                unknown = sorted(set(mapping) - set(expected))
+                missing = sorted(set(expected) - set(mapping))
+                if unknown or missing:
+                    raise CompilationError(
+                        f"{label} for struct has missing fields {missing} and unknown fields {unknown}."
+                    )
+                return MappingProxyType(
+                    {
+                        name: self._typed_default(
+                            mapping[name],
+                            field_type,
+                            _struct_default_path(label, name),
+                            _traversal=traversal,
+                            _allow_null=True,
+                        )
+                        for name, field_type in expected.items()
+                    }
                 )
-            return {
-                name: (
-                    None
-                    if mapping[name] is None
-                    else self._typed_default(mapping[name], field_type, f"{label}.{name}")
-                )
-                for name, field_type in expected.items()
-            }
+            finally:
+                traversal.leave_container(container_id)
         if parser_type is ParserType.MAP:
             mapping = self._ensure_mapping(value, f"{label} for map")
             assert data_type.key_type is not None and data_type.value_type is not None
             if data_type.key_type.parser_type is not ParserType.STRING:
                 raise CompilationError(f"{label} supports only string-keyed map defaults.")
-            return {
-                key: (
-                    None
-                    if item is None
-                    else self._typed_default(item, data_type.value_type, f"{label}[{key!r}]")
-                )
-                for key, item in mapping.items()
-            }
+            container_id = traversal.enter_container(mapping, label)
+            try:
+                compiled: dict[str, Any] = {}
+                for key, item in mapping.items():
+                    item_path = _map_default_path(label, key)
+                    traversal.consume(f"{item_path} (map key)")
+                    compiled[key] = self._typed_default(
+                        item,
+                        data_type.value_type,
+                        item_path,
+                        _traversal=traversal,
+                        _allow_null=True,
+                    )
+                return MappingProxyType(compiled)
+            finally:
+                traversal.leave_container(container_id)
         raise CompilationError(f"Unsupported parser type for {label}: {parser_type.value}.")
 
     @staticmethod
@@ -1142,9 +1331,14 @@ class YamlParserConfigCompiler:
         """
         if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
             raise CompilationError(f"{label} for {parser_type.value} must be numeric.")
-        converted = float(value)
+        try:
+            converted = float(value)
+        except (OverflowError, ValueError) as exc:
+            raise CompilationError(f"{label} for {parser_type.value} must be finite.") from exc
         if not math.isfinite(converted):
             raise CompilationError(f"{label} for {parser_type.value} must be finite.")
+        if converted == 0 and value != 0:
+            raise CompilationError(f"{label} for {parser_type.value} underflows to zero in Spark.")
         if parser_type is ParserType.FLOAT:
             try:
                 narrowed = struct.unpack("!f", struct.pack("!f", converted))[0]
@@ -1153,14 +1347,16 @@ class YamlParserConfigCompiler:
                     f"{label} for float is outside Spark's finite float32 range."
                 ) from exc
             if not math.isfinite(narrowed):
-                raise CompilationError(f"{label} for float is outside Spark's finite float32 range.")
+                raise CompilationError(
+                    f"{label} for float is outside Spark's finite float32 range."
+                )
             if converted != 0 and narrowed == 0:
                 raise CompilationError(f"{label} for float underflows to zero in Spark float32.")
         return converted
 
     @staticmethod
     def _decimal_default(value: Any, data_type: SparkDataType, label: str) -> Decimal:
-        """Validate exact precision and scale without passing through binary floating point."""
+        """Validate and canonically quantize an exact decimal without binary floating point."""
         try:
             converted = Decimal(str(value))
         except (InvalidOperation, ValueError) as exc:
@@ -1170,14 +1366,30 @@ class YamlParserConfigCompiler:
         precision = data_type.precision
         scale = data_type.scale
         assert precision is not None and scale is not None
-        _, digits, exponent = converted.as_tuple()
-        # Decimal's tuple representation lets us count integral/fractional digits exactly. Source
-        # values may be rounded by Spark, but authored defaults are required to fit without loss.
+        sign, digit_tuple, exponent = converted.as_tuple()
+        if not isinstance(exponent, int):
+            raise CompilationError(f"{label} for decimal must be finite.")
+        # Canonicalize every spelling of zero (including negative and scientific zero) to one
+        # positive value with the declared scale. This makes serialization and content hashing
+        # independent of authoring notation.
+        if not converted:
+            return Decimal((0, (0,), -scale))
+
+        # Strip insignificant trailing zeroes before checking scale. Values such as ``1.2300`` fit
+        # decimal(*,2) exactly and should canonicalize to the same value as ``1.23``.
+        digits = list(digit_tuple)
+        while digits[-1] == 0:
+            digits.pop()
+            exponent += 1
+
+        # Decimal's tuple representation lets us validate range and exact scale without invoking a
+        # context-limited quantize operation. Non-zero digits beyond the declared scale are rejected
+        # rather than rounded.
         integral_digits = max(len(digits) + exponent, 0)
-        fractional_digits = max(-exponent, 0)
-        if integral_digits > precision - scale or fractional_digits > scale:
+        if integral_digits > precision - scale or exponent < -scale:
             raise CompilationError(f"{label} does not fit {data_type.canonical}.")
-        return converted
+        quantized_digits = tuple(digits) + (0,) * (exponent + scale)
+        return Decimal((sign, quantized_digits, -scale))
 
     @staticmethod
     def _date_default(value: Any, label: str) -> date:
@@ -1185,8 +1397,11 @@ class YamlParserConfigCompiler:
         if isinstance(value, datetime):
             raise CompilationError(f"{label} for date must not contain a time component.")
         if isinstance(value, date):
-            return value
+            return date(value.year, value.month, value.day)
         if isinstance(value, str):
+            _validate_utf8_string(value, f"{label} for date")
+            if _DATE_DEFAULT_PATTERN.fullmatch(value) is None:
+                raise CompilationError(f"{label} for date must use ISO YYYY-MM-DD.")
             try:
                 return date.fromisoformat(value)
             except ValueError as exc:
@@ -1199,23 +1414,63 @@ class YamlParserConfigCompiler:
         if isinstance(value, datetime):
             parsed = value
         elif isinstance(value, str):
+            _validate_utf8_string(value, f"{label} for timestamp")
+            if _TIMESTAMP_DEFAULT_PATTERN.fullmatch(value) is None:
+                raise CompilationError(
+                    f"{label} for timestamp must use ISO YYYY-MM-DDTHH:MM:SS[.ffffff][Z|+HH:MM]."
+                )
             try:
-                parsed = datetime.fromisoformat(value)
+                parsed = datetime.fromisoformat(
+                    f"{value[:-1]}+00:00" if value.endswith("Z") else value
+                )
             except ValueError as exc:
                 raise CompilationError(f"{label} for timestamp must be an ISO timestamp.") from exc
         else:
             raise CompilationError(f"{label} for timestamp must be a datetime or ISO string.")
-        if parser_type is ParserType.TIMESTAMP_NTZ and parsed.utcoffset() is not None:
+        try:
+            offset = parsed.utcoffset()
+        except (OverflowError, TypeError, ValueError) as exc:
+            raise CompilationError(
+                f"{label} for timestamp has an invalid timezone offset."
+            ) from exc
+        if parser_type is ParserType.TIMESTAMP_NTZ and offset is not None:
             raise CompilationError(
                 f"{label} for timestamp_ntz must not include a timezone offset; "
                 "timestamp_ntz represents a local wall-clock value."
             )
-        return parsed
+        if offset is not None and offset.total_seconds() % 60:
+            raise CompilationError(
+                f"{label} for timestamp must use a whole-minute timezone offset."
+            )
+        # Rebuild a base ``datetime`` so subclass state cannot mutate compiled behavior. Spark
+        # TimestampType stores an instant: PySpark converts every aware datetime through its UTC
+        # timetable. Canonicalizing the same way ensures equivalent offsets share serialization and
+        # content hashes rather than preserving a behaviorally irrelevant spelling difference.
+        canonical = datetime(
+            parsed.year,
+            parsed.month,
+            parsed.day,
+            parsed.hour,
+            parsed.minute,
+            parsed.second,
+            parsed.microsecond,
+            tzinfo=timezone.utc,
+            fold=parsed.fold,
+        )
+        if offset is None:
+            return canonical.replace(tzinfo=None)
+        try:
+            canonical -= offset
+        except OverflowError as exc:
+            raise CompilationError(
+                f"{label} for timestamp is outside the supported range after UTC normalization."
+            ) from exc
+        return canonical
 
     def _validate_unique_columns(self, columns: tuple[ColumnParser, ...]) -> None:
         """Reject duplicate target names while intentionally allowing repeated sources."""
         column_names = [column.target_column_name for column in columns]
-        duplicate_columns = sorted({name for name in column_names if column_names.count(name) > 1})
+        duplicate_columns = self._duplicates(column_names)
         if duplicate_columns:
             raise CompilationError(f"Duplicate target_column_name values: {duplicate_columns}.")
 
@@ -1236,6 +1491,8 @@ class YamlParserConfigCompiler:
         ]
         if invalid:
             raise CompilationError(f"{label} must contain only valid strings: {invalid!r}.")
+        for index, item in enumerate(value):
+            _validate_utf8_string(item, f"{label}[{index}]")
         return self._deduplicate(tuple(value))
 
     @staticmethod
@@ -1243,10 +1500,23 @@ class YamlParserConfigCompiler:
         """Return first-occurrence-preserving unique strings."""
         return tuple(dict.fromkeys(values))
 
-    def _enum_value(self, enum_type: type, value: Any, label: str):
+    @staticmethod
+    def _duplicates(values: list[str]) -> list[str]:
+        """Return sorted duplicate strings in linear scan time."""
+        seen: set[str] = set()
+        duplicates: set[str] = set()
+        for value in values:
+            if value in seen:
+                duplicates.add(value)
+            else:
+                seen.add(value)
+        return sorted(duplicates)
+
+    def _enum_value(self, enum_type: type[_EnumT], value: Any, label: str) -> _EnumT:
         """Parse one case-insensitive enum value with an actionable allowed-values error."""
         if not isinstance(value, str):
             raise CompilationError(f"{label} must be a string.")
+        _validate_utf8_string(value, label)
         try:
             return enum_type(value.lower())
         except ValueError as exc:
@@ -1269,6 +1539,7 @@ class YamlParserConfigCompiler:
         value = payload.get(key)
         if not isinstance(value, str) or not value.strip():
             raise CompilationError(f"{key} must be a non-empty string.")
+        _validate_utf8_string(value, key)
         return value.strip()
 
     @staticmethod
@@ -1279,7 +1550,7 @@ class YamlParserConfigCompiler:
             return None
         if not isinstance(value, str):
             raise CompilationError(f"{key} must be a string when provided.")
-        return value
+        return _validate_utf8_string(value, key)
 
     @staticmethod
     def _ensure_mapping(value: Any, label: str) -> Mapping[str, Any]:
@@ -1289,6 +1560,8 @@ class YamlParserConfigCompiler:
         invalid_keys = [key for key in value if not isinstance(key, str)]
         if invalid_keys:
             raise CompilationError(f"{label} keys must be strings: {invalid_keys!r}.")
+        for key in value:
+            _validate_utf8_string(key, f"{label} key")
         return value
 
     @staticmethod

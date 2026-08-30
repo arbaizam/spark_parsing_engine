@@ -1,10 +1,12 @@
 """Tests for public metadata discovery and configuration review reporting."""
 
+import json
 from pathlib import Path
 
 import pytest
 
 from spark_parser import (
+    PARSER_DEFAULTS,
     CompilationError,
     ParserType,
     SparkParserService,
@@ -19,6 +21,31 @@ from spark_parser.defaults import (
 )
 
 TEST_CONFIG_PATH = Path(__file__).resolve().parents[1] / "fixtures" / "test_config.yaml"
+
+
+def test_public_defaults_are_immutable_and_detached_views_remain_mutable() -> None:
+    """Prevent caller mutation from making metadata disagree with compiler behavior."""
+    with pytest.raises(TypeError):
+        PARSER_DEFAULTS["common"]["trim_whitespace"] = False
+    with pytest.raises(TypeError):
+        PARSER_DEFAULTS["date"]["formats"].append("yyyyMMdd")
+
+    detached = parser.defaults()
+    detached["common"]["trim_whitespace"] = False
+    detached["date"]["formats"].clear()
+
+    assert PARSER_DEFAULTS["common"]["trim_whitespace"] is True
+    assert json.loads(json.dumps(PARSER_DEFAULTS))["date"]["formats"] == list(DEFAULT_DATE_FORMATS)
+    assert parser.defaults()["common"]["trim_whitespace"] is True
+    assert parser.defaults()["date"]["formats"] == list(DEFAULT_DATE_FORMATS)
+    assert (
+        next(
+            argument["default"]
+            for argument in parser.string.describe()["arguments"]
+            if argument["name"] == "trim_whitespace"
+        )
+        is True
+    )
 
 
 def test_parser_metadata_is_discoverable_and_detached() -> None:
@@ -56,6 +83,8 @@ def test_parser_metadata_is_discoverable_and_detached() -> None:
     description["arguments"].clear()
     assert parser.string.describe()["arguments"]
     assert parser.config.describe()["column_arguments"][1]["name"] == "target_column_name"
+    source_argument = parser.config.describe()["column_arguments"][0]
+    assert "fails binding unless" in source_argument["description"]
     boolean_global = next(
         argument
         for argument in parser.config.describe()["global_arguments"]
@@ -113,16 +142,61 @@ def test_config_review_contains_validation_resolved_options_and_markdown(tmp_pat
     markdown_path = report.write_markdown(tmp_path / "review.md")
     json_path = report.write_json(tmp_path / "review.json")
     assert markdown_path.read_text(encoding="utf-8").startswith("# Spark Parser")
-    assert '"report_type": "spark_parser_config_review"' in json_path.read_text(
-        encoding="utf-8"
-    )
+    assert '"report_type": "spark_parser_config_review"' in json_path.read_text(encoding="utf-8")
     assert report.to_mapping()["report_type"] == "spark_parser_config_review"
+
+
+def test_markdown_review_contains_hostile_schema_names_inside_safe_fences() -> None:
+    """Keep authored newlines and backticks from terminating generated code blocks."""
+    report = SparkParserService().review_yaml(
+        r"""
+parser_config_id: markdown-safety
+parser_config_name: Markdown safety
+version: "1"
+columns:
+  - source_column_name: "raw\0\e\r<script>\n```\n## injected ![pixel](https://attacker.example/p) *name* a\\|b"
+    target_column_name: "Safe\u202Egpj.exe"
+    expected_data_type: string
+    parser: string
+"""
+    )
+
+    assert report.is_valid is True
+    markdown = report.to_markdown()
+    assert '"raw\\u0000\\u001b\\r<script>\\n```\\n## injected' in markdown
+    assert "raw&#92;u0000&#92;u001b &#60;script&#62;" in markdown
+    assert (
+        "&#33;&#91;pixel&#93;&#40;https&#58;&#47;&#47;attacker&#46;example&#47;p&#41;" in markdown
+    )
+    assert "&#42;name&#42;" in markdown
+    assert "a&#92;&#124;b" in markdown
+    assert "\x00" not in markdown
+    assert "\x1b" not in markdown
+    assert "\u202e" not in markdown
+    assert "\\u0000" in markdown
+    assert "\\u001b" in markdown
+    assert "\\u202e" in markdown
+    assert "````text\n" in markdown
+    assert "````yaml\n" in markdown
+    assert markdown.count("````") == 4
+
+    json_report = report.to_json()
+    assert "\u202e" not in json_report
+    assert "\\u202e" in json_report
+    assert json.loads(json_report)["resolved_config"]["columns"][0]["target_column_name"] == (
+        "Safe\u202egpj.exe"
+    )
+
+    yaml_fence = markdown.split("````yaml\n", 1)[1].split("\n````", 1)[0]
+    recompiled = parser.compile_text(yaml_fence)
+    assert parser.content_hash(recompiled) == report.summary["content_hash"]
 
 
 def test_invalid_config_review_returns_errors_instead_of_raising() -> None:
     report = parser.review_yaml("parser_config_id: incomplete")
 
     assert report.is_valid is False
+    assert report.source == "inline YAML"
     assert report.errors
     assert "columns" in report.errors[0]
     assert "Validation status:** FAIL" in report.to_markdown()
