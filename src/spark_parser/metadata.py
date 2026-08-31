@@ -320,7 +320,7 @@ _SPECIFIC_BEHAVIORS = {
         "on_parse_error preserve returns the exact pre-normalization source token when formatting fails.",
         "title lowercases and capitalizes words while retaining normalized spaces.",
         "title_business_v1 starts with title behavior, capitalizes a lowercase letter after a bounded integer-hyphen component, and restores the frozen FHLB, P&I, UST, RCF, and CMT tokens.",
-        "interest_rate_index_v1 canonicalizes an approved catalog of interest-rate labels and exact source aliases, including bounded compact tenors such as 12M and 1Yr.",
+        "interest_rate_index_v1 canonicalizes an approved catalog of interest-rate labels and exact source aliases, including bounded compact tenors such as 12M and 1Yr; display labels omit cosmetic family/value separator hyphens.",
         "pascal removes spaces after init-capitalization; it is intended for identifiers, not names.",
         "address_us_v1 uses contextual USPS-style suffixes/directionals and smart-cases Mc, apostrophe, and hyphen names.",
         "county smart-cases the name and ensures exactly one trailing 'County'.",

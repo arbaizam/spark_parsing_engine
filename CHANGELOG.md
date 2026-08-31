@@ -2,6 +2,8 @@
 
 ## 0.4.0
 
+- Remove cosmetic family/value separator hyphens from canonical interest-rate labels while
+  retaining every former `Family - Value` form as a backward-compatible input alias.
 - Let datetime metadata probes use the active Spark Connect/serverless session when its
   `SparkSession` does not expose `newSession`, including in the portable timestamp NTZ test.
 - Add `title_business_v1` as ordinary title formatting plus exact `FHLB`, `P&I`, `UST`, `RCF`,

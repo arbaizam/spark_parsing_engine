@@ -46,38 +46,60 @@ def _canonical_tenors(amounts: tuple[int, ...], unit: str) -> tuple[str, ...]:
     return tuple(f"{amount}-{unit}" for amount in amounts)
 
 
+_SEPARATOR_FAMILY_SUFFIXES = (
+    ("SOFR Term", ("Overnight", *_canonical_tenors((1, 3, 6, 12), "Month"))),
+    ("BSBY", ("Overnight", *_canonical_tenors((1, 3, 6, 12), "Month"))),
+    (
+        "Ameribor",
+        (
+            "Overnight",
+            "1-Week",
+            *_canonical_tenors((1, 3, 6), "Month"),
+            *_canonical_tenors((1, 2), "Year"),
+            *(f"{tenor} Average" for tenor in _canonical_tenors((30, 90), "Day")),
+            "Derived 30T",
+            "Derived 90T",
+        ),
+    ),
+    ("LIBOR", ("1-Year (Daily)",)),
+    (
+        "Treasury",
+        (
+            *_canonical_tenors((3, 6), "Month"),
+            *_canonical_tenors((1, 2, 3, 5, 7, 10, 30), "Year"),
+        ),
+    ),
+    ("Treasury Avg", ("12-Month",)),
+    ("Freddie Mac", _canonical_tenors((1, 3, 6, 12), "Month")),
+    ("FHLB", _canonical_tenors((1, 2, 3, 5, 7, 10), "Year")),
+    ("SOFR", ("30-Day",)),
+)
+
 _CANONICAL_INTEREST_RATE_INDEXES = (
-    "SOFR Term - Overnight",
-    *(f"SOFR Term - {tenor}" for tenor in _canonical_tenors((1, 3, 6, 12), "Month")),
+    *(
+        f"{family} {suffix}"
+        for family, suffixes in _SEPARATOR_FAMILY_SUFFIXES
+        for suffix in suffixes
+    ),
     *(
         f"{tenor} Constant Maturity Treasury (CMT)"
         for tenor in _canonical_tenors((1, 2, 3, 5, 7, 10, 30), "Year")
     ),
-    "BSBY - Overnight",
-    *(f"BSBY - {tenor}" for tenor in _canonical_tenors((1, 3, 6, 12), "Month")),
-    "Ameribor - Overnight",
-    "Ameribor - 1-Week",
-    *(f"Ameribor - {tenor}" for tenor in _canonical_tenors((1, 3, 6), "Month")),
-    *(f"Ameribor - {tenor}" for tenor in _canonical_tenors((1, 2), "Year")),
-    *(f"Ameribor - {tenor} Average" for tenor in _canonical_tenors((30, 90), "Day")),
-    "Ameribor - Derived 30T",
-    "Ameribor - Derived 90T",
     "Prime",
     *(f"{tenor} LIBOR" for tenor in _canonical_tenors((1, 2, 3, 6, 9, 12), "Month")),
-    "LIBOR - 1-Year (Daily)",
-    *(f"Treasury - {tenor}" for tenor in _canonical_tenors((3, 6), "Month")),
-    *(f"Treasury - {tenor}" for tenor in _canonical_tenors((1, 2, 3, 5, 7, 10, 30), "Year")),
-    "Treasury Avg - 12-Month",
     *(f"USD Swap {tenor}" for tenor in _canonical_tenors((1, 5, 10), "Year")),
-    *(f"Freddie Mac - {tenor}" for tenor in _canonical_tenors((1, 3, 6, 12), "Month")),
-    *(f"FHLB - {tenor}" for tenor in _canonical_tenors((1, 2, 3, 5, 7, 10), "Year")),
     "SOFR",
     *(f"SOFR {tenor}" for tenor in _canonical_tenors((1, 12), "Month")),
     "SOFR 30-Day Average",
     "SOFR 180-Day Average",
-    "SOFR - 30-Day",
     "RCF 6-Month",
     "RCF 12-Month",
+)
+
+_LEGACY_SEPARATOR_ALIASES = tuple(
+    (f"{family} - {suffix}", f"{family} {suffix}")
+    for family, suffixes in _SEPARATOR_FAMILY_SUFFIXES
+    for suffix in suffixes
 )
 
 
@@ -109,6 +131,11 @@ def _build_interest_rate_index_catalog() -> tuple[tuple[str, str], ...]:
     for canonical in _CANONICAL_INTEREST_RATE_INDEXES:
         register(canonical, canonical)
 
+    # Separator hyphens remain accepted for backward-compatible source ingestion, but canonical
+    # display labels use a space. Tenor hyphens such as ``12-Month`` remain unchanged.
+    for alias, canonical in _LEGACY_SEPARATOR_ALIASES:
+        register(alias, canonical)
+
     # CMT shorthand is semantically explicit, so all approved CMT tenors share this compact form.
     for amount in (1, 2, 3, 5, 7, 10, 30):
         register(
@@ -119,9 +146,9 @@ def _build_interest_rate_index_catalog() -> tuple[tuple[str, str], ...]:
     # Opaque source/vendor codes are exact aliases. Token boundaries keep the generic tenor rules
     # from rewriting them, so only these complete keys can resolve their source-specific meaning.
     exact_aliases = {
-        "TSFR6M": "SOFR Term - 6-Month",
+        "TSFR6M": "SOFR Term 6-Month",
         "SOFR Avg - 30 days": "SOFR 30-Day Average",
-        "SOFR30": "SOFR - 30-Day",
+        "SOFR30": "SOFR 30-Day",
         "SOFR30A": "SOFR 30-Day Average",
         "SOFR180A": "SOFR 180-Day Average",
         "RCF6M": "RCF 6-Month",

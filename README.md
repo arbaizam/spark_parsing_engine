@@ -445,7 +445,7 @@ String supports the common arguments plus `format`.
 | `upper` | Uppercase the normalized value. | `"Acme LLC"` → `"ACME LLC"` |
 | `title` | Lowercase and capitalize words while retaining normalized spaces. | `"  LOAN   status "` → `"Loan Status"` |
 | `title_business_v1` | Apply ordinary title casing plus frozen business exceptions and bounded numeric-hyphen casing. | `"fhlb 12-month advance"` → `"FHLB 12-Month Advance"` |
-| `interest_rate_index_v1` | Canonicalize an approved interest-rate index or reject the unknown full value. | `"SOFR Term - 12M"` → `"SOFR Term - 12-Month"` |
+| `interest_rate_index_v1` | Canonicalize an approved interest-rate index or reject the unknown full value. | `"SOFR Term - 12M"` → `"SOFR Term 12-Month"` |
 | `pascal` | Lowercase, title-case, and remove spaces. Intended for identifiers rather than human names. | `"account status"` → `"AccountStatus"` |
 | `address_us_v1` | Apply deterministic US address display normalization. | `"123 mccormick st. apt 4b"` → `"123 McCormick St Apt 4B"` |
 | `county` | Smart-case a county name and ensure exactly one trailing `County`. | `"mclean county"` → `"McLean County"` |
@@ -480,16 +480,17 @@ only in a valid index tenor position, and then requires the full result to exist
 catalog. Examples include:
 
 - `SOFR 1 month`, `SOFR 1M` → `SOFR 1-Month`;
-- `Treasury - 10 yr`, `Treasury - 10Yr` → `Treasury - 10-Year`;
-- `TSFR6M` → `SOFR Term - 6-Month`;
-- `SOFR30` → `SOFR - 30-Day`, while `SOFR30A` → `SOFR 30-Day Average`;
+- `Treasury - 10 yr`, `Treasury - 10Yr` → `Treasury 10-Year`;
+- `TSFR6M` → `SOFR Term 6-Month`;
+- `SOFR30` → `SOFR 30-Day`, while `SOFR30A` → `SOFR 30-Day Average`;
 - `RCF6M` → `RCF 6-Month`; and
 - `10 yr CMT` → `10-Year Constant Maturity Treasury (CMT)`.
 
 Month aliases are `M`, `mo`, `mos`, `month`, and `months`; year aliases are `Y`, `Yr`, `yrs`,
 `year`, and `years`. Canonical tenors always use a singular unit and do not convert equivalent
 durations (`12-Month` stays `12-Month`, not `1-Year`). Spelled day/week tenors are normalized for
-the cataloged averages and index families.
+the cataloged averages and index families. Canonical display labels omit the cosmetic separator
+between the index family and value, while the former `Family - Value` forms remain accepted inputs.
 
 Opaque codes are exact aliases, so substrings such as `XSOFR30`, unsupported tenors, and an unknown
 family containing `12M` do not receive a partial rewrite. Unknown non-null values return a parse
