@@ -14,9 +14,15 @@
 # COMMAND ----------
 
 import os
+import re
 import sys
+from contextlib import contextmanager
 from decimal import Decimal
 from pathlib import Path
+
+from py4j.protocol import Py4JJavaError
+from pyspark.errors import PySparkException
+from pyspark.sql import functions as F
 
 root = next(
     (
@@ -26,21 +32,54 @@ root = next(
     ),
     None,
 )
-if root:
-    src_path = os.path.normpath(root / "src")
-    if src_path in sys.path:
+if root is not None:
+    src_path = os.path.normpath((root / "src").resolve())
+    while src_path in sys.path:
         sys.path.remove(src_path)
     print(f"Adding source checkout to sys.path: {src_path}")
     sys.path.insert(0, src_path)
 
+    # A Databricks Python process can outlive a notebook run. Remove any previously imported
+    # spark_parser modules so sys.path precedence is sufficient even after a wheel-backed import.
+    for module_name in tuple(sys.modules):
+        if module_name == "spark_parser" or module_name.startswith("spark_parser."):
+            del sys.modules[module_name]
+
+import spark_parser as spark_parser_package
 from spark_parser import SchemaValidationError, __version__, parser
+
+
+SYSTEM_TEST_IDS = tuple(f"ST-{number:03d}" for number in range(1, 9))
+PASSED_TEST_IDS = []
+ACTIVE_TEST_ID = None
 
 
 def _start(test_id, name):
     """Print one visible system-test boundary."""
+    global ACTIVE_TEST_ID
+    assert len(PASSED_TEST_IDS) < len(SYSTEM_TEST_IDS), (
+        "All registered system tests have already passed; rerun the notebook from the setup cell."
+    )
+    expected_test_id = SYSTEM_TEST_IDS[len(PASSED_TEST_IDS)]
+    assert test_id == expected_test_id, (
+        f"System tests must run in order; expected {expected_test_id}, received {test_id}."
+    )
+    ACTIVE_TEST_ID = test_id
     print()
     print(f"{test_id}: {name}")
     print("-" * 80)
+
+
+def _pass(test_id, message):
+    """Record one successful system-test boundary before printing its PASS marker."""
+    global ACTIVE_TEST_ID
+    assert ACTIVE_TEST_ID == test_id, (
+        f"Cannot pass {test_id}; the active system test is {ACTIVE_TEST_ID!r}."
+    )
+    assert test_id not in PASSED_TEST_IDS, f"System test {test_id} was already recorded as passed."
+    PASSED_TEST_IDS.append(test_id)
+    ACTIVE_TEST_ID = None
+    print(f"PASS: {message}")
 
 
 def _expect_raises(exception_type, operation, *, contains=None):
@@ -50,10 +89,35 @@ def _expect_raises(exception_type, operation, *, contains=None):
     except exception_type as exc:
         if contains is not None:
             assert contains in str(exc), (
-                f"Expected {exception_type.__name__} containing {contains!r}, found {exc!r}."
+                f"Expected exception containing {contains!r}, found {exc!r}."
             )
         return exc
-    raise AssertionError(f"Expected {exception_type.__name__} to be raised.")
+    expected_names = ", ".join(
+        candidate.__name__
+        for candidate in (exception_type if isinstance(exception_type, tuple) else (exception_type,))
+    )
+    raise AssertionError(f"Expected one of [{expected_names}] to be raised.")
+
+
+@contextmanager
+def _spark_conf_scope(settings):
+    """Apply Spark SQL settings for one test and restore them on every exit path."""
+    previous_values = []
+    try:
+        for key, value in settings.items():
+            previous_values.append((key, spark.conf.get(key)))
+            spark.conf.set(key, value)
+        yield
+    finally:
+        for key, previous_value in reversed(previous_values):
+            spark.conf.set(key, previous_value)
+
+
+def _spark_major_minor(version):
+    """Return a comparable Spark major/minor pair from a runtime version string."""
+    match = re.match(r"^(\d+)\.(\d+)", version)
+    assert match is not None, f"Could not parse the Spark runtime version: {version!r}."
+    return int(match.group(1)), int(match.group(2))
 
 
 def _rows_by_key(df, key):
@@ -75,9 +139,11 @@ assert root is not None, (
 )
 REPO_ROOT = root
 REFERENCE_CONFIG_PATH = REPO_ROOT / "examples" / "all_parsers.yaml"
-assert REFERENCE_CONFIG_PATH.is_file(), (
-    f"Parser reference configuration does not exist: {REFERENCE_CONFIG_PATH}"
-)
+EXPECTED_PACKAGE_DIRECTORY = (REPO_ROOT / "src" / "spark_parser").resolve()
+STRICT_SQL_SETTINGS = {
+    "spark.sql.ansi.enabled": "true",
+    "spark.sql.legacy.timeParserPolicy": "EXCEPTION",
+}
 
 SYSTEM_CONFIG_YAML = """
 parser_config_id: databricks_system_tests
@@ -261,19 +327,25 @@ BRONZE_ROWS = [
     ),
 ]
 
-ORIGINAL_ANSI = spark.conf.get("spark.sql.ansi.enabled")
-ORIGINAL_TIME_POLICY = spark.conf.get("spark.sql.legacy.timeParserPolicy")
-spark.conf.set("spark.sql.ansi.enabled", "true")
-spark.conf.set("spark.sql.legacy.timeParserPolicy", "EXCEPTION")
+_start("ST-001", "Compile the shipped reference and representative system configuration")
+
+package_file = Path(spark_parser_package.__file__).resolve()
+assert package_file.is_relative_to(EXPECTED_PACKAGE_DIRECTORY), (
+    "System tests must import spark_parser from the repository checkout; "
+    f"loaded {package_file}, expected a module under {EXPECTED_PACKAGE_DIRECTORY}."
+)
+assert _spark_major_minor(spark.version) >= (3, 5), (
+    f"Spark Parser requires Spark 3.5 or newer; found Spark {spark.version}."
+)
+assert REFERENCE_CONFIG_PATH.is_file(), (
+    f"Parser reference configuration does not exist: {REFERENCE_CONFIG_PATH}"
+)
 
 print(f"Repository root: {REPO_ROOT}")
 print(f"Reference configuration: {REFERENCE_CONFIG_PATH}")
+print(f"Imported package: {package_file}")
 print(f"Spark version: {spark.version}")
 print(f"Spark Parser version: {__version__}")
-
-# COMMAND ----------
-
-_start("ST-001", "Compile the shipped reference and representative system configuration")
 
 reference_config = parser.compile_path(REFERENCE_CONFIG_PATH)
 assert {column.parser.parser_type.value for column in reference_config.columns} == set(
@@ -288,49 +360,103 @@ config_hash = parser.content_hash(config)
 assert len(config_hash) == 64
 assert config_hash == parser.content_hash(parser.compile_text(SYSTEM_CONFIG_YAML))
 
-print("PASS: Current parser vocabulary and representative configuration compile deterministically.")
+_pass(
+    "ST-001",
+    "Current parser vocabulary and representative configuration compile deterministically.",
+)
 
 # COMMAND ----------
 
-bronze_df = spark.createDataFrame(BRONZE_ROWS, schema=BRONZE_SCHEMA)
-strict_parsing = parser.parse_dataframe(
-    bronze_df,
-    config,
-    key_columns=["record_id"],
-    column_prefix="system_parser",
-)
-strict_target_rows = _rows_by_key(strict_parsing.parsed_df, "RecordId")
-strict_result_rows = _rows_by_key(strict_parsing.results_df, "record_id")
-strict_audit_rows = _audit_by_key(
-    strict_parsing.results_df,
-    "record_id",
-    "system_parser_parse_results",
-)
-
 _start("ST-002", "Materialize representative scalar values under strict Spark SQL settings")
 
-good = strict_target_rows["good-1"]
+with _spark_conf_scope(STRICT_SQL_SETTINGS):
+    bronze_df = spark.createDataFrame(BRONZE_ROWS, schema=BRONZE_SCHEMA)
+    scalar_parsing = parser.parse_dataframe(
+        bronze_df,
+        config,
+        key_columns=["record_id"],
+        column_prefix="system_parser",
+    )
+    scalar_schema = {
+        field.name: field.dataType.simpleString()
+        for field in scalar_parsing.parsed_df.schema.fields
+        if field.name
+        in {
+            "CustomerName",
+            "LoanStatus",
+            "StateCode",
+            "Amount",
+            "Quantity",
+            "EventDate",
+            "EventTimestamp",
+            "EventTimestampNtz",
+        }
+    }
+    scalar_rows = _rows_by_key(
+        scalar_parsing.parsed_df.select(
+            "RecordId",
+            "CustomerName",
+            "LoanStatus",
+            "StateCode",
+            "Amount",
+            "Quantity",
+            F.col("EventDate").cast("string").alias("EventDateText"),
+            F.col("EventTimestamp").cast("string").alias("EventTimestampText"),
+            F.col("EventTimestampNtz").cast("string").alias("EventTimestampNtzText"),
+        ),
+        "RecordId",
+    )
+
+assert scalar_schema == {
+    "CustomerName": "string",
+    "LoanStatus": "string",
+    "StateCode": "string",
+    "Amount": "decimal(10,2)",
+    "Quantity": "int",
+    "EventDate": "date",
+    "EventTimestamp": "timestamp",
+    "EventTimestampNtz": "timestamp_ntz",
+}
+good = scalar_rows["good-1"]
 assert good["CustomerName"] == "ALICE SMITH"
 assert good["LoanStatus"] == "Active Loan"
 assert good["StateCode"] == "IL"
 assert good["Amount"] == Decimal("12.35")
 assert good["Quantity"] == 7
-assert good["EventDate"].isoformat() == "2026-09-30"
-assert good["EventTimestamp"].isoformat(sep=" ") == "2026-09-30 00:00:00"
-assert good["EventTimestampNtz"].isoformat(sep=" ") == "2026-09-30 00:00:00"
+assert good["EventDateText"] == "2026-09-30"
+assert good["EventTimestampText"] == "2026-09-30 00:00:00"
+assert good["EventTimestampNtzText"] == "2026-09-30 00:00:00"
 
-print("PASS: Native scalar expressions retain their expected Databricks values and types.")
+_pass("ST-002", "Native scalar expressions retain their expected Databricks values and types.")
 
 # COMMAND ----------
 
 _start("ST-003", "Parse recursive arrays, structs, and maps with exact nested audit paths")
 
-assert good["Aliases"] == ["ALLY"]
-assert good["Profile"]["postal_code"] == "01234"
-assert good["Profile"]["scores"] == [1, -1, -1]
-assert good["Attributes"] == {"principal": Decimal("10.13"), "empty": None}
+with _spark_conf_scope(STRICT_SQL_SETTINGS):
+    complex_parsing = parser.parse_dataframe(
+        bronze_df,
+        config,
+        key_columns=["record_id"],
+        column_prefix="system_parser",
+    )
+    complex_rows = _rows_by_key(
+        complex_parsing.parsed_df.select("RecordId", "Aliases", "Profile", "Attributes"),
+        "RecordId",
+    )
+    complex_audit_rows = _audit_by_key(
+        complex_parsing.results_df,
+        "record_id",
+        "system_parser_parse_results",
+    )
 
-good_audit = strict_audit_rows["good-1"]
+good_complex = complex_rows["good-1"]
+assert good_complex["Aliases"] == ["ALLY"]
+assert good_complex["Profile"]["postal_code"] == "01234"
+assert good_complex["Profile"]["scores"] == [1, -1, -1]
+assert good_complex["Attributes"] == {"principal": Decimal("10.13"), "empty": None}
+
+good_audit = complex_audit_rows["good-1"]
 assert good_audit["Profile"].nested_error_paths == ["$.scores[1]"]
 assert good_audit["Profile"].nested_default_on_null_paths == [
     "$.scores[1]",
@@ -342,13 +468,31 @@ assert "nested_parse_errors_resolved" in good_audit["Profile"].actions_applied
 assert "nested_default_on_null_applied" in good_audit["Profile"].actions_applied
 assert "nested_zero_invalidated" in good_audit["Profile"].actions_applied
 
-print("PASS: Recursive native expressions retain nested values and JSONPath-like audit evidence.")
+_pass(
+    "ST-003",
+    "Recursive native expressions retain nested values and JSONPath-like audit evidence.",
+)
 
 # COMMAND ----------
 
 _start("ST-004", "Apply handled error policies and fail only when fail-mode data materializes")
 
-handled = strict_target_rows["handled-errors-1"]
+with _spark_conf_scope(STRICT_SQL_SETTINGS):
+    handled_parsing = parser.parse_dataframe(
+        bronze_df,
+        config,
+        key_columns=["record_id"],
+        column_prefix="system_parser",
+    )
+    handled = (
+        handled_parsing.parsed_df.where(F.col("RecordId") == "handled-errors-1")
+        .first()
+        .asDict(recursive=True)
+    )
+    handled_result = handled_parsing.results_df.where(
+        F.col("record_id") == "handled-errors-1"
+    ).first()
+
 assert handled["CustomerName"] is None
 assert handled["LoanStatus"] == "Charged Off"
 assert handled["StateCode"] == "Mul"
@@ -358,7 +502,9 @@ assert handled["Aliases"] == ["UNKNOWN"]
 assert handled["Profile"] == {"postal_code": "00000", "scores": []}
 assert handled["Attributes"] is None
 
-handled_audit = strict_audit_rows["handled-errors-1"]
+handled_audit = {
+    result.target_column_name: result for result in handled_result.system_parser_parse_results
+}
 assert handled_audit["CustomerName"].actions_applied == ["null_marker_replaced"]
 assert handled_audit["StateCode"].actions_applied == ["parse_error_preserved"]
 assert handled_audit["Amount"].actions_applied == ["parse_error_to_null"]
@@ -379,26 +525,44 @@ columns:
     parser: integer
 """
 )
-fail_parsing = parser.parse_dataframe(
-    spark.createDataFrame([("not-an-integer",)], "raw_value string"),
-    fail_config,
-    key_columns=["raw_value"],
-)
-try:
-    fail_parsing.parsed_df.select("FailValue").collect()
-except Exception as exc:  # Spark wraps executor errors differently across runtimes.
-    print(f"Expected fail-mode materialization error: {type(exc).__name__}")
-else:
-    raise AssertionError("on_parse_error: fail did not fail when FailValue materialized")
+with _spark_conf_scope(STRICT_SQL_SETTINGS):
+    fail_parsing = parser.parse_dataframe(
+        spark.createDataFrame([("not-an-integer",)], "raw_value string"),
+        fail_config,
+        key_columns=["raw_value"],
+    )
+    fail_exception = _expect_raises(
+        (Py4JJavaError, PySparkException),
+        lambda: fail_parsing.parsed_df.select("FailValue").collect(),
+        contains=(
+            "Spark Parser could not parse source 'raw_value' into target column 'FailValue' "
+            "as integer"
+        ),
+    )
+print(f"Expected fail-mode materialization error: {type(fail_exception).__name__}")
 
-print("PASS: Null, default, preserve, nested handling, and lazy fail behavior are enforced.")
+_pass("ST-004", "Null, default, preserve, nested handling, and lazy fail behavior are enforced.")
 
 # COMMAND ----------
 
 _start("ST-005", "Keep handled target and audit outcomes identical across ANSI modes")
 
-spark.conf.set("spark.sql.ansi.enabled", "false")
-try:
+with _spark_conf_scope(STRICT_SQL_SETTINGS):
+    strict_mode_parsing = parser.parse_dataframe(
+        bronze_df,
+        config,
+        key_columns=["record_id"],
+        column_prefix="system_parser",
+    )
+    strict_target_rows = _rows_by_key(strict_mode_parsing.parsed_df, "RecordId")
+    strict_result_rows = _rows_by_key(strict_mode_parsing.results_df, "record_id")
+
+with _spark_conf_scope(
+    {
+        "spark.sql.ansi.enabled": "false",
+        "spark.sql.legacy.timeParserPolicy": "EXCEPTION",
+    }
+):
     permissive_parsing = parser.parse_dataframe(
         bronze_df,
         config,
@@ -409,16 +573,26 @@ try:
     permissive_result_rows = _rows_by_key(permissive_parsing.results_df, "record_id")
     assert permissive_target_rows == strict_target_rows
     assert permissive_result_rows == strict_result_rows
-finally:
-    spark.conf.set("spark.sql.ansi.enabled", "true")
 
-print("PASS: Handled parser results do not depend on permissive versus ANSI-enabled casting.")
+_pass(
+    "ST-005",
+    "Handled parser results do not depend on permissive versus ANSI-enabled casting.",
+)
 
 # COMMAND ----------
 
 _start("ST-006", "Expose the ordered target, audit, and configuration identity contracts")
 
-assert strict_parsing.parsed_df.columns == [
+with _spark_conf_scope(STRICT_SQL_SETTINGS):
+    contract_parsing = parser.parse_dataframe(
+        bronze_df,
+        config,
+        key_columns=["record_id"],
+        column_prefix="system_parser",
+    )
+    identity = contract_parsing.results_df.first()
+
+assert contract_parsing.parsed_df.columns == [
     "RecordId",
     "CustomerName",
     "LoanStatus",
@@ -432,26 +606,25 @@ assert strict_parsing.parsed_df.columns == [
     "Profile",
     "Attributes",
 ]
-assert strict_parsing.key_columns == ("record_id",)
-assert strict_parsing.result_columns == (
+assert contract_parsing.key_columns == ("record_id",)
+assert contract_parsing.result_columns == (
     "system_parser_parse_results",
     "system_parser_config",
     "system_parser_engine_version",
 )
-assert strict_parsing.results_df.columns == [
+assert contract_parsing.results_df.columns == [
     "record_id",
     "system_parser_parse_results",
     "system_parser_config",
     "system_parser_engine_version",
 ]
 
-identity = strict_parsing.results_df.first()
 assert identity.system_parser_config.id == config.parser_config_id
 assert identity.system_parser_config.version == config.version
 assert identity.system_parser_config.content_hash == config_hash
 assert identity.system_parser_engine_version == __version__
 
-audit_fields = strict_parsing.results_df.schema[
+audit_fields = contract_parsing.results_df.schema[
     "system_parser_parse_results"
 ].dataType.elementType.fieldNames()
 assert audit_fields == [
@@ -471,7 +644,7 @@ assert audit_fields == [
     "nested_zero_invalidated_paths",
 ]
 
-print("PASS: Ordered DataFrame and row-level audit metadata match the public contract.")
+_pass("ST-006", "Ordered DataFrame and row-level audit metadata match the public contract.")
 
 # COMMAND ----------
 
@@ -498,6 +671,10 @@ missing_parsing = parser.parse_dataframe(
     on_missing_source="warn",
     column_prefix="system_missing",
 )
+missing_field = missing_parsing.parsed_df.schema["MissingValue"]
+assert missing_parsing.parsed_df.schema.simpleString() == "struct<MissingValue:string>"
+assert missing_field.dataType.simpleString() == "string"
+assert missing_field.nullable is True
 assert missing_parsing.parsed_df.first().MissingValue is None
 assert missing_parsing.warnings and "source_not_delivered" in missing_parsing.warnings[0]
 missing_audit = missing_parsing.results_df.first().system_missing_parse_results[0]
@@ -505,7 +682,10 @@ assert missing_audit.effective is False
 assert missing_audit.actions_applied == ["source_column_missing"]
 assert missing_audit.error == "Source column is missing."
 
-print("PASS: Explicitly recoverable drift stays visible in warnings and row-level audit output.")
+_pass(
+    "ST-007",
+    "Explicitly recoverable drift stays visible in warnings and row-level audit output.",
+)
 
 # COMMAND ----------
 
@@ -555,12 +735,15 @@ _expect_raises(
     contains="key_columns",
 )
 
-print("PASS: Non-string sources, reserved outputs, and omitted explicit keys fail safely.")
+_pass("ST-008", "Non-string sources, reserved outputs, and omitted explicit keys fail safely.")
 
 # COMMAND ----------
 
-spark.conf.set("spark.sql.ansi.enabled", ORIGINAL_ANSI)
-spark.conf.set("spark.sql.legacy.timeParserPolicy", ORIGINAL_TIME_POLICY)
+assert tuple(PASSED_TEST_IDS) == SYSTEM_TEST_IDS, (
+    "The final success marker requires every system test to pass in order; "
+    f"recorded {PASSED_TEST_IDS!r}."
+)
+assert ACTIVE_TEST_ID is None, f"System test {ACTIVE_TEST_ID} did not record a PASS result."
 
 print()
 print("=" * 80)

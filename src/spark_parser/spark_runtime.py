@@ -184,6 +184,23 @@ def _spark_error_class(exc: PySparkException) -> str:
     return str(condition or "")
 
 
+def _resolver_is_case_sensitive(df: DataFrame) -> bool:
+    """Detect the active Catalyst resolver without reading a restricted SQL setting.
+
+    Some managed Spark environments apply ``spark.sql.caseSensitive`` while denying callers
+    access to the setting itself. Dropping an upper-case spelling from a one-column lower-case
+    projection asks Catalyst the question directly: the field is removed by the case-insensitive
+    resolver and retained by the case-sensitive resolver. Inspecting ``schema`` performs analysis
+    without manufacturing an expected error or executing a Spark job.
+    """
+    lower_name = "__spark_parser_case_probe"
+    upper_name = lower_name.upper()
+    probe = df.sparkSession.range(0).select(
+        F.lit(None).cast("string").alias(lower_name),
+    )
+    return bool(probe.drop(upper_name).schema.fields)
+
+
 _SAFE_JSON_PATH_FIELD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
@@ -497,29 +514,45 @@ class SparkDataFrameParser:
         try:
             return df.withColumns(columns)
         except Exception as exc:
-            message = str(exc)
-            iteration_exhausted = (
-                "Max iterations (" in message and "reached for batch Resolution" in message
-            )
-            stack_exhausted = "java.lang.StackOverflowError" in message
-            if not iteration_exhausted and not stack_exhausted:
-                raise
-            maximum_depth = max(cls._data_type_nesting(column.data_type) for column in config.columns)
-            if stack_exhausted:
-                raise SchemaValidationError(
-                    "Spark exhausted the driver JVM thread stack while resolving the combined "
-                    "input and parser plan. The maximum configured complex nesting depth is "
-                    f"{maximum_depth}. Increase the driver JVM thread-stack size before Spark "
-                    "starts or reduce parser nesting. No Spark data action was started."
-                ) from exc
-            setting = df.sparkSession.conf.get("spark.sql.analyzer.maxIterations", "100")
+            cls._raise_resource_exhaustion(df, config, exc)
+            raise
+
+    @classmethod
+    def _raise_resource_exhaustion(
+        cls,
+        df: DataFrame,
+        config: ParserConfig,
+        exc: Exception,
+    ) -> None:
+        """Translate analyzer/driver resource exhaustion from any metadata-analysis boundary."""
+        message = str(exc)
+        iteration_exhausted = (
+            "Max iterations (" in message and "reached for batch Resolution" in message
+        )
+        stack_exhausted = "java.lang.StackOverflowError" in message
+        if not iteration_exhausted and not stack_exhausted:
+            return
+        maximum_depth = max(cls._data_type_nesting(column.data_type) for column in config.columns)
+        if stack_exhausted:
             raise SchemaValidationError(
-                "Spark could not resolve the combined input and parser plan within "
-                f"spark.sql.analyzer.maxIterations={setting}. The maximum configured complex "
-                f"nesting depth is {maximum_depth}. Increase "
-                "spark.sql.analyzer.maxIterations for intentionally deep schemas or reduce parser "
-                "nesting. No Spark data action was started."
+                "Spark exhausted the driver JVM thread stack while resolving the combined input "
+                "and parser plan. The maximum configured complex nesting depth is "
+                f"{maximum_depth}. Increase the driver JVM thread-stack size before Spark starts "
+                "or reduce parser nesting. No Spark data action was started."
             ) from exc
+        try:
+            setting = df.sparkSession.conf.get("spark.sql.analyzer.maxIterations", "100")
+            setting_description = f"spark.sql.analyzer.maxIterations={setting}"
+        except PySparkException:
+            # Managed Spark runtimes can enforce this limit while withholding the setting. It is
+            # explanatory context only; never mask the analyzer failure with a second access error.
+            setting_description = "the runtime's spark.sql.analyzer.maxIterations limit"
+        raise SchemaValidationError(
+            "Spark could not resolve the combined input and parser plan within "
+            f"{setting_description}. The maximum configured complex nesting depth is "
+            f"{maximum_depth}. Increase spark.sql.analyzer.maxIterations for intentionally deep "
+            "schemas or reduce parser nesting. No Spark data action was started."
+        ) from exc
 
     @classmethod
     def _data_type_nesting(cls, data_type: SparkDataType) -> int:
@@ -539,6 +572,15 @@ class SparkDataFrameParser:
                 default=0,
             )
         return 0
+
+    @classmethod
+    def _case_sensitivity_for_schema(cls, df: DataFrame, config: ParserConfig) -> bool:
+        """Probe Catalyst's resolver and translate metadata-analysis resource failures."""
+        try:
+            return _resolver_is_case_sensitive(df)
+        except Exception as exc:
+            cls._raise_resource_exhaustion(df, config, exc)
+            raise
 
     def _validate_schema(
         self,
@@ -574,11 +616,7 @@ class SparkDataFrameParser:
         if any(not _is_well_formed_unicode(name) for name in normalized_keys):
             raise SchemaValidationError("key_columns must contain well-formed Unicode.")
 
-        case_sensitive_setting = df.sparkSession.conf.get(
-            "spark.sql.caseSensitive",
-            "false",
-        )
-        case_sensitive = (case_sensitive_setting or "false").lower() == "true"
+        case_sensitive = self._case_sensitivity_for_schema(df, config)
         self._validate_spark_boolean_overlap(df, config)
         self._validate_custom_datetime_policy(df, config)
         configured_names = {column.source_column_name for column in config.columns}
@@ -743,10 +781,18 @@ class SparkDataFrameParser:
         )
         if not custom_formats:
             return
-        policy_setting = df.sparkSession.conf.get(
-            "spark.sql.legacy.timeParserPolicy",
-            "EXCEPTION",
-        )
+        try:
+            policy_setting = df.sparkSession.conf.get(
+                "spark.sql.legacy.timeParserPolicy",
+                "EXCEPTION",
+            )
+        except PySparkException as exc:
+            raise SchemaValidationError(
+                "Custom datetime formats require access to "
+                "spark.sql.legacy.timeParserPolicy so the parser can verify CORRECTED mode. "
+                "The active Spark runtime withholds that setting; use built-in datetime formats "
+                "or enable the setting for this workload."
+            ) from exc
         policy = (policy_setting or "EXCEPTION").upper()
         if policy != "CORRECTED":
             raise SchemaValidationError(
@@ -755,8 +801,7 @@ class SparkDataFrameParser:
                 f"configured parser error policy; current policy is {policy!r}. Custom formats: "
                 f"{custom_formats}."
             )
-        probe_session = cls._metadata_probe_session(df)
-        probe_session.conf.set("spark.sql.legacy.timeParserPolicy", policy)
+        probe_session = cls._metadata_probe_session(df, time_parser_policy=policy)
         for datetime_format in custom_formats:
             try:
                 # ``schema`` stops at analysis, where Spark has not yet compiled the formatter.
@@ -777,12 +822,12 @@ class SparkDataFrameParser:
         """Validate non-ASCII case-insensitive vocabularies with Spark, without a data job.
 
         Python and Spark may use different Unicode tables, and Spark releases can differ even on
-        the same JVM. ``inputFiles`` reaches constant folding without executing a job. A deliberate
-        zero array index therefore turns a Spark-computed overlap into a deterministic binding
-        error, including for empty DataFrames and nested Boolean parsers whose containers are empty.
+        the same JVM. ``from_json`` requires a foldable schema expression and evaluates that schema
+        during analysis. Selecting between two valid DDL strings therefore exposes Spark's own
+        normalization result through metadata alone, even when optimizer constant folding is
+        disabled and even for empty DataFrames or nested Boolean parsers with empty containers.
         """
         checked: set[tuple[tuple[str, ...], tuple[str, ...]]] = set()
-        probe_session: SparkSession | None = None
         for column in config.columns:
             for options in iter_parser_options(column.parser):
                 if options.parser_type is not ParserType.BOOLEAN or not (
@@ -797,8 +842,6 @@ class SparkDataFrameParser:
                 if signature in checked:
                     continue
                 checked.add(signature)
-                if probe_session is None:
-                    probe_session = cls._metadata_probe_session(df)
                 true_values = F.array(
                     *(F.lower(F.lit(value)) for value in options.true_values)
                 )
@@ -806,34 +849,88 @@ class SparkDataFrameParser:
                     *(F.lower(F.lit(value)) for value in options.false_values)
                 )
                 overlap = F.arrays_overlap(true_values, false_values)
-                checked_index = F.when(overlap, F.lit(0)).otherwise(F.lit(1))
-                probe = probe_session.range(0).select(
-                    F.element_at(F.array(F.lit(1)), checked_index).alias("validated")
+                schema_ddl = F.when(overlap, F.lit("STRUCT<overlap: INT>")).otherwise(
+                    F.lit("STRUCT<disjoint: INT>")
                 )
-                try:
-                    probe.inputFiles()
-                except PySparkException as exc:
-                    if _spark_error_class(exc) != "INVALID_INDEX_OF_ZERO":
-                        raise
+                probe_type = (
+                    df.sparkSession.range(0)
+                    .select(F.from_json(F.lit("{}"), schema_ddl).alias("validated"))
+                    .schema["validated"]
+                    .dataType
+                )
+                field_names = (
+                    probe_type.fieldNames() if isinstance(probe_type, T.StructType) else []
+                )
+                if field_names == ["overlap"]:
                     raise SchemaValidationError(
                         "Boolean true_values and false_values overlap under the active Spark "
                         "runtime's case-insensitive Unicode normalization for target column "
                         f"{column.target_column_name!r}. Use disjoint token sets or enable "
                         "boolean_case_sensitive. No Spark data action was started."
-                    ) from exc
+                    )
+                if field_names != ["disjoint"]:
+                    raise SchemaValidationError(
+                        "Spark did not return the expected metadata shape while validating "
+                        "case-insensitive Boolean vocabularies. Ensure the built-in from_json "
+                        "function is not shadowed, then retry. No Spark data action was started."
+                    )
 
-    @staticmethod
-    def _metadata_probe_session(df: DataFrame) -> SparkSession:
+    @classmethod
+    def _metadata_probe_session(
+        cls,
+        df: DataFrame,
+        *,
+        time_parser_policy: str,
+    ) -> SparkSession:
         """Return an isolated session whose optimizer can evaluate configuration constants.
 
         Callers may legitimately exclude Catalyst rules or lower optimizer iteration limits for
         their data plans. Metadata validation must neither inherit those settings nor mutate them,
-        so it uses the same Spark runtime in a fresh SQL session with constant folding restored.
+        so classic Spark uses a fresh SQL session with constant folding restored. Spark Connect
+        does not expose ``newSession`` or arbitrary optimizer settings; there the caller session is
+        safe only after a known-invalid control proves that optimization is actually evaluating
+        foldable expressions. Neither path executes a Spark data job.
         """
-        probe_session = df.sparkSession.newSession()
-        probe_session.conf.set("spark.sql.optimizer.excludedRules", "")
-        probe_session.conf.set("spark.sql.optimizer.maxIterations", "100")
-        return probe_session
+        caller_session = df.sparkSession
+        try:
+            probe_session = caller_session.newSession()
+        except PySparkException as exc:
+            if _spark_error_class(exc) not in {"JVM_ATTRIBUTE_NOT_SUPPORTED", "NOT_IMPLEMENTED"}:
+                raise
+            probe_session = caller_session
+        else:
+            try:
+                probe_session.conf.set("spark.sql.optimizer.excludedRules", "")
+                probe_session.conf.set("spark.sql.optimizer.maxIterations", "100")
+                probe_session.conf.set(
+                    "spark.sql.legacy.timeParserPolicy",
+                    time_parser_policy,
+                )
+            except PySparkException as exc:
+                if _spark_error_class(exc) not in {
+                    "CANNOT_MODIFY_CONFIG",
+                    "CONFIG_NOT_AVAILABLE",
+                }:
+                    raise
+                probe_session = caller_session
+
+        control = probe_session.range(0).select(
+            F.try_to_timestamp(F.lit(""), F.lit("invalid[")).alias("validated")
+        )
+        try:
+            control.inputFiles()
+        except PySparkException as exc:
+            condition = _spark_error_class(exc)
+            if condition.startswith("INVALID_DATETIME_PATTERN") or (
+                not condition and "Illegal pattern character" in str(exc)
+            ):
+                return probe_session
+            raise
+        raise SchemaValidationError(
+            "Custom datetime formats cannot be validated because the active Spark optimizer did "
+            "not evaluate a foldable metadata probe. Restore Catalyst constant folding or use a "
+            "built-in datetime format. No Spark data action was started."
+        )
 
     @staticmethod
     def _runtime_plan(

@@ -23,7 +23,7 @@ if importlib.util.find_spec("pyspark") is None and os.environ.get("SPARK_PARSER_
     )
 pyspark = pytest.importorskip("pyspark")
 from py4j.protocol import Py4JJavaError  # noqa: E402
-from pyspark.errors import PySparkException  # noqa: E402
+from pyspark.errors import PySparkException, PySparkNotImplementedError  # noqa: E402
 from pyspark.sql import SparkSession  # noqa: E402
 from pyspark.sql import functions as F  # noqa: E402
 
@@ -1450,8 +1450,11 @@ columns:
         SparkDataFrameParser().parse_dataframe(df, config, key_columns=["duplicate"])
 
 
-def test_schema_preflight_uses_sparks_active_case_resolver(spark: SparkSession) -> None:
-    """Reject resolver collisions before analysis while allowing exact names in strict mode."""
+def test_schema_preflight_uses_sparks_active_case_resolver(
+    spark: SparkSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Use Catalyst itself when the managed runtime withholds its resolver configuration."""
     compiler = YamlParserConfigCompiler()
     base_config = compiler.compile_text(
         """
@@ -1563,6 +1566,15 @@ columns:
     previous_case_sensitive = spark.conf.get("spark.sql.caseSensitive")
     try:
         spark.conf.set("spark.sql.caseSensitive", "false")
+        runtime_config_type = type(spark.conf)
+        original_get = runtime_config_type.get
+
+        def restricted_get(runtime_config, key, *args, **kwargs):
+            if key == "spark.sql.caseSensitive":
+                raise RuntimeError("configuration spark.sql.caseSensitive is not available")
+            return original_get(runtime_config, key, *args, **kwargs)
+
+        monkeypatch.setattr(runtime_config_type, "get", restricted_get)
         case_mismatch = spark.sql("SELECT 'ok' AS value, 'key' AS row_id")
         parsing = SparkDataFrameParser().parse_dataframe(
             case_mismatch,
@@ -1785,8 +1797,8 @@ columns:
             excluded_rules_setting,
             "org.apache.spark.sql.catalyst.optimizer.ConstantFolding",
         )
-        # A valid vocabulary still binds under the caller's excluded rule. The private validation
-        # session must not alter that caller-owned setting.
+        # Analyzer-owned DDL evaluation remains exact when the caller excludes optimizer constant
+        # folding, and validation must not alter that caller-owned setting.
         SparkDataFrameParser().parse_dataframe(
             spark.range(0).select(F.lit("ä").alias("boolean_value")),
             distinct_config,
@@ -1812,6 +1824,38 @@ columns:
         spark.conf.set(excluded_rules_setting, previous_excluded_rules)
         for name, value in previous_local_properties.items():
             spark.sparkContext.setLocalProperty(name, value)
+
+
+def test_boolean_overlap_validation_fails_closed_when_from_json_is_shadowed(
+    spark: SparkSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: shadowed_boolean_overlap_probe
+parser_config_name: Shadowed Boolean Overlap Probe
+version: "1"
+globals:
+  true_values: ["Ä"]
+  false_values: ["ä"]
+  boolean_case_sensitive: false
+columns:
+  - source_column_name: value
+    target_column_name: Value
+    expected_data_type: boolean
+    parser: boolean
+"""
+    )
+    monkeypatch.setattr(
+        "spark_parser.spark_runtime.F.from_json",
+        lambda _value, _schema: F.lit("shadowed"),
+    )
+    with pytest.raises(SchemaValidationError, match="built-in from_json.*not shadowed"):
+        SparkDataFrameParser().parse_dataframe(
+            spark.range(0).select(F.lit("Ä").alias("value")),
+            config,
+            key_columns=["value"],
+        )
 
 
 def test_fail_default_boolean_trim_and_decimal_runtime_contracts(
@@ -2615,7 +2659,10 @@ columns:
     assert audit.error is None
 
 
-def test_timestamp_ntz_honors_error_policies_under_ansi(spark: SparkSession) -> None:
+def test_timestamp_ntz_honors_error_policies_under_ansi(
+    spark: SparkSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     config = YamlParserConfigCompiler().compile_text(
         """
 parser_config_id: timestamp_ntz_errors
@@ -2656,6 +2703,21 @@ columns:
             )
 
         spark.conf.set("spark.sql.legacy.timeParserPolicy", "CORRECTED")
+
+        class ConnectNewSessionUnsupportedError(PySparkNotImplementedError):
+            def __init__(self) -> None:
+                Exception.__init__(self, "SparkSession.newSession is unavailable")
+
+            def getCondition(self) -> str:
+                return "NOT_IMPLEMENTED"
+
+            def getErrorClass(self) -> str:
+                return "NOT_IMPLEMENTED"
+
+        def connect_new_session(_session):
+            raise ConnectNewSessionUnsupportedError
+
+        monkeypatch.setattr(type(spark), "newSession", connect_new_session)
         parsing = SparkDataFrameParser().parse_dataframe(
             df,
             config,
