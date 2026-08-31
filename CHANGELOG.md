@@ -2,6 +2,10 @@
 
 ## 0.4.0
 
+- Add `title_business_v1` as ordinary title formatting plus exact `FHLB`, `P&I`, `UST`, `RCF`,
+  and `CMT` exceptions and bounded numeric-hyphen capitalization; keep `title` unchanged.
+- Add the fail-closed `interest_rate_index_v1` string profile for approved benchmark labels,
+  compact month/year tenors, and exact vendor/source aliases while preserving `title` behavior.
 - Keep the portable Spark integration suite independent of optional DataFrame cache APIs, which
   Databricks serverless compute rejects, while retaining and separately testing classic-Spark
   `DataFrameParsing.persist()` and `unpersist()` delegation; align the default storage level with

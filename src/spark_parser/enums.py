@@ -57,11 +57,13 @@ class StringFormat(str, Enum):
     LOWER = "lower"
     UPPER = "upper"
     TITLE = "title"
+    TITLE_BUSINESS_V1 = "title_business_v1"
     PASCAL = "pascal"
     ADDRESS_US_V1 = "address_us_v1"
     COUNTY = "county"
     STATE_US = "state_us"
     ZIP = "zip"
+    INTEREST_RATE_INDEX_V1 = "interest_rate_index_v1"
 
 
 class ComplexInputFormat(str, Enum):

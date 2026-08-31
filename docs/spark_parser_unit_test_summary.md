@@ -2,9 +2,9 @@
 
 Sources: `tests/unit/` and `tests/integration/`. Shared test data lives under `tests/fixtures/`.
 
-The suite contains **120 explicit test functions** and collects **180 pytest cases** after parameter
-expansion. Of those cases, **126** are Spark-independent compiler, serializer, and service unit
-tests. The remaining **54** are Spark integration tests; 52 materialize a real Spark session and
+The suite contains **123 explicit test functions** and collects **185 pytest cases** after parameter
+expansion. Of those cases, **128** are Spark-independent compiler, serializer, and service unit
+tests. The remaining **57** are Spark integration tests; 55 materialize a real Spark session and
 two verify Spark-facing contracts without starting Spark or invoking platform-optional cache APIs.
 
 The Databricks system-test notebook is separate from these counts and is documented in
@@ -14,11 +14,11 @@ The Databricks system-test notebook is separate from these counts and is documen
 
 | Area | Explicit Tests | Collected Cases | Current Contract Covered |
 | --- | ---: | ---: | --- |
-| YAML compilation and datatype grammar | 54 | 114 | Strict YAML shapes and scalar types, source-located duplicate-key errors, well-formed Unicode, bounded YAML/DDL recursion, complex-default cycle and expansion limits, recursive Spark DDL, all scalar and complex parser contracts, cross-Python timestamp defaults, strict decimal text, Boolean vocabulary inheritance, source fan-out, target uniqueness, metadata normalization, and canonical parser/type aliases. |
+| YAML compilation and datatype grammar | 54 | 116 | Strict YAML shapes and scalar types, source-located duplicate-key errors, well-formed Unicode, bounded YAML/DDL recursion, complex-default cycle and expansion limits, recursive Spark DDL, all scalar and complex parser contracts, cross-Python timestamp defaults, strict decimal text, Boolean vocabulary inheritance, source fan-out, target uniqueness, metadata normalization, and canonical parser/type aliases. |
 | Serialization | 2 | 2 | Deterministic mappings, canonical JSON, semantic/order-sensitive content hashing, caller detachment, and recompilation of resolved configuration. |
 | Service and configuration review | 10 | 10 | Discoverable parser/config metadata and aliases, deeply immutable public defaults with detached JSON copies, public compilation/serialization facades, public error behavior, mutable review data-transfer objects with detached mappings, type-driven YAML text/`Path`/mapping dispatch, evidence-based deferred Unicode checks, inert-null-marker warnings, compiler/metadata invariants, resolved options, injection-safe and round-trip-safe Markdown/YAML/JSON artifacts, and evidence-based validation results. |
-| Native Spark runtime | 54 | 54 | Scalar and recursive complex parsing, 100,000-character JSON fields, linear audited-plan budgets, analyzer-exhaustion reporting, full Unicode whitespace/case normalization and metadata-only Spark-owned Boolean-overlap validation on empty inputs, strict numeric/JSON/Base64/datetime tokens, deterministic map output and nested audit paths, recursive default/null/zero behavior, Spark-exact identifier resolution, public facade projections and cache-adapter delegation, classic shared-cache semantics, date/timezone stability, ANSI parity, fail-closed schema guards, wide configurations, custom output prefixes, and lazy fail-mode materialization. |
-| **Total** | **120** | **180** | |
+| Native Spark runtime | 57 | 57 | Scalar and recursive complex parsing, bounded business-title exceptions and numeric-hyphen casing, approved interest-rate index canonicalization and fail-closed alias boundaries, 100,000-character JSON fields, linear audited-plan budgets, analyzer-exhaustion reporting, full Unicode whitespace/case normalization and metadata-only Spark-owned Boolean-overlap validation on empty inputs, strict numeric/JSON/Base64/datetime tokens, deterministic map output and nested audit paths, recursive default/null/zero behavior, Spark-exact identifier resolution, public facade projections and cache-adapter delegation, classic shared-cache semantics, date/timezone stability, ANSI parity, fail-closed schema guards, wide configurations, custom output prefixes, and lazy fail-mode materialization. |
+| **Total** | **123** | **185** | |
 
 The previous Databricks notebook/config layout checks were removed with the release-test workflow.
 Notebook packaging and workspace layout are not unit behavior; the replacement Databricks system

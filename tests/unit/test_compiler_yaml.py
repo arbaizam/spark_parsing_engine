@@ -375,6 +375,8 @@ columns:
     ("format_name", "expected_format"),
     [
         ("title", StringFormat.TITLE),
+        ("title_business_v1", StringFormat.TITLE_BUSINESS_V1),
+        ("interest_rate_index_v1", StringFormat.INTEREST_RATE_INDEX_V1),
         ("state_us", StringFormat.STATE_US),
     ],
 )

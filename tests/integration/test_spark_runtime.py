@@ -586,6 +586,332 @@ columns:
     assert invalid_audit[2].changed is True
 
 
+def test_interest_rate_index_v1_canonicalizes_the_approved_corpus(
+    spark: SparkSession,
+) -> None:
+    """Canonicalize approved index families, tenors, abbreviations, and exact source codes."""
+    cases = [
+        ("SOFR Term - Overnight", "SOFR Term - Overnight"),
+        ("SOFR Term - 1 Month", "SOFR Term - 1-Month"),
+        ("SOFR Term - 3 Month", "SOFR Term - 3-Month"),
+        ("SOFR Term - 6 Month", "SOFR Term - 6-Month"),
+        ("SOFR Term - 12 Month", "SOFR Term - 12-Month"),
+        ("1 Year Constant Maturity Treasury (CMT)", "1-Year Constant Maturity Treasury (CMT)"),
+        ("2 Year Constant Maturity Treasury (CMT)", "2-Year Constant Maturity Treasury (CMT)"),
+        ("3 Year Constant Maturity Treasury (CMT)", "3-Year Constant Maturity Treasury (CMT)"),
+        ("5 Year Constant Maturity Treasury (CMT)", "5-Year Constant Maturity Treasury (CMT)"),
+        ("7 Year Constant Maturity Treasury (CMT)", "7-Year Constant Maturity Treasury (CMT)"),
+        ("10 Year Constant Maturity Treasury (CMT)", "10-Year Constant Maturity Treasury (CMT)"),
+        ("30 Year Constant Maturity Treasury (CMT)", "30-Year Constant Maturity Treasury (CMT)"),
+        ("BSBY - Overnight", "BSBY - Overnight"),
+        ("BSBY - 1 Month", "BSBY - 1-Month"),
+        ("BSBY - 3 Month", "BSBY - 3-Month"),
+        ("BSBY - 6 Month", "BSBY - 6-Month"),
+        ("BSBY - 12 Month", "BSBY - 12-Month"),
+        ("Ameribor - Overnight", "Ameribor - Overnight"),
+        ("Ameribor - 1 Week", "Ameribor - 1-Week"),
+        ("Ameribor - 1 Month", "Ameribor - 1-Month"),
+        ("Ameribor - 3 Month", "Ameribor - 3-Month"),
+        ("Ameribor - 6 Month", "Ameribor - 6-Month"),
+        ("Ameribor - 1 Year", "Ameribor - 1-Year"),
+        ("Ameribor - 2 Year", "Ameribor - 2-Year"),
+        ("Ameribor - 30 Day Average", "Ameribor - 30-Day Average"),
+        ("Ameribor - 90 Day Average", "Ameribor - 90-Day Average"),
+        ("Ameribor - Derived 30T", "Ameribor - Derived 30T"),
+        ("Ameribor - Derived 90T", "Ameribor - Derived 90T"),
+        ("Prime", "Prime"),
+        ("1 Month LIBOR", "1-Month LIBOR"),
+        ("2 Month LIBOR", "2-Month LIBOR"),
+        ("3 Month LIBOR", "3-Month LIBOR"),
+        ("6 Month LIBOR", "6-Month LIBOR"),
+        ("9 Month LIBOR", "9-Month LIBOR"),
+        ("12 Month LIBOR", "12-Month LIBOR"),
+        ("Treasury - 3 mos", "Treasury - 3-Month"),
+        ("Treasury - 6 mos", "Treasury - 6-Month"),
+        ("Treasury - 1 yr", "Treasury - 1-Year"),
+        ("Treasury - 2 yr", "Treasury - 2-Year"),
+        ("Treasury - 3 yr", "Treasury - 3-Year"),
+        ("Treasury - 5 yr", "Treasury - 5-Year"),
+        ("Treasury - 7 yr", "Treasury - 7-Year"),
+        ("Treasury - 10 yr", "Treasury - 10-Year"),
+        ("Treasury - 30 yr", "Treasury - 30-Year"),
+        ("Treasury Avg - 12 mos", "Treasury Avg - 12-Month"),
+        ("USD Swap 1 Year", "USD Swap 1-Year"),
+        ("USD Swap 5 Year", "USD Swap 5-Year"),
+        ("USD Swap 10 Year", "USD Swap 10-Year"),
+        ("Freddie Mac - 1 mo", "Freddie Mac - 1-Month"),
+        ("Freddie Mac - 3 mos", "Freddie Mac - 3-Month"),
+        ("Freddie Mac - 6 mos", "Freddie Mac - 6-Month"),
+        ("Freddie Mac - 12 mos", "Freddie Mac - 12-Month"),
+        ("FHLB - 1 yr", "FHLB - 1-Year"),
+        ("FHLB - 2 yr", "FHLB - 2-Year"),
+        ("FHLB - 3 yr", "FHLB - 3-Year"),
+        ("FHLB - 5 yr", "FHLB - 5-Year"),
+        ("FHLB - 7 yr", "FHLB - 7-Year"),
+        ("FHLB - 10 yr", "FHLB - 10-Year"),
+        ("SOFR 12-Month", "SOFR 12-Month"),
+        ("SOFR 12-month", "SOFR 12-Month"),
+        ("SOFR 30 day average", "SOFR 30-Day Average"),
+        ("TSFR6M", "SOFR Term - 6-Month"),
+        ("SOFR 12 Month", "SOFR 12-Month"),
+        ("SOFR180A", "SOFR 180-Day Average"),
+        ("SOFR", "SOFR"),
+        ("SOFR 1-Month", "SOFR 1-Month"),
+        ("SOFR 1 month", "SOFR 1-Month"),
+        ("SOFR 1 MONTH", "SOFR 1-Month"),
+        ("SOFR 30 Day Average", "SOFR 30-Day Average"),
+        ("SOFR30", "SOFR - 30-Day"),
+        ("SOFR30A", "SOFR 30-Day Average"),
+        ("RCF6M", "RCF 6-Month"),
+        ("SOFR - 30 Day", "SOFR - 30-Day"),
+        ("RCF12M", "RCF 12-Month"),
+        ("10 yr CMT", "10-Year Constant Maturity Treasury (CMT)"),
+        ("LIBOR - 1 Year (Daily)", "LIBOR - 1-Year (Daily)"),
+        ("SOFR Avg - 30 days", "SOFR 30-Day Average"),
+        ("SOFR Term - 12M", "SOFR Term - 12-Month"),
+        ("SOFR 1M", "SOFR 1-Month"),
+        ("BSBY - 12M", "BSBY - 12-Month"),
+        ("Ameribor - 2Yr", "Ameribor - 2-Year"),
+        ("1M LIBOR", "1-Month LIBOR"),
+        ("Treasury - 1Y", "Treasury - 1-Year"),
+        ("USD Swap 5yr", "USD Swap 5-Year"),
+        ("Freddie Mac - 12M", "Freddie Mac - 12-Month"),
+        ("FHLB - 10Yr", "FHLB - 10-Year"),
+        ("10Y CMT", "10-Year Constant Maturity Treasury (CMT)"),
+        ("RCF 6M", "RCF 6-Month"),
+    ]
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: interest_rate_indexes
+parser_config_name: Interest Rate Indexes
+version: "1"
+columns:
+  - source_column_name: financial_index
+    target_column_name: FinancialIndex
+    expected_data_type: string
+    parser:
+      type: string
+      format: interest_rate_index_v1
+"""
+    )
+
+    source_df = spark.range(len(cases)).select(
+        (F.col("id") + 1).alias("row_id"),
+        F.element_at(
+            F.array(*(F.lit(source) for source, _ in cases)),
+            (F.col("id") + 1).cast("integer"),
+        ).alias("financial_index"),
+    )
+    parsed = SparkDataFrameParser().parse_dataframe(
+        source_df,
+        config,
+        key_columns=["row_id"],
+    )
+    assert [row.FinancialIndex for row in parsed.parsed_df.orderBy("row_id").collect()] == [
+        expected for _, expected in cases
+    ]
+
+    # Every emitted label is itself a canonical input.
+    canonical_values = sorted({expected for _, expected in cases})
+    canonical_df = spark.range(len(canonical_values)).select(
+        (F.col("id") + 1).alias("row_id"),
+        F.element_at(
+            F.array(*(F.lit(value) for value in canonical_values)),
+            (F.col("id") + 1).cast("integer"),
+        ).alias("financial_index"),
+    )
+    reparsed = SparkDataFrameParser().parse_dataframe(
+        canonical_df,
+        config,
+        key_columns=["row_id"],
+    )
+    assert [row.FinancialIndex for row in reparsed.parsed_df.orderBy("row_id").collect()] == [
+        *canonical_values
+    ]
+
+
+def test_title_business_v1_adds_only_bounded_business_title_rules(
+    spark: SparkSession,
+) -> None:
+    """Retain strict title behavior separately from frozen acronyms and numeric hyphens."""
+    cases = [
+        ("fhlb   advance", "Fhlb   Advance", "FHLB   Advance"),
+        ("p&i payment", "P&i Payment", "P&I Payment"),
+        ("ust rcf cmt", "Ust Rcf Cmt", "UST RCF CMT"),
+        ("12-month rate", "12-month Rate", "12-Month Rate"),
+        ("term 30-day", "Term 30-day", "Term 30-Day"),
+        ("2-factor authentication", "2-factor Authentication", "2-Factor Authentication"),
+        ("3-month/6-month rates", "3-month/6-month Rates", "3-Month/6-Month Rates"),
+        ("12-month-1-year", "12-month-1-year", "12-Month-1-Year"),
+        ("state-of-the-art", "State-of-the-art", "State-of-the-art"),
+        (
+            "12- month 12--month 12/month",
+            "12- Month 12--month 12/month",
+            "12- Month 12--month 12/month",
+        ),
+        ("12–month section_12-month", "12–month Section_12-month", "12–month Section_12-month"),
+        ("trust account", "Trust Account", "Trust Account"),
+        ("rcf6m cmt2 p&ix fhlb_code", "Rcf6m Cmt2 P&ix Fhlb_code", "Rcf6m Cmt2 P&ix Fhlb_code"),
+        (
+            "abc12-month 12.5-month 1,200-month",
+            "Abc12-month 12.5-month 1,200-month",
+            "Abc12-month 12.5-month 1,200-month",
+        ),
+        ("cmt-backed fhlb's", "Cmt-backed Fhlb's", "CMT-backed FHLB's"),
+        (
+            "(fhlb), p&i; ust/rcf cmt.",
+            "(fhlb), P&i; Ust/rcf Cmt.",
+            "(FHLB), P&I; UST/RCF CMT.",
+        ),
+        ("FHLB 12-Month RCF", "Fhlb 12-month Rcf", "FHLB 12-Month RCF"),
+        ("sofr libor usd", "Sofr Libor Usd", "Sofr Libor Usd"),
+        (None, None, None),
+    ]
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: business_titles
+parser_config_name: Business Titles
+version: "1"
+columns:
+  - source_column_name: label
+    target_column_name: StrictTitle
+    expected_data_type: string
+    parser:
+      type: string
+      format: title
+      collapse_whitespace: false
+  - source_column_name: label
+    target_column_name: BusinessTitle
+    expected_data_type: string
+    parser:
+      type: string
+      format: title_business_v1
+      collapse_whitespace: false
+"""
+    )
+    source_df = spark.range(len(cases)).select(
+        (F.col("id") + 1).alias("row_id"),
+        F.element_at(
+            F.array(*(F.lit(source).cast("string") for source, _, _ in cases)),
+            (F.col("id") + 1).cast("integer"),
+        ).alias("label"),
+    )
+    rows = (
+        SparkDataFrameParser()
+        .parse_dataframe(source_df, config, key_columns=["row_id"])
+        .parsed_df.orderBy("row_id")
+        .collect()
+    )
+    assert [row.StrictTitle for row in rows] == [strict for _, strict, _ in cases]
+    assert [row.BusinessTitle for row in rows] == [business for _, _, business in cases]
+
+
+def test_interest_rate_index_v1_fails_closed_and_honors_null_markers(
+    spark: SparkSession,
+) -> None:
+    """Reject partial/unknown lookalikes while preserving raw values or replacing configured nulls."""
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: interest_rate_index_boundaries
+parser_config_name: Interest Rate Index Boundaries
+version: "1"
+columns:
+  - source_column_name: financial_index
+    target_column_name: PreservedIndex
+    expected_data_type: string
+    parser:
+      type: string
+      format: interest_rate_index_v1
+      on_parse_error: preserve
+      audit: true
+  - source_column_name: financial_index
+    target_column_name: NullAwareIndex
+    expected_data_type: string
+    parser:
+      type: string
+      format: interest_rate_index_v1
+      null_markers: [NAP]
+      null_marker_case_sensitive: false
+      replace_null_markers: true
+      on_parse_error: preserve
+      audit: true
+"""
+    )
+    values = [
+        "NAP",
+        "nap",
+        "null",
+        "Unknown Index 12M",
+        "XSOFR30",
+        "SOFR30AX",
+        "RCF6MM",
+        "SOFR Term - 2 Month",
+        "SOFR 01M",
+        "SOFR 0M",
+        "SOFR 1.5M",
+        "SOFR 12MM",
+        "$12M",
+        None,
+        "  sofr   term - 3 MONTH  ",
+    ]
+    source_df = spark.range(len(values)).select(
+        (F.col("id") + 1).alias("row_id"),
+        F.element_at(
+            F.array(*(F.lit(value).cast("string") for value in values)),
+            (F.col("id") + 1).cast("integer"),
+        ).alias("financial_index"),
+    )
+    parsed = SparkDataFrameParser().parse_dataframe(
+        source_df,
+        config,
+        key_columns=["row_id"],
+    )
+    rows = parsed.parsed_df.orderBy("row_id").collect()
+    assert [row.PreservedIndex for row in rows] == [
+        *values[:-1],
+        "SOFR Term - 3-Month",
+    ]
+    assert [row.NullAwareIndex for row in rows] == [
+        None,
+        None,
+        *values[2:-1],
+        "SOFR Term - 3-Month",
+    ]
+
+    audits = parsed.results_df.orderBy("row_id").collect()
+    assert audits[0].spark_parser_parse_results[0].actions_applied == [
+        "parse_error_preserved"
+    ]
+    assert audits[0].spark_parser_parse_results[1].actions_applied == [
+        "null_marker_replaced"
+    ]
+    assert audits[3].spark_parser_parse_results[0].parsed_value == "Unknown Index 12M"
+    assert audits[-2].spark_parser_parse_results[0].actions_applied == []
+    assert audits[-1].spark_parser_parse_results[0].actions_applied == []
+
+    fail_config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: interest_rate_index_fail
+parser_config_name: Interest Rate Index Fail
+version: "1"
+columns:
+  - source_column_name: financial_index
+    target_column_name: FinancialIndex
+    expected_data_type: string
+    parser:
+      type: string
+      format: interest_rate_index_v1
+"""
+    )
+    failing = SparkDataFrameParser().parse_dataframe(
+        spark.sql("SELECT 'NAP' AS financial_index"),
+        fail_config,
+        key_columns=["financial_index"],
+    )
+    with pytest.raises((Py4JJavaError, PySparkException)):
+        failing.parsed_df.collect()
+
+
 def test_territories_and_single_or_multiple_property_values(spark: SparkSession) -> None:
     """Parse scalar/list property locations while retaining a canonical string target."""
     config = YamlParserConfigCompiler().compile_text(

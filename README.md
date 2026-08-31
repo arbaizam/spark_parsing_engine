@@ -178,6 +178,12 @@ the DataFrame runtime.
   for `address_us_v1`, `county`, `state_us`, and `zip`. Keeping these domain-specific rules outside
   the main runtime makes the lookup tables and formatting decisions easier to review and test.
 
+- [`interest_rate_formats.py`](src/spark_parser/interest_rate_formats.py) holds the closed,
+  versioned catalog and Spark-native comparison rules for `interest_rate_index_v1`.
+
+- [`title_formats.py`](src/spark_parser/title_formats.py) holds the frozen business-title
+  exceptions and bounded numeric-hyphen rule for `title_business_v1`.
+
 - [`dataframe_parsing.py`](src/spark_parser/dataframe_parsing.py) wraps the shared lazy plan produced
   by the runtime. Its `parsed_df` and `results_df` properties expose the target and audit
   projections, while `persist()` and `unpersist()` let runtimes with DataFrame-cache support avoid
@@ -438,6 +444,8 @@ String supports the common arguments plus `format`.
 | `lower` | Lowercase the normalized value. | `"Acme LLC"` → `"acme llc"` |
 | `upper` | Uppercase the normalized value. | `"Acme LLC"` → `"ACME LLC"` |
 | `title` | Lowercase and capitalize words while retaining normalized spaces. | `"  LOAN   status "` → `"Loan Status"` |
+| `title_business_v1` | Apply ordinary title casing plus frozen business exceptions and bounded numeric-hyphen casing. | `"fhlb 12-month advance"` → `"FHLB 12-Month Advance"` |
+| `interest_rate_index_v1` | Canonicalize an approved interest-rate index or reject the unknown full value. | `"SOFR Term - 12M"` → `"SOFR Term - 12-Month"` |
 | `pascal` | Lowercase, title-case, and remove spaces. Intended for identifiers rather than human names. | `"account status"` → `"AccountStatus"` |
 | `address_us_v1` | Apply deterministic US address display normalization. | `"123 mccormick st. apt 4b"` → `"123 McCormick St Apt 4B"` |
 | `county` | Smart-case a county name and ensure exactly one trailing `County`. | `"mclean county"` → `"McLean County"` |
@@ -447,6 +455,47 @@ String supports the common arguments plus `format`.
 `title` uses Spark's `initcap` behavior. It works well for display labels that should keep their
 spaces, but it does not know the `Mc`, apostrophe, hyphen, street-suffix, or unit rules used by
 `address_us_v1` and `county`.
+
+#### Business title profile
+
+`title_business_v1` deliberately keeps that ordinary `title` pipeline, then adds two narrowly
+bounded display rules:
+
+- restore the complete, case-insensitive tokens `FHLB`, `P&I`, `UST`, `RCF`, and `CMT`; and
+- capitalize the first lowercase letter after a hyphen when the preceding component is a bounded
+  ASCII integer (`12-month` → `12-Month`, `1-year` → `1-Year`).
+
+Letters, numbers, and underscores count as part of an identifier for exception matching. As a
+result, punctuation-delimited `cmt-backed` becomes `CMT-backed`, while `trust`, `RCF6M`, and
+`fhlb_code` receive only ordinary title casing. The numeric rule likewise leaves `abc12-month`,
+`12.5-month`, `1,200-month`, non-ASCII dashes, and ordinary compounds such as `state-of-the-art`
+alone. It does not infer acronyms, repair spelling, or validate business terminology. The original
+`title` format remains unchanged for callers that need the existing strict behavior.
+
+#### Interest-rate index profile
+
+`interest_rate_index_v1` is a closed canonicalization profile rather than general title casing.
+It normalizes the complete value case-insensitively, recognizes approved month/year abbreviations
+only in a valid index tenor position, and then requires the full result to exist in its versioned
+catalog. Examples include:
+
+- `SOFR 1 month`, `SOFR 1M` → `SOFR 1-Month`;
+- `Treasury - 10 yr`, `Treasury - 10Yr` → `Treasury - 10-Year`;
+- `TSFR6M` → `SOFR Term - 6-Month`;
+- `SOFR30` → `SOFR - 30-Day`, while `SOFR30A` → `SOFR 30-Day Average`;
+- `RCF6M` → `RCF 6-Month`; and
+- `10 yr CMT` → `10-Year Constant Maturity Treasury (CMT)`.
+
+Month aliases are `M`, `mo`, `mos`, `month`, and `months`; year aliases are `Y`, `Yr`, `yrs`,
+`year`, and `years`. Canonical tenors always use a singular unit and do not convert equivalent
+durations (`12-Month` stays `12-Month`, not `1-Year`). Spelled day/week tenors are normalized for
+the cataloged averages and index families.
+
+Opaque codes are exact aliases, so substrings such as `XSOFR30`, unsupported tenors, and an unknown
+family containing `12M` do not receive a partial rewrite. Unknown non-null values return a parse
+error and therefore follow `on_parse_error`; `preserve` retains the exact source token. Likewise,
+`NAP` and the text `null` remain ordinary unknown values unless the configuration explicitly names
+them as null markers and enables `replace_null_markers`. The ordinary `title` profile is unchanged.
 
 #### Address profile
 

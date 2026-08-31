@@ -319,6 +319,8 @@ _SPECIFIC_BEHAVIORS = {
         "format null preserves the whitespace-normalized value.",
         "on_parse_error preserve returns the exact pre-normalization source token when formatting fails.",
         "title lowercases and capitalizes words while retaining normalized spaces.",
+        "title_business_v1 starts with title behavior, capitalizes a lowercase letter after a bounded integer-hyphen component, and restores the frozen FHLB, P&I, UST, RCF, and CMT tokens.",
+        "interest_rate_index_v1 canonicalizes an approved catalog of interest-rate labels and exact source aliases, including bounded compact tenors such as 12M and 1Yr.",
         "pascal removes spaces after init-capitalization; it is intended for identifiers, not names.",
         "address_us_v1 uses contextual USPS-style suffixes/directionals and smart-cases Mc, apostrophe, and hyphen names.",
         "county smart-cases the name and ensures exactly one trailing 'County'.",
@@ -365,6 +367,8 @@ _SPECIFIC_GOTCHAS = {
     ParserType.STRING: [
         "address_us_v1 is deterministic display normalization, not postal validation or deliverability verification.",
         "title uses Spark initcap semantics; it does not apply address/name exceptions such as McLean.",
+        "title_business_v1 is a display formatter, not an acronym detector: only its five complete-token exceptions are restored, and unknown acronyms follow ordinary title casing.",
+        "interest_rate_index_v1 is fail-closed: an unknown full value is a parse error, and compact source codes are never inferred unless explicitly cataloged.",
         "county is for jurisdictions named County; it does not infer Parish, Borough, or Census Area.",
         "state_us includes the 50 states, Washington DC, AS, GU, MP, PR, and VI; other unknown non-null values are parse errors.",
         "state_us and zip treat a comma as a property-value separator and fail the whole value when any component is invalid.",

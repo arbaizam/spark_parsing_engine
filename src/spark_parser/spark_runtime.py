@@ -48,6 +48,7 @@ from spark_parser.enums import (
     StringFormat,
 )
 from spark_parser.exceptions import SchemaValidationError, SchemaWarning
+from spark_parser.interest_rate_formats import format_interest_rate_index_v1
 from spark_parser.models import (
     ColumnParser,
     NestedValueParser,
@@ -58,6 +59,7 @@ from spark_parser.models import (
     needs_spark_boolean_overlap_check,
 )
 from spark_parser.serializer import ParserConfigSerializer
+from spark_parser.title_formats import format_title_business_v1
 from spark_parser.version import __version__
 
 # Public audit schema. Define it explicitly so an empty audit array has exactly the same type as a
@@ -1310,6 +1312,10 @@ class SparkDataFrameParser:
             # Unlike Pascal casing, title casing intentionally retains the normalized spaces.
             # Lowercasing first makes output deterministic for mixed-case bronze values.
             return F.initcap(F.lower(normalized))
+        if string_format is StringFormat.TITLE_BUSINESS_V1:
+            return format_title_business_v1(normalized)
+        if string_format is StringFormat.INTEREST_RATE_INDEX_V1:
+            return format_interest_rate_index_v1(normalized)
         if string_format is StringFormat.PASCAL:
             return F.regexp_replace(
                 F.initcap(F.lower(normalized)),
