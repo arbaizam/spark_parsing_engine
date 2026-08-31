@@ -3278,7 +3278,10 @@ columns:
         def connect_new_session(_session):
             raise ConnectNewSessionUnsupportedError
 
-        monkeypatch.setattr(type(spark), "newSession", connect_new_session)
+        # Some Connect/serverless session classes omit this method entirely. Leave those classes
+        # untouched so the runtime exercises its real missing-capability fallback.
+        if callable(getattr(type(spark), "newSession", None)):
+            monkeypatch.setattr(type(spark), "newSession", connect_new_session)
         parsing = SparkDataFrameParser().parse_dataframe(
             df,
             config,

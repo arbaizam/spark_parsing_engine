@@ -894,27 +894,34 @@ class SparkDataFrameParser:
         foldable expressions. Neither path executes a Spark data job.
         """
         caller_session = df.sparkSession
-        try:
-            probe_session = caller_session.newSession()
-        except PySparkException as exc:
-            if _spark_error_class(exc) not in {"JVM_ATTRIBUTE_NOT_SUPPORTED", "NOT_IMPLEMENTED"}:
-                raise
+        new_session = getattr(caller_session, "newSession", None)
+        if not callable(new_session):
             probe_session = caller_session
         else:
             try:
-                probe_session.conf.set("spark.sql.optimizer.excludedRules", "")
-                probe_session.conf.set("spark.sql.optimizer.maxIterations", "100")
-                probe_session.conf.set(
-                    "spark.sql.legacy.timeParserPolicy",
-                    time_parser_policy,
-                )
+                probe_session = new_session()
             except PySparkException as exc:
                 if _spark_error_class(exc) not in {
-                    "CANNOT_MODIFY_CONFIG",
-                    "CONFIG_NOT_AVAILABLE",
+                    "JVM_ATTRIBUTE_NOT_SUPPORTED",
+                    "NOT_IMPLEMENTED",
                 }:
                     raise
                 probe_session = caller_session
+            else:
+                try:
+                    probe_session.conf.set("spark.sql.optimizer.excludedRules", "")
+                    probe_session.conf.set("spark.sql.optimizer.maxIterations", "100")
+                    probe_session.conf.set(
+                        "spark.sql.legacy.timeParserPolicy",
+                        time_parser_policy,
+                    )
+                except PySparkException as exc:
+                    if _spark_error_class(exc) not in {
+                        "CANNOT_MODIFY_CONFIG",
+                        "CONFIG_NOT_AVAILABLE",
+                    }:
+                        raise
+                    probe_session = caller_session
 
         control = probe_session.range(0).select(
             F.try_to_timestamp(F.lit(""), F.lit("invalid[")).alias("validated")

@@ -2,6 +2,8 @@
 
 ## 0.4.0
 
+- Let datetime metadata probes use the active Spark Connect/serverless session when its
+  `SparkSession` does not expose `newSession`, including in the portable timestamp NTZ test.
 - Add `title_business_v1` as ordinary title formatting plus exact `FHLB`, `P&I`, `UST`, `RCF`,
   and `CMT` exceptions and bounded numeric-hyphen capitalization; keep `title` unchanged.
 - Add the fail-closed `interest_rate_index_v1` string profile for approved benchmark labels,
