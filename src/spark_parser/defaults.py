@@ -1,12 +1,13 @@
 """Single source of truth for parser authoring defaults.
 
-Compiler logic, metadata discovery, serialization, audits, and documentation all import values
-from this module. A default must never be duplicated as an unrelated literal elsewhere; changing
-one here should make the effective behavior and its public description change together.
+Compiler logic, machine-readable metadata discovery, serialization, and audits import values from
+this module. A default must never be duplicated as an unrelated runtime literal elsewhere;
+documentation contract tests keep published vocabularies and effective metadata aligned.
 """
 
 from collections.abc import Mapping
-from typing import Any, Final, NoReturn
+from types import MappingProxyType
+from typing import Any, Final
 
 from spark_parser.enums import (
     BinaryEncoding,
@@ -43,22 +44,31 @@ SQL_LOCAL_TIMESTAMP_FORMAT: Final = "yyyy-MM-dd HH:mm:ss[.SSSSSS]"
 # pattern accepts only a prefix. Keep every built-in pattern paired with a full-token shape so
 # defaults and runtime guards cannot drift apart.
 BUILTIN_DATETIME_FORMAT_SHAPES: Final[dict[str, str]] = {
-    "yyyy-MM-dd": r"^\d{4}-\d{2}-\d{2}$",
-    ISO_LOCAL_TIMESTAMP_FORMAT: (r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?$"),
-    ISO_OFFSET_TIMESTAMP_FORMAT: (
-        r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?"
-        r"(?:Z|[+-]\d{2}:\d{2})$"
+    "yyyy-MM-dd": r"\A\d{4}-\d{2}-\d{2}\z",
+    ISO_LOCAL_TIMESTAMP_FORMAT: (
+        r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?\z"
     ),
-    SQL_LOCAL_TIMESTAMP_FORMAT: (r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{1,6})?$"),
-    US_MONTH_FIRST_12_HOUR_FORMAT: (r"^\d{2}/\d{2}/\d{4} \d{1,2}:\d{2} [AaPp][Mm]$"),
-    US_MONTH_FIRST_12_HOUR_SECONDS_FORMAT: (r"^\d{2}/\d{2}/\d{4} \d{1,2}:\d{2}:\d{2} [AaPp][Mm]$"),
+    ISO_OFFSET_TIMESTAMP_FORMAT: (
+        r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?"
+        r"(?:Z|[+-]\d{2}:\d{2})\z"
+    ),
+    SQL_LOCAL_TIMESTAMP_FORMAT: (
+        r"\A\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{1,6})?\z"
+    ),
+    US_MONTH_FIRST_12_HOUR_FORMAT: (
+        r"\A\d{2}/\d{2}/\d{4} \d{1,2}:\d{2} [AaPp][Mm]\z"
+    ),
+    US_MONTH_FIRST_12_HOUR_SECONDS_FORMAT: (
+        r"\A\d{2}/\d{2}/\d{4} \d{1,2}:\d{2}:\d{2} [AaPp][Mm]\z"
+    ),
 }
 # Date inputs often arrive as an ISO date/local timestamp, a SQL-style local timestamp, or a US
 # reporting-system timestamp whose time is irrelevant to the target date. Keep ISO first because it
-# is unambiguous. Offset-bearing timestamps are intentionally excluded: converting an instant to a
-# date would depend on ``spark.sql.session.timeZone`` and could shift the calendar day. The
-# slash-based fallback is deliberately month-first and requires both a time and an AM/PM marker, so
-# this default does not pretend to infer ambiguous bare values such as 01/02/2026.
+# is unambiguous. The runtime preserves authored calendar fields independently of the Spark session
+# timezone. Offset-bearing timestamps remain an explicit custom-format choice because converting
+# them to a date deliberately discards their time and instant/offset semantics. The slash-based
+# fallback is deliberately month-first and requires both a time and an AM/PM marker, so this default
+# does not pretend to infer ambiguous bare values such as 01/02/2026.
 DEFAULT_DATE_FORMATS: Final[tuple[str, ...]] = (
     "yyyy-MM-dd",
     ISO_LOCAL_TIMESTAMP_FORMAT,
@@ -95,10 +105,22 @@ DEFAULT_DROP_NULL_ELEMENTS: Final = False
 DEFAULT_ARRAY_DISTINCT: Final = False
 DEFAULT_DROP_NULL_VALUES: Final = False
 
-# Immutable canonical view used by metadata and authoring clients. ``parser.defaults()`` returns a
-# detached JSON-shaped copy with lists, while this exported mapping cannot be mutated process-wide
-# and made to disagree with the compiler's individual constants above.
-_PARSER_DEFAULTS: Final[dict[str, dict[str, Any]]] = {
+# Canonical public view used by metadata and authoring clients. Nested mapping proxies and tuple
+# values make the exported object genuinely immutable; ``parser.defaults()`` is the JSON-shaped,
+# mutable/serializable representation for callers that need one.
+def _freeze_defaults(
+    defaults: Mapping[str, Mapping[str, Any]],
+) -> Mapping[str, Mapping[str, Any]]:
+    """Return a deeply read-only mapping without retaining caller-owned dictionaries."""
+    return MappingProxyType(
+        {
+            section: MappingProxyType(dict(values))
+            for section, values in defaults.items()
+        }
+    )
+
+
+PARSER_DEFAULTS: Final[Mapping[str, Mapping[str, Any]]] = _freeze_defaults({
     "globals": {
         "null_markers": DEFAULT_NULL_MARKERS,
         "null_marker_case_sensitive": DEFAULT_NULL_MARKER_CASE_SENSITIVE,
@@ -147,58 +169,7 @@ _PARSER_DEFAULTS: Final[dict[str, dict[str, Any]]] = {
         "boolean_case_sensitive": DEFAULT_BOOLEAN_CASE_SENSITIVE,
         "boolean_values_mode": DEFAULT_BOOLEAN_VALUES_MODE.value,
     },
-}
-
-
-class _ImmutableDefaults(dict[str, Any]):
-    """JSON-serializable dictionary that rejects process-wide default mutation."""
-
-    @staticmethod
-    def _reject_mutation(*_args: Any, **_kwargs: Any) -> NoReturn:
-        raise TypeError("PARSER_DEFAULTS is immutable; call parser.defaults() for a mutable copy.")
-
-    __setitem__ = _reject_mutation
-    __delitem__ = _reject_mutation
-    clear = _reject_mutation
-    pop = _reject_mutation
-    popitem = _reject_mutation
-    setdefault = _reject_mutation
-    update = _reject_mutation
-    __ior__ = _reject_mutation
-
-
-class _ImmutableList(list[Any]):
-    """List-compatible default value that cannot mutate shared package state."""
-
-    @staticmethod
-    def _reject_mutation(*_args: Any, **_kwargs: Any) -> NoReturn:
-        raise TypeError("PARSER_DEFAULTS is immutable; call parser.defaults() for a mutable copy.")
-
-    __setitem__ = _reject_mutation
-    __delitem__ = _reject_mutation
-    __iadd__ = _reject_mutation
-    __imul__ = _reject_mutation
-    append = _reject_mutation
-    clear = _reject_mutation
-    extend = _reject_mutation
-    insert = _reject_mutation
-    pop = _reject_mutation
-    remove = _reject_mutation
-    reverse = _reject_mutation
-    sort = _reject_mutation
-
-
-PARSER_DEFAULTS: Final[Mapping[str, Mapping[str, Any]]] = _ImmutableDefaults(
-    {
-        section: _ImmutableDefaults(
-            {
-                key: _ImmutableList(value) if isinstance(value, tuple) else value
-                for key, value in values.items()
-            }
-        )
-        for section, values in _PARSER_DEFAULTS.items()
-    }
-)
+})
 
 
 def parser_defaults() -> dict[str, dict[str, Any]]:
@@ -207,5 +178,5 @@ def parser_defaults() -> dict[str, dict[str, Any]]:
         section: {
             key: list(value) if isinstance(value, tuple) else value for key, value in values.items()
         }
-        for section, values in _PARSER_DEFAULTS.items()
+        for section, values in PARSER_DEFAULTS.items()
     }

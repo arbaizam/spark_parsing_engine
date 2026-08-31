@@ -284,7 +284,6 @@ def _trim_whitespace(value: Column) -> Column:
 def _smart_token(
     token: Column,
     *,
-    address: bool,
     suffix_allowed: Column | None = None,
     previous_token: Column | None = None,
 ) -> Column:
@@ -296,13 +295,12 @@ def _smart_token(
     cleaned = _clean_token(token)
     exception = _map_lookup(_NAME_EXCEPTIONS, cleaned)
     mapped = F.lit(None).cast("string")
-    if address:
+    if suffix_allowed is not None:
         suffix = _map_lookup(_SUFFIXES, cleaned)
-        if suffix_allowed is not None:
-            # Street-like words can occur inside a proper name. Only the last suffix-looking token
-            # is treated as the street suffix, preventing ``Center Street`` from becoming two
-            # abbreviations.
-            suffix = F.when(suffix_allowed, suffix)
+        # Street-like words can occur inside a proper name. Only the last suffix-looking token is
+        # treated as the street suffix, preventing ``Center Street`` from becoming two
+        # abbreviations.
+        suffix = F.when(suffix_allowed, suffix)
         mapped = F.coalesce(
             _map_lookup(_DIRECTIONALS, cleaned),
             suffix,
@@ -358,7 +356,6 @@ def format_address_us_v1(value: Column) -> Column:
         tokens,
         lambda token, index: _smart_token(
             token,
-            address=True,
             suffix_allowed=index == last_suffix_index,
             previous_token=F.element_at(padded_tokens, index + F.lit(1)),
         ),
@@ -388,7 +385,7 @@ def format_county(value: Column) -> Column:
         F.filter(
             F.transform(
                 F.split(core, UNICODE_WHITESPACE_PATTERN),
-                lambda token: _smart_token(token, address=False),
+                lambda token: _smart_token(token),
             ),
             lambda token: token != "",
         ),

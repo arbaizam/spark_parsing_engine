@@ -23,19 +23,26 @@ from spark_parser.defaults import (
 TEST_CONFIG_PATH = Path(__file__).resolve().parents[1] / "fixtures" / "test_config.yaml"
 
 
-def test_public_defaults_are_immutable_and_detached_views_remain_mutable() -> None:
-    """Prevent caller mutation from making metadata disagree with compiler behavior."""
+def test_public_defaults_are_deeply_immutable_and_detached_views_remain_mutable() -> None:
+    """Make the constant immutable even through unbound built-in mutation methods."""
     with pytest.raises(TypeError):
         PARSER_DEFAULTS["common"]["trim_whitespace"] = False
-    with pytest.raises(TypeError):
+    with pytest.raises(AttributeError):
         PARSER_DEFAULTS["date"]["formats"].append("yyyyMMdd")
+    with pytest.raises(TypeError):
+        dict.__setitem__(PARSER_DEFAULTS, "injected", {})
+    with pytest.raises(TypeError):
+        list.append(PARSER_DEFAULTS["globals"]["true_values"], "injected")
 
     detached = parser.defaults()
     detached["common"]["trim_whitespace"] = False
     detached["date"]["formats"].clear()
 
     assert PARSER_DEFAULTS["common"]["trim_whitespace"] is True
-    assert json.loads(json.dumps(PARSER_DEFAULTS))["date"]["formats"] == list(DEFAULT_DATE_FORMATS)
+    assert PARSER_DEFAULTS["date"]["formats"] == DEFAULT_DATE_FORMATS
+    assert json.loads(json.dumps(parser.defaults()))["date"]["formats"] == list(
+        DEFAULT_DATE_FORMATS
+    )
     assert parser.defaults()["common"]["trim_whitespace"] is True
     assert parser.defaults()["date"]["formats"] == list(DEFAULT_DATE_FORMATS)
     assert (
@@ -92,6 +99,8 @@ def test_parser_metadata_is_discoverable_and_detached() -> None:
     )
     assert boolean_global["default"] is False
     assert set(parser.describe()) == {member.value for member in ParserType}
+    assert parser.describe("numeric")["parser_type"] == "decimal"
+    assert parser.describe("TIMESTAMP_LTZ")["parser_type"] == "timestamp"
     assert parser.array.describe()["parser_type"] == "array"
     assert parser.struct.describe()["parser_type"] == "struct"
     assert parser.map.describe()["parser_type"] == "map"
@@ -115,6 +124,38 @@ def test_unknown_parser_description_uses_the_public_error_hierarchy() -> None:
     """Keep invalid authoring input catchable through SparkParserError/CompilationError."""
     with pytest.raises(CompilationError, match="Unknown parser type 'bogus'"):
         parser.describe("bogus")
+
+
+def test_public_compile_and_serialization_facade_round_trips_complex_schema() -> None:
+    config = parser.compile_yaml(
+        """
+parser_config_id: facade
+parser_config_name: Facade
+version: "1"
+columns:
+  - source_column_name: payload
+    target_column_name: Payload
+    expected_data_type: array<struct<amount:decimal(8,2)>>
+    parser:
+      type: array
+      element_parser:
+        type: struct
+        fields:
+          - {source_field_name: raw_amount, target_field_name: amount, parser: decimal}
+"""
+    )
+    mapping = parser.to_mapping(config)
+    canonical = parser.canonical_json(config)
+
+    assert json.loads(canonical) == mapping
+    assert parser.content_hash(parser.compile_mapping(mapping)) == parser.content_hash(config)
+    report = parser.review_yaml(mapping)
+    assert report.is_valid is True
+    assert report.column_reviews[0]["schema_tree"].splitlines() == [
+        '"Payload": array<struct<amount:decimal(8,2)>> [array] <- "payload"',
+        "  []: struct<amount:decimal(8,2)> [struct; on error=fail]",
+        '    ."amount": decimal(8,2) [decimal] <- "raw_amount"',
+    ]
 
 
 def test_config_review_contains_validation_resolved_options_and_markdown(tmp_path: Path) -> None:
@@ -143,7 +184,10 @@ def test_config_review_contains_validation_resolved_options_and_markdown(tmp_pat
     json_path = report.write_json(tmp_path / "review.json")
     assert markdown_path.read_text(encoding="utf-8").startswith("# Spark Parser")
     assert '"report_type": "spark_parser_config_review"' in json_path.read_text(encoding="utf-8")
-    assert report.to_mapping()["report_type"] == "spark_parser_config_review"
+    detached = report.to_mapping()
+    assert detached["report_type"] == "spark_parser_config_review"
+    detached["summary"]["column_count"] = 0
+    assert report.summary["column_count"] == 4
 
 
 def test_markdown_review_contains_hostile_schema_names_inside_safe_fences() -> None:
@@ -202,10 +246,42 @@ def test_invalid_config_review_returns_errors_instead_of_raising() -> None:
     assert "Validation status:** FAIL" in report.to_markdown()
 
 
-def test_missing_yaml_path_and_boolean_review_are_evidence_based() -> None:
-    missing = parser.review_yaml("definitely_missing.yaml")
+def test_source_dispatch_is_type_driven_and_boolean_review_is_evidence_based(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    missing_path = tmp_path / "definitely_missing.yaml"
+    missing = parser.review_yaml(missing_path)
     assert missing.is_valid is False
-    assert missing.errors == ("YAML file does not exist: definitely_missing.yaml",)
+    assert missing.source == str(missing_path)
+    assert missing.errors[0].startswith(f"Unable to read parser config {missing_path}:")
+
+    # Strings are always YAML text. File selection is explicit through Path or compile_path(), so
+    # an inline scalar can never be reinterpreted because a same-named local file happens to exist.
+    path_shaped_text = parser.review_yaml("definitely_missing.yaml")
+    assert path_shaped_text.is_valid is False
+    assert path_shaped_text.source == "inline YAML"
+    assert path_shaped_text.errors == ("parser config must be a mapping.",)
+
+    shadow_path = tmp_path / "shadow.yaml"
+    shadow_path.write_text(TEST_CONFIG_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    assert parser.review_yaml("shadow.yaml").source == "inline YAML"
+    assert parser.review_yaml(Path("shadow.yaml")).is_valid is True
+
+    compact = parser.compile_yaml(
+        "{parser_config_id: compact, parser_config_name: Compact, version: '1', "
+        "description: docs/config.txt, columns: [{source_column_name: value, "
+        "target_column_name: Value, expected_data_type: string, parser: string}]}"
+    )
+    assert compact.description == "docs/config.txt"
+
+    invalid_compact = parser.review_yaml(
+        "{parser_config_id: compact, parser_config_name: Compact, version: '1', "
+        "description: docs/config.txt}"
+    )
+    assert invalid_compact.source == "inline YAML"
+    assert invalid_compact.errors == ("columns must be a non-empty list.",)
 
     boolean_report = parser.review_yaml(
         """
@@ -222,6 +298,27 @@ columns:
     boolean_check = boolean_report.validation_checks[-1]
     assert boolean_check["status"] == "PASS"
     assert "1 Boolean parser node" in boolean_check["detail"]
+
+    unicode_report = parser.review_yaml(
+        """
+parser_config_id: unicode_boolean_review
+parser_config_name: Unicode Boolean Review
+version: "1"
+globals:
+  true_values: ["Ä"]
+  false_values: ["ä"]
+  boolean_case_sensitive: false
+columns:
+  - source_column_name: active
+    target_column_name: IsActive
+    expected_data_type: boolean
+    parser: boolean
+"""
+    )
+    unicode_check = unicode_report.validation_checks[-1]
+    assert unicode_report.is_valid is True
+    assert unicode_check["status"] == "DEFERRED"
+    assert "Spark will validate non-ASCII case-insensitive overlap" in unicode_check["detail"]
 
 
 def test_review_warns_when_global_null_markers_are_never_enabled() -> None:

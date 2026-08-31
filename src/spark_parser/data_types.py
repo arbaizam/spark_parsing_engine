@@ -32,6 +32,8 @@ _TYPE_ALIASES = {
     "bigint": "long",
     "real": "float",
     "bool": "boolean",
+    "dec": "decimal",
+    "numeric": "decimal",
     "timestamp_ltz": "timestamp",
 }
 
@@ -172,7 +174,7 @@ class _DataTypeParser:
     def parse_type(self, depth: int = 0) -> SparkDataType:
         """Parse one scalar or recursively parameterized type at the current cursor."""
         type_name = canonical_type_name(self.read_identifier("datatype"))
-        if type_name in {"decimal", "dec", "numeric"}:
+        if type_name == "decimal":
             return self.parse_decimal()
         if type_name == "array":
             self.ensure_nesting_depth(depth)

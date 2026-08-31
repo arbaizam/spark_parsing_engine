@@ -186,7 +186,10 @@ _SPECIFIC_ARGUMENTS: dict[ParserType, list[dict[str, Any]]] = {
         _argument(
             "formats",
             default=_PARSER_DEFAULTS["date"]["formats"],
-            description="Non-empty Spark datetime patterns tried in list order; first success wins.",
+            description=(
+                "Non-empty Spark datetime patterns tried in list order; first success preserves "
+                "the authored calendar fields without session-timezone conversion."
+            ),
         )
     ],
     ParserType.TIMESTAMP: [
@@ -225,8 +228,10 @@ _SPECIFIC_ARGUMENTS: dict[ParserType, list[dict[str, Any]]] = {
             default=_PARSER_DEFAULTS["array"]["on_element_error"],
             allowed_values=[member.value for member in ChildErrorMode],
             description=(
-                "Fail the row, route null through element final-null handling, drop an invalid "
-                "element, or preserve its raw token when the element type is string."
+                "Handle a direct element-parser failure by failing the row, routing null through "
+                "element final-null handling, dropping the element, or preserving its raw token "
+                "when the element type is string. Successfully decoded complex elements retain "
+                "their descendants' own error policies."
             ),
         ),
         _argument(
@@ -250,7 +255,10 @@ _SPECIFIC_ARGUMENTS: dict[ParserType, list[dict[str, Any]]] = {
         _argument(
             "fields",
             required=True,
-            description="Complete ordered source-to-target field mapping with recursive parsers.",
+            description=(
+                "Complete ordered source-to-target field mapping with recursive parsers; source "
+                "and target names are preserved verbatim."
+            ),
         ),
     ],
     ParserType.MAP: [
@@ -270,8 +278,10 @@ _SPECIFIC_ARGUMENTS: dict[ParserType, list[dict[str, Any]]] = {
             default=_PARSER_DEFAULTS["map"]["on_value_error"],
             allowed_values=[member.value for member in ChildErrorMode],
             description=(
-                "Fail the row, route null through value final-null handling, drop an invalid "
-                "entry, or preserve its raw value when the map value type is string."
+                "Handle a direct value-parser failure by failing the row, routing null through "
+                "value final-null handling, dropping the entry, or preserving its raw value when "
+                "the map value type is string. Successfully decoded complex values retain their "
+                "descendants' own error policies."
             ),
         ),
         _argument(
@@ -317,12 +327,13 @@ _SPECIFIC_BEHAVIORS = {
     ],
     ParserType.BOOLEAN: [
         "Matching occurs after whitespace normalization.",
-        "Case-insensitive vocabularies are validated for true/false overlap after lowercasing, matching Spark runtime behavior.",
+        "Exact and ASCII case-insensitive true/false overlap is rejected during compilation; non-ASCII case-insensitive overlap is validated by Spark with the runtime's own Unicode tables.",
         "Quote YAML tokens such as 'true', 'false', 'yes', 'no', 'on', and 'off' so they remain strings.",
     ],
     ParserType.DATE: [
         "Formats cascade in order; format inference is not performed.",
         "The defaults accept an ISO date/local timestamp, a SQL-style local timestamp, or a US month-first 12-hour timestamp, with or without seconds, and return only the date.",
+        "An explicitly configured offset-bearing format validates the offset but preserves the calendar date written in the source instead of projecting the instant through the Spark session timezone.",
     ],
     ParserType.TIMESTAMP: [
         "Formats cascade in order; format inference is not performed.",
@@ -362,6 +373,7 @@ _SPECIFIC_GOTCHAS = {
     ParserType.DECIMAL: [
         "expected_data_type must include precision and scale; Spark precision is limited to 38.",
         "Spark rounds source values with excess scale to the configured decimal scale.",
+        "String defaults use an ASCII decimal/scientific grammar; underscores and surrounding whitespace are rejected.",
     ],
     ParserType.DOUBLE: ["Use decimal(p,s) when exact base-10 representation matters."],
     ParserType.FLOAT: ["Use double or decimal(p,s) when additional precision is required."],
@@ -372,19 +384,19 @@ _SPECIFIC_GOTCHAS = {
     ParserType.DATE: [
         "Spark datetime patterns are not Python strptime patterns.",
         "The built-in slash-date fallback is explicitly MM/dd/yyyy, not dd/MM/yyyy.",
-        "Offset-bearing ISO timestamps are not date defaults because their calendar date depends on the Spark session timezone.",
-        "Custom formats require spark.sql.legacy.timeParserPolicy=CORRECTED when binding a DataFrame.",
+        "Offset-bearing timestamps are not date defaults; configure their format explicitly when discarding time and offset semantics is intentional.",
+        "Formats outside the built-in guarded pattern set require spark.sql.legacy.timeParserPolicy=CORRECTED when binding a DataFrame.",
     ],
     ParserType.TIMESTAMP: [
         "Timestamp interpretation follows the active Spark SQL session timezone.",
         "The built-in slash-date fallback is explicitly MM/dd/yyyy, not dd/MM/yyyy.",
-        "Custom formats require spark.sql.legacy.timeParserPolicy=CORRECTED when binding a DataFrame.",
+        "Formats outside the built-in guarded pattern set require spark.sql.legacy.timeParserPolicy=CORRECTED when binding a DataFrame.",
     ],
     ParserType.TIMESTAMP_NTZ: [
         "Use timestamp when the value represents an absolute instant rather than local wall-clock time.",
         "Offset-bearing inputs and typed defaults are rejected instead of silently discarding timezone information.",
         "The built-in slash-date fallback is explicitly MM/dd/yyyy, not dd/MM/yyyy.",
-        "Custom formats require spark.sql.legacy.timeParserPolicy=CORRECTED when binding a DataFrame.",
+        "Formats outside the built-in guarded pattern set require spark.sql.legacy.timeParserPolicy=CORRECTED when binding a DataFrame.",
     ],
     ParserType.ARRAY: [
         "Delimited input treats the delimiter literally and does not implement CSV quoting.",
@@ -505,17 +517,17 @@ def config_description() -> dict[str, Any]:
                 "source_column_name",
                 required=True,
                 description=(
-                    "Top-level bronze source name resolved with Spark's active identifier "
-                    "resolver; missing input fails binding unless the caller explicitly selects "
-                    "on_missing_source='warn'."
+                    "Top-level bronze source name preserved verbatim and resolved with Spark's "
+                    "active identifier resolver; missing input fails binding unless the caller "
+                    "explicitly selects on_missing_source='warn'."
                 ),
             ),
             _argument(
                 "target_column_name",
                 required=True,
                 description=(
-                    "Required output name in parsed_df; exact duplicates fail compilation and "
-                    "resolver-sensitive collisions fail DataFrame binding."
+                    "Non-blank output name preserved verbatim in parsed_df; exact duplicates fail "
+                    "compilation and resolver-sensitive collisions fail DataFrame binding."
                 ),
             ),
             _argument(

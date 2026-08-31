@@ -2,6 +2,29 @@
 
 ## 0.4.0
 
+- Remove the recursive Java regular expression that overflowed executor stacks on ordinary long
+  strings inside JSON arrays, structs, and maps; add 100,000-character and escape-heavy coverage.
+- Carry each nested value, failure state, and diagnostic-path set through one bound Catalyst struct,
+  converting audited and non-audited plan growth from exponential to linear while preserving exact
+  array, struct, and map error/default/zero paths.
+- Make `PARSER_DEFAULTS` deeply immutable with mapping proxies and tuple values; use
+  `parser.defaults()` for the detached JSON-shaped dictionaries and lists.
+- Report Spark analyzer-iteration or driver-stack exhaustion as a metadata-only schema-binding error
+  with the active setting/depth and tuning guidance instead of leaking an opaque JVM failure.
+- Preserve authored calendar fields for offset-bearing `date` formats independently of the Spark
+  session timezone, while retaining offset support for explicitly configured date patterns.
+- Make fractional timestamp defaults identical on Python 3.10 and newer, use true Java end-of-input
+  anchors for numeric, Base64, and built-in datetime guards, and validate non-ASCII
+  case-insensitive vocabularies during metadata-only Spark binding, including empty inputs.
+- Share `dec` and `numeric` aliases across datatype and parser names, and reject underscores,
+  surrounding whitespace, and non-ASCII digits in string-authored decimal defaults without removing
+  supported scientific notation.
+- Preserve source/target column and struct-field names verbatim, make `compile_yaml`/`review_yaml`
+  file selection explicit through `pathlib.Path`, and expose configuration reviews as honest mutable
+  data-transfer objects with detached `to_mapping()` copies.
+- Add source-scoped branch-coverage enforcement, all Python 3.10/3.12 × PySpark 3.5/4.1 runtime
+  boundary pairings, Python 3.13/PySpark 4.1 and Python 3.11 unit lanes, public-facade coverage,
+  plan-size budgets, and strict sdist file selection.
 - Organize test assets into explicit unit, integration, system, and fixture directories, and make
   the wide-plan regression test compatible with Spark Connect.
 - Add a comprehensive Databricks user-guide notebook covering discovery, YAML authoring,

@@ -95,12 +95,15 @@ _TIMESTAMP_DEFAULT_PATTERN = re.compile(
     r"(?:\.[0-9]{1,6})?"
     r"(?:Z|[+-](?:(?:0[0-9]|1[0-7]):[0-5][0-9]|18:00))?"
 )
+_DECIMAL_DEFAULT_PATTERN = re.compile(
+    r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?"
+)
 _ASCII_HEX_PATTERN = re.compile(r"[0-9A-Fa-f]*")
 _DEFAULT_PATH_IDENTIFIER_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 # Composer recursion happens before constructor validation. Bound it separately so deeply nested
 # untrusted YAML cannot depend on the host interpreter's recursion limit or leak RecursionError.
-_MAX_YAML_COMPOSE_DEPTH = 64
+_MAX_YAML_COMPOSE_DEPTH = 256
 _MAX_EXPANDED_DEFAULT_NODES = 10_000
 _EnumT = TypeVar("_EnumT", bound=Enum)
 
@@ -419,8 +422,8 @@ class YamlParserConfigCompiler:
             },
             f"Column at index {index}",
         )
-        source_column_name = self._required_string(payload, "source_column_name")
-        target_column_name = self._required_string(payload, "target_column_name")
+        source_column_name = self._required_identifier(payload, "source_column_name")
+        target_column_name = self._required_identifier(payload, "target_column_name")
         # Parse DDL once and carry both the recursive model and its canonical text. Re-parsing in
         # nested validation or runtime code would create opportunities for inconsistent behavior.
         data_type = parse_spark_data_type(self._required_string(payload, "expected_data_type"))
@@ -988,8 +991,8 @@ class YamlParserConfigCompiler:
                     {"source_field_name", "target_field_name", "parser"},
                     f"Field {index} for struct parser {label!r}",
                 )
-                source_name = self._required_string(field_payload, "source_field_name")
-                target_name = self._required_string(field_payload, "target_field_name")
+                source_name = self._required_identifier(field_payload, "source_field_name")
+                target_name = self._required_identifier(field_payload, "target_field_name")
                 if target_name not in expected_fields:
                     raise CompilationError(
                         f"Struct parser {label!r} configures unknown target field "
@@ -1168,11 +1171,17 @@ class YamlParserConfigCompiler:
         case_sensitive: bool,
         label: str,
     ) -> None:
-        """Reject tokens that would map to both Boolean outcomes at runtime."""
-        normalize = (lambda item: item) if case_sensitive else (lambda item: item.lower())
-        overlap = {normalize(item) for item in true_values} & {
-            normalize(item) for item in false_values
-        }
+        """Reject overlap that is independent of the runtime's Unicode version.
+
+        Exact strings always overlap. ASCII case conversion is also stable across Python and Spark.
+        Non-ASCII case-insensitive overlap is deliberately deferred to a Spark expression so the
+        compiler never rejects a valid vocabulary because its Unicode table differs from the JVM.
+        """
+        overlap = set(true_values) & set(false_values)
+        if not case_sensitive:
+            ascii_true = {item.lower() for item in true_values if item.isascii()}
+            ascii_false = {item.lower() for item in false_values if item.isascii()}
+            overlap.update(ascii_true & ascii_false)
         if overlap:
             raise CompilationError(
                 f"Boolean true_values and false_values overlap for {label}: {sorted(overlap)}."
@@ -1357,6 +1366,10 @@ class YamlParserConfigCompiler:
     @staticmethod
     def _decimal_default(value: Any, data_type: SparkDataType, label: str) -> Decimal:
         """Validate and canonically quantize an exact decimal without binary floating point."""
+        if isinstance(value, str):
+            _validate_utf8_string(value, f"{label} for decimal")
+            if _DECIMAL_DEFAULT_PATTERN.fullmatch(value) is None:
+                raise CompilationError(f"{label} for decimal must be numeric.")
         try:
             converted = Decimal(str(value))
         except (InvalidOperation, ValueError) as exc:
@@ -1420,8 +1433,16 @@ class YamlParserConfigCompiler:
                     f"{label} for timestamp must use ISO YYYY-MM-DDTHH:MM:SS[.ffffff][Z|+HH:MM]."
                 )
             try:
+                # Python 3.10's ``fromisoformat`` accepts only three or six fractional digits,
+                # while the public grammar deliberately accepts one through six. Canonicalize the
+                # already-validated fraction so every supported interpreter compiles identically.
+                normalized = re.sub(
+                    r"\.([0-9]{1,6})(?=Z|[+-][0-9]{2}:[0-9]{2}|\Z)",
+                    lambda match: f".{match.group(1).ljust(6, '0')}",
+                    value,
+                )
                 parsed = datetime.fromisoformat(
-                    f"{value[:-1]}+00:00" if value.endswith("Z") else value
+                    f"{normalized[:-1]}+00:00" if normalized.endswith("Z") else normalized
                 )
             except ValueError as exc:
                 raise CompilationError(f"{label} for timestamp must be an ISO timestamp.") from exc
@@ -1541,6 +1562,14 @@ class YamlParserConfigCompiler:
             raise CompilationError(f"{key} must be a non-empty string.")
         _validate_utf8_string(value, key)
         return value.strip()
+
+    @staticmethod
+    def _required_identifier(payload: Mapping[str, Any], key: str) -> str:
+        """Read a non-blank source/target name without changing its authored identity."""
+        value = payload.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise CompilationError(f"{key} must be a non-empty string.")
+        return _validate_utf8_string(value, key)
 
     @staticmethod
     def _optional_string(payload: Mapping[str, Any], key: str) -> str | None:

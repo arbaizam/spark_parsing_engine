@@ -7,6 +7,7 @@ from types import MappingProxyType
 from typing import Any
 
 import pytest
+import yaml
 
 from spark_parser import (
     PARSER_DEFAULTS,
@@ -262,9 +263,9 @@ columns:
     assert options.on_parse_error is ParseErrorMode.FAIL
     assert options.audit is False
     assert PARSER_DEFAULTS["common"]["collapse_whitespace"] is True
-    assert PARSER_DEFAULTS["date"]["formats"] == list(DEFAULT_DATE_FORMATS)
-    assert PARSER_DEFAULTS["timestamp"]["formats"] == list(DEFAULT_TIMESTAMP_FORMATS)
-    assert PARSER_DEFAULTS["timestamp_ntz"]["formats"] == list(DEFAULT_TIMESTAMP_NTZ_FORMATS)
+    assert PARSER_DEFAULTS["date"]["formats"] == DEFAULT_DATE_FORMATS
+    assert PARSER_DEFAULTS["timestamp"]["formats"] == DEFAULT_TIMESTAMP_FORMATS
+    assert PARSER_DEFAULTS["timestamp_ntz"]["formats"] == DEFAULT_TIMESTAMP_NTZ_FORMATS
 
 
 @pytest.mark.parametrize("value", ["1.0e+300", "1.0e-100"])
@@ -710,6 +711,27 @@ columns:
     assert extend.false_values == ("false", "N", "rejected")
     assert config.columns[2].parser.true_values == ("ß",)
 
+    # Non-ASCII case mapping belongs to Spark. Even a familiar pair is accepted by the Spark-free
+    # compiler and marked for runtime overlap validation rather than decided with Python's tables.
+    deferred = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: deferred_unicode_overlap
+parser_config_name: Deferred Unicode Overlap
+version: "1"
+globals:
+  true_values: ["Ä"]
+  false_values: ["ä"]
+  boolean_case_sensitive: false
+columns:
+  - source_column_name: value
+    target_column_name: Value
+    expected_data_type: boolean
+    parser: boolean
+"""
+    )
+    assert deferred.columns[0].parser.true_values == ("Ä",)
+    assert deferred.columns[0].parser.false_values == ("ä",)
+
 
 def test_unknown_column_keys_and_invalid_mapping_inputs_have_targeted_errors() -> None:
     compiler = YamlParserConfigCompiler()
@@ -733,8 +755,10 @@ columns:
         compiler.compile_mapping({1: "invalid"})  # type: ignore[dict-item]
 
 
-def test_required_metadata_is_trimmed() -> None:
-    config = YamlParserConfigCompiler().compile_text(
+def test_metadata_is_trimmed_but_source_and_target_names_are_preserved() -> None:
+    compiler = YamlParserConfigCompiler()
+    serializer = ParserConfigSerializer()
+    config = compiler.compile_text(
         """
 parser_config_id: "  trimmed  "
 parser_config_name: "  Trimmed Name  "
@@ -744,13 +768,40 @@ columns:
     target_column_name: "  Value  "
     expected_data_type: " string "
     parser: string
+  - source_column_name: "  raw_object  "
+    target_column_name: "  Object  "
+    expected_data_type: "struct<`  Field  `:string>"
+    parser:
+      type: struct
+      fields:
+        - source_field_name: "  raw_field  "
+          target_field_name: "  Field  "
+          parser: string
 """
     )
 
     assert config.parser_config_id == "trimmed"
+    assert config.parser_config_name == "Trimmed Name"
     assert config.version == "1"
-    assert config.columns[0].source_column_name == "raw_value"
-    assert config.columns[0].target_column_name == "Value"
+    assert config.columns[0].source_column_name == "  raw_value  "
+    assert config.columns[0].target_column_name == "  Value  "
+    field = config.columns[1].parser.field_parsers[0]
+    assert field.source_field_name == "  raw_field  "
+    assert field.target_field_name == "  Field  "
+
+    resolved = serializer.to_mapping(config)
+    assert resolved["columns"][0]["source_column_name"] == "  raw_value  "
+    assert resolved["columns"][1]["parser"]["fields"][0]["source_field_name"] == (
+        "  raw_field  "
+    )
+    recompiled = compiler.compile_mapping(resolved)
+    assert serializer.content_hash(recompiled) == serializer.content_hash(config)
+    changed_names = serializer.to_mapping(config)
+    changed_names["columns"][0]["source_column_name"] = "raw_value"
+    changed_names["columns"][0]["target_column_name"] = "Value"
+    assert serializer.content_hash(compiler.compile_mapping(changed_names)) != (
+        serializer.content_hash(config)
+    )
 
 
 def test_complex_parsers_resolve_collapse_whitespace_to_false() -> None:
@@ -832,6 +883,26 @@ columns:
     assert config.columns[0].parser.parser_type.value == canonical
 
 
+@pytest.mark.parametrize("alias", ["dec", "numeric"])
+def test_decimal_datatype_and_parser_aliases_share_one_table(alias: str) -> None:
+    assert parse_spark_data_type(f"{alias}(5,2)").canonical == "decimal(5,2)"
+    config = YamlParserConfigCompiler().compile_text(
+        f"""
+parser_config_id: decimal_alias
+parser_config_name: Decimal Alias
+version: "1"
+columns:
+  - source_column_name: value
+    target_column_name: Value
+    expected_data_type: {alias}(5,2)
+    parser: {alias}
+"""
+    )
+
+    assert config.columns[0].expected_data_type == "decimal(5,2)"
+    assert config.columns[0].parser.parser_type is ParserType.DECIMAL
+
+
 def test_ddl_nesting_has_a_deterministic_limit() -> None:
     deepest_supported = "array<" * 64 + "string" + ">" * 64
     assert parse_spark_data_type(deepest_supported).canonical == deepest_supported
@@ -839,6 +910,39 @@ def test_ddl_nesting_has_a_deterministic_limit() -> None:
     too_deep = "array<" * 65 + "string" + ">" * 65
     with pytest.raises(CompilationError, match="maximum depth of 64"):
         parse_spark_data_type(too_deep)
+
+
+def test_yaml_authoring_supports_the_full_logical_datatype_depth() -> None:
+    expected_data_type = "string"
+    nested_parser: Any = "string"
+    for _ in range(64):
+        expected_data_type = f"struct<value:{expected_data_type}>"
+        nested_parser = {
+            "type": "struct",
+            "fields": [
+                {
+                    "source_field_name": "value",
+                    "target_field_name": "value",
+                    "parser": nested_parser,
+                }
+            ],
+        }
+    payload = {
+        "parser_config_id": "deep_yaml",
+        "parser_config_name": "Deep YAML",
+        "version": "1",
+        "columns": [
+            {
+                "source_column_name": "value",
+                "target_column_name": "Value",
+                "expected_data_type": expected_data_type,
+                "parser": nested_parser,
+            }
+        ],
+    }
+
+    config = YamlParserConfigCompiler().compile_text(yaml.safe_dump(payload, sort_keys=False))
+    assert config.columns[0].expected_data_type == expected_data_type
 
 
 def test_decimal_parameters_use_bounded_ascii_integer_tokens() -> None:
@@ -865,8 +969,8 @@ def test_yaml_key_errors_include_source_location_and_depth_is_bounded() -> None:
     with pytest.raises(CompilationError, match=r"hashable.*line 1, column 3"):
         compiler.compile_text("? [a, b]\n: value\n")
 
-    with pytest.raises(CompilationError, match="YAML nesting exceeds the maximum depth of 64"):
-        compiler.compile_text("[" * 70 + "value" + "]" * 70)
+    with pytest.raises(CompilationError, match="YAML nesting exceeds the maximum depth of 256"):
+        compiler.compile_text("[" * 260 + "value" + "]" * 260)
 
     huge_integer = "9" * 5_000
     with pytest.raises(CompilationError):
@@ -1141,10 +1245,20 @@ def test_decimal_defaults_are_canonical_at_the_declared_scale() -> None:
 
     scientific = _compile_default("decimal(8,2)", "1E+3")
     assert scientific.columns[0].parser.default_on_null == Decimal("1000.00")
+    resolved = serializer.to_mapping(scientific)
+    assert resolved["columns"][0]["parser"]["default_on_null"] == "1000.00"
+    recompiled = YamlParserConfigCompiler().compile_mapping(resolved)
+    assert serializer.content_hash(recompiled) == serializer.content_hash(scientific)
     trailing_zeroes = _compile_default("decimal(8,2)", "1.2300")
     assert str(trailing_zeroes.columns[0].parser.default_on_null) == "1.23"
     with pytest.raises(CompilationError, match=r"does not fit decimal\(8,2\)"):
         _compile_default("decimal(8,2)", "1.231")
+
+
+@pytest.mark.parametrize("value", ["1_0", " 1.5 ", "\t1.5", "１２.５"])
+def test_decimal_string_defaults_require_strict_ascii_numeric_text(value: str) -> None:
+    with pytest.raises(CompilationError, match="for decimal must be numeric"):
+        _compile_default("decimal(8,2)", value)
 
 
 @pytest.mark.parametrize("value", ["20260830", "2026-W35-7", "2026-8-30", "2026-02-30"])
@@ -1229,6 +1343,22 @@ columns:
 """
     )
     assert yaml_config.columns[0].parser.default_on_null == timestamp_default.replace(microsecond=0)
+
+
+@pytest.mark.parametrize("parser_type", ["timestamp", "timestamp_ntz"])
+@pytest.mark.parametrize("fraction_digits", range(1, 7))
+def test_timestamp_defaults_accept_every_documented_fraction_width_on_all_python_versions(
+    parser_type: str,
+    fraction_digits: int,
+) -> None:
+    fraction = "123456"[:fraction_digits]
+    suffix = "Z" if parser_type == "timestamp" else ""
+    config = _compile_default(
+        parser_type,
+        f"2024-01-02T03:04:05.{fraction}{suffix}",
+    )
+
+    assert config.columns[0].parser.default_on_null.microsecond == int(fraction.ljust(6, "0"))
 
 
 def test_datetime_defaults_require_round_trip_safe_timezone_offsets() -> None:

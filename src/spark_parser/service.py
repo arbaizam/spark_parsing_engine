@@ -20,12 +20,18 @@ from typing import Any
 import yaml
 
 from spark_parser.compiler_yaml import YamlParserConfigCompiler
-from spark_parser.data_types import parse_spark_data_type
+from spark_parser.data_types import canonical_type_name, parse_spark_data_type
 from spark_parser.defaults import parser_defaults
 from spark_parser.enums import ParserType
 from spark_parser.exceptions import CompilationError
 from spark_parser.metadata import config_description, parser_description
-from spark_parser.models import ColumnParser, ParserConfig, ParserOptions, iter_parser_options
+from spark_parser.models import (
+    ColumnParser,
+    ParserConfig,
+    ParserOptions,
+    iter_parser_options,
+    needs_spark_boolean_overlap_check,
+)
 from spark_parser.serializer import ParserConfigSerializer
 from spark_parser.version import __version__
 
@@ -121,15 +127,15 @@ def _schema_tree(column: ColumnParser) -> str:
     return "\n".join(lines)
 
 
-@dataclass(frozen=True)
+@dataclass
 class ConfigReviewReport:
-    """Stable structured result of reviewing one parser configuration.
+    """Structured result of reviewing one parser configuration.
 
     Invalid reports carry authoring errors without raising, which makes them suitable for review
     UIs and CI artifacts. Valid reports include the complete resolved configuration so reviewers do
-    not have to infer inherited defaults from source shorthand. The dataclass fields cannot be
-    rebound, but its JSON-shaped nested containers remain mutable for public API compatibility;
-    :meth:`to_mapping` returns a detached copy for callers that need an isolated working value.
+    not have to infer inherited defaults from source shorthand. A report is a transparent mutable
+    data-transfer object; :meth:`to_mapping` returns a detached copy for callers that need an
+    isolated JSON-shaped value.
     """
 
     is_valid: bool
@@ -143,8 +149,6 @@ class ConfigReviewReport:
 
     def to_mapping(self) -> dict[str, Any]:
         """Return a detached JSON-compatible report mapping safe for caller mutation."""
-        # deepcopy protects this frozen report's nested dictionaries/lists from being modified via
-        # a value returned to an authoring UI.
         return deepcopy(
             {
                 "report_type": "spark_parser_config_review",
@@ -377,10 +381,10 @@ class SparkParserService:
         if parser_type is None:
             return {member.value: parser_description(member) for member in ParserType}
         try:
-            normalized = (
-                parser_type if isinstance(parser_type, ParserType) else ParserType(parser_type)
+            normalized = parser_type if isinstance(parser_type, ParserType) else ParserType(
+                canonical_type_name(parser_type)
             )
-        except ValueError as exc:
+        except (AttributeError, ValueError) as exc:
             allowed = ", ".join(member.value for member in ParserType)
             raise CompilationError(
                 f"Unknown parser type {parser_type!r}; expected one of: {allowed}."
@@ -410,7 +414,7 @@ class SparkParserService:
         return self._compiler.compile_mapping(payload)
 
     def compile_yaml(self, source: str | Path | Mapping[str, Any]) -> ParserConfig:
-        """Compile YAML text, an existing YAML path, or a YAML-compatible mapping."""
+        """Compile YAML text, a ``Path``, or a YAML-compatible mapping."""
         config, _ = self._compile_source(source)
         return config
 
@@ -536,6 +540,15 @@ class SparkParserService:
         boolean_columns = [
             options for options in all_options if options.parser_type is ParserType.BOOLEAN
         ]
+        spark_overlap_columns = [
+            options
+            for options in boolean_columns
+            if needs_spark_boolean_overlap_check(
+                options.true_values,
+                options.false_values,
+                options.boolean_case_sensitive,
+            )
+        ]
         nonnullable_count = sum(not options.is_nullable for options in all_options)
         error_default_count = sum(
             options.on_parse_error.value == "default" for options in all_options
@@ -581,9 +594,16 @@ class SparkParserService:
             },
             {
                 "check": "Boolean vocabularies",
-                "status": "PASS" if boolean_columns else "N/A",
+                "status": (
+                    "DEFERRED" if spark_overlap_columns else "PASS" if boolean_columns else "N/A"
+                ),
                 "detail": (
-                    f"Validated non-empty, non-overlapping effective token sets for "
+                    f"Validated non-empty effective token sets and exact/ASCII overlap for "
+                    f"{len(boolean_columns)} Boolean parser node(s); Spark will validate "
+                    f"non-ASCII case-insensitive overlap for {len(spark_overlap_columns)} node(s) "
+                    "with its runtime Unicode tables."
+                    if spark_overlap_columns
+                    else f"Validated non-empty, non-overlapping effective token sets for "
                     f"{len(boolean_columns)} Boolean parser node(s)."
                     if boolean_columns
                     else "No Boolean parser nodes are configured."
@@ -619,24 +639,13 @@ class SparkParserService:
         self,
         source: str | Path | Mapping[str, Any],
     ) -> tuple[ParserConfig, str]:
-        """Disambiguate mapping, path, and inline-text inputs and return a source label."""
+        """Dispatch explicit mapping, ``Path``, and inline-text input types."""
         if isinstance(source, Mapping):
             return self.compile_mapping(source), "mapping"
         if isinstance(source, Path):
             return self.compile_path(source), str(source)
         if not isinstance(source, str):
-            raise TypeError("YAML source must be text, a path, or a mapping.")
-        if "\n" not in source and "\r" not in source:
-            # A single-line string may be either YAML text or a path. Existing files win; a missing
-            # string ending in .yaml/.yml is treated as a path typo instead of confusing YAML.
-            try:
-                path = Path(source)
-                if path.is_file():
-                    return self.compile_path(path), str(path)
-            except OSError:
-                pass
-            if Path(source).suffix.lower() in {".yaml", ".yml"}:
-                raise CompilationError(f"YAML file does not exist: {source}")
+            raise TypeError("YAML source must be text, a pathlib.Path, or a mapping.")
         return self.compile_text(source), "inline YAML"
 
     @staticmethod
@@ -647,13 +656,6 @@ class SparkParserService:
         if isinstance(source, Path):
             return str(source)
         if isinstance(source, str):
-            if "\n" not in source and "\r" not in source:
-                try:
-                    path = Path(source)
-                    if path.is_file() or path.suffix.lower() in {".yaml", ".yml"}:
-                        return str(path)
-                except OSError:
-                    pass
             return "inline YAML"
         return None
 

@@ -9,19 +9,39 @@ permissions:
   contents: read
 
 jobs:
+  unit-python-311:
+    name: Python 3.11 / Spark-independent contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install unit dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ".[test]"
+
+      - name: Test Spark-independent contract
+        run: python -m pytest tests/unit -q
+
   test:
     name: Python ${{ matrix.python }} / PySpark ${{ matrix.pyspark }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # Spark 3.5 is the supported floor and still backs long-lived Databricks runtimes.
-          - python: "3.10"
+        # Exercise audited runtime boundary pairings. A diagonal matrix hid incompatibilities caused
+        # by Python and the JVM shipping different Unicode versions; Python 3.13 is exercised on the
+        # current Spark line while the 3.5 floor retains the cross-version Python 3.12 pairing.
+        python: ["3.10", "3.12", "3.13"]
+        pyspark: ["3.5.0", "4.1.1"]
+        exclude:
+          - python: "3.13"
             pyspark: "3.5.0"
-          # The newer lane catches compatibility problems before runtime upgrades reach production.
-          - python: "3.12"
-            pyspark: "4.1.1"
 
     steps:
       - uses: actions/checkout@v4
@@ -39,7 +59,7 @@ jobs:
       - name: Install test and build dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install ".[test]" "pyspark==${{ matrix.pyspark }}" build ruff
+          python -m pip install ".[test]" "pyspark==${{ matrix.pyspark }}" build packaging ruff
 
       - name: Lint
         run: python -m ruff check .
@@ -47,16 +67,30 @@ jobs:
       - name: Test with a required Spark runtime
         env:
           SPARK_PARSER_REQUIRE_JAVA: "1"
-        run: python -m pytest -q
+        run: |
+          python -m coverage run --branch -m pytest -q
+          python -m coverage report --fail-under=90
 
-      - name: Build wheel
-        run: python -m build --wheel
+      - name: Build distributions
+        run: python -m build
 
       - name: Verify PySpark is optional in wheel metadata
         run: >-
-          python -c "import glob, zipfile;
+          python -c "import glob, zipfile; from email.parser import Parser;
+          from packaging.requirements import Requirement;
           p=glob.glob('dist/*.whl'); assert len(p)==1, p;
           z=zipfile.ZipFile(p[0]); n=next(x for x in z.namelist() if x.endswith('.dist-info/METADATA'));
-          m=z.read(n).decode();
-          r=[x.lower() for x in m.splitlines() if x.lower().startswith('requires-dist: pyspark')];
-          assert r and all('extra == \"spark\"' in x for x in r), r"
+          m=Parser().parsestr(z.read(n).decode());
+          requirements=[Requirement(x) for x in m.get_all('Requires-Dist', [])];
+          r=[x for x in requirements if x.name.lower() == 'pyspark'];
+          assert r and all(x.marker is not None and x.marker.evaluate({'extra': 'spark'})
+          and not x.marker.evaluate({'extra': ''}) for x in r), r"
+
+      - name: Verify source distribution excludes local state
+        run: >-
+          python -c "import glob, tarfile;
+          p=glob.glob('dist/*.tar.gz'); assert len(p)==1, p;
+          names=tarfile.open(p[0]).getnames();
+          forbidden=('/.claude/', '/.coverage', '/.git/', '/.review-', '/.test-tmp');
+          leaked=[x for x in names if any(marker in x for marker in forbidden)];
+          assert not leaked, leaked"

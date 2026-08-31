@@ -185,3 +185,19 @@ def iter_parser_options(options: ParserOptions) -> Iterator[ParserOptions]:
         if current.value_parser is not None:
             children.append(current.value_parser.parser)
         pending.extend(reversed(children))
+
+
+def needs_spark_boolean_overlap_check(
+    true_values: tuple[str, ...],
+    false_values: tuple[str, ...],
+    case_sensitive: bool,
+) -> bool:
+    """Return whether only Spark can decide case-insensitive vocabulary overlap exactly.
+
+    Python and the JVM can ship different Unicode tables. Exact and ASCII-only comparisons are
+    stable at compile time; a case-insensitive set containing non-ASCII text must be lowered and
+    compared by the same Spark runtime that will parse the values.
+    """
+    return not case_sensitive and any(
+        not value.isascii() for value in (*true_values, *false_values)
+    )

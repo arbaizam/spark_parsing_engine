@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=77"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
 
 [project]
 name = "spark-parser"
@@ -28,24 +28,45 @@ spark = [
     "pyspark>=3.5",
 ]
 test = [
+    "coverage[toml]>=7",
     "pytest>=8",
 ]
 
 [project.urls]
 Repository = "https://github.com/arbaizam/spark_parsing_engine"
 
-[tool.setuptools.packages.find]
-where = ["src"]
-include = ["spark_parser*"]
+[tool.hatch.version]
+path = "src/spark_parser/version.py"
 
-[tool.setuptools.dynamic]
-version = {attr = "spark_parser.version.__version__"}
+[tool.hatch.build.targets.wheel]
+packages = ["src/spark_parser"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/CHANGELOG.md",
+    "/LICENSE",
+    "/README.md",
+    "/docs",
+    "/examples",
+    "/pyproject.toml",
+    "/src",
+    "/tests",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 markers = [
     "spark: tests that start a local Spark runtime and require Java",
 ]
+
+[tool.coverage.run]
+branch = true
+source = ["spark_parser"]
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+skip_empty = true
 
 [tool.ruff]
 target-version = "py310"
