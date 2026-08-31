@@ -780,9 +780,11 @@ print(f"Engine version: {identity_row.spark_parser_engine_version}")
 # MAGIC     parsing.unpersist()
 # MAGIC ```
 # MAGIC
-# MAGIC Persistence is optional and remains lazy until an action runs. Some serverless compute does
-# MAGIC not expose all DataFrame cache operations, so the surrounding integration should use it only
-# MAGIC when supported and when avoiding repeated evaluation materially helps.
+# MAGIC Persistence is optional and remains lazy until an action runs. Databricks serverless
+# MAGIC compute rejects all DataFrame and SQL cache APIs, including `persist()` and `unpersist()`,
+# MAGIC so omit this block there. On supported compute, populating the shared cache evaluates the
+# MAGIC complete parser plan and can therefore surface a configured `fail` policy from a target that
+# MAGIC the first selected projection would otherwise prune.
 
 # COMMAND ----------
 

@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import sys
+from unittest.mock import Mock
 
 import pytest
 
@@ -23,11 +24,29 @@ if importlib.util.find_spec("pyspark") is None and os.environ.get("SPARK_PARSER_
     )
 pyspark = pytest.importorskip("pyspark")
 from py4j.protocol import Py4JJavaError  # noqa: E402
+from pyspark import StorageLevel  # noqa: E402
 from pyspark.errors import PySparkException, PySparkNotImplementedError  # noqa: E402
 from pyspark.sql import SparkSession  # noqa: E402
 from pyspark.sql import functions as F  # noqa: E402
+from pyspark.sql.utils import is_remote  # noqa: E402
 
 pytestmark = pytest.mark.spark
+
+_PORTABLE_TEST_SESSION_SETTINGS = {
+    "spark.sql.ansi.enabled": "true",
+    "spark.sql.session.timeZone": "UTC",
+    "spark.sql.legacy.timeParserPolicy": "CORRECTED",
+}
+
+
+def _connect_mode_requested() -> bool:
+    """Recognize configured Connect clients even before they register an active session."""
+    return (
+        is_remote()
+        or "SPARK_REMOTE" in os.environ
+        or os.environ.get("SPARK_API_MODE", "").lower() == "connect"
+        or os.environ.get("MASTER", "").startswith("sc://")
+    )
 
 
 @pytest.fixture(scope="module")
@@ -35,8 +54,24 @@ def spark():
     """Use an active Databricks session or a local session when Java exists."""
     active = SparkSession.getActiveSession()
     if active is not None:
-        yield active
+        previous_settings = {
+            key: active.conf.get(key) for key in _PORTABLE_TEST_SESSION_SETTINGS
+        }
+        applied_settings: list[str] = []
+        try:
+            for key, value in _PORTABLE_TEST_SESSION_SETTINGS.items():
+                active.conf.set(key, value)
+                applied_settings.append(key)
+            yield active
+        finally:
+            for key in reversed(applied_settings):
+                active.conf.set(key, previous_settings[key])
         return
+    if _connect_mode_requested():
+        pytest.fail(
+            "Spark Connect/serverless integration tests require an ambient active SparkSession",
+            pytrace=False,
+        )
     if shutil.which("java") is None and not os.environ.get("JAVA_HOME"):
         if os.environ.get("SPARK_PARSER_REQUIRE_JAVA") == "1":
             pytest.fail(
@@ -48,16 +83,29 @@ def spark():
     # and prevents expression tests from failing for an unrelated process-launch reason.
     os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
     os.environ.setdefault("PYSPARK_DRIVER_PYTHON", sys.executable)
-    session = (
-        SparkSession.builder.master("local[1]")
-        .appName("spark-parser-test")
-        .config("spark.sql.ansi.enabled", "true")
-        .getOrCreate()
-    )
+    builder = SparkSession.builder.master("local[1]").appName("spark-parser-test")
+    for key, value in _PORTABLE_TEST_SESSION_SETTINGS.items():
+        builder = builder.config(key, value)
+    session = builder.getOrCreate()
     try:
         yield session
     finally:
         session.stop()
+
+
+def _is_connect_session(session: SparkSession) -> bool:
+    """Identify Connect without reading a runtime configuration key."""
+    return _connect_mode_requested() or type(session).__module__.startswith(
+        "pyspark.sql.connect."
+    )
+
+
+@pytest.fixture
+def classic_spark(spark: SparkSession) -> SparkSession:
+    """Provide a session only for tests that deliberately require classic driver internals."""
+    if _is_connect_session(spark):
+        pytest.skip("requires classic Spark driver configuration or SparkContext access")
+    return spark
 
 
 def test_native_parsing_and_nested_audit(spark: SparkSession) -> None:
@@ -204,8 +252,8 @@ SELECT
     assert audit[6].error == "Source column is missing."
 
 
-def test_public_parser_facade_and_shared_plan_persistence(spark: SparkSession) -> None:
-    """Exercise the documented high-level entry point and DataFrameParsing lifecycle."""
+def test_public_parser_facade_builds_shared_lazy_projections(spark: SparkSession) -> None:
+    """Exercise the documented high-level entry point without optional cache APIs."""
     df = spark.range(1).select(
         F.col("id").alias("row_id"),
         F.lit("42").alias("value"),
@@ -229,10 +277,93 @@ def test_public_parser_facade_and_shared_plan_persistence(spark: SparkSession) -
     )
 
     assert isinstance(parsing, DataFrameParsing)
-    assert parsing.persist() is parsing
     assert parsing.parsed_df.first().Value == 42
     assert parsing.results_df.first().row_id == 0
+
+
+def test_dataframe_parsing_persistence_delegates_without_requiring_cache_support() -> None:
+    """Verify the adapter contract without invoking cache APIs forbidden by serverless Spark."""
+    evaluated = Mock()
+    parsing = DataFrameParsing(
+        evaluated,
+        parsed_columns=(),
+        key_columns=(),
+        result_columns=(),
+    )
+
+    assert parsing.persist() is parsing
+    evaluated.persist.assert_called_once_with(StorageLevel.MEMORY_AND_DISK_DESER)
+    evaluated.persist.reset_mock()
+    assert parsing.persist(StorageLevel.DISK_ONLY) is parsing
+    evaluated.persist.assert_called_once_with(StorageLevel.DISK_ONLY)
+
+    assert parsing.unpersist() is parsing
+    evaluated.unpersist.assert_called_once_with(blocking=False)
+    evaluated.unpersist.reset_mock()
     assert parsing.unpersist(blocking=True) is parsing
+    evaluated.unpersist.assert_called_once_with(blocking=True)
+
+    unavailable = RuntimeError("DataFrame cache APIs are unavailable")
+    evaluated.persist.side_effect = unavailable
+    with pytest.raises(RuntimeError) as captured:
+        parsing.persist()
+    assert captured.value is unavailable
+
+    release_unavailable = RuntimeError("DataFrame cache release is unavailable")
+    evaluated.unpersist.side_effect = release_unavailable
+    with pytest.raises(RuntimeError) as captured:
+        parsing.unpersist()
+    assert captured.value is release_unavailable
+
+
+@pytest.mark.classic_spark
+def test_classic_persistence_caches_the_complete_shared_plan(
+    classic_spark: SparkSession,
+) -> None:
+    """Lock cache state and full-plan evaluation semantics on cache-capable Spark."""
+    spark = classic_spark
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: shared_plan_cache
+parser_config_name: Shared Plan Cache
+version: "1"
+columns:
+  - source_column_name: safe
+    target_column_name: Safe
+    expected_data_type: string
+    parser: string
+  - source_column_name: bad
+    target_column_name: Bad
+    expected_data_type: integer
+    parser: integer
+"""
+    )
+    parsing = SparkDataFrameParser().parse_dataframe(
+        spark.sql("SELECT 'ok' AS safe, 'not-an-integer' AS bad"),
+        config,
+        key_columns=["safe"],
+    )
+
+    assert parsing._evaluated.storageLevel == StorageLevel.NONE
+    assert parsing.parsed_df.select("Safe").first().Safe == "ok"
+    assert parsing.persist() is parsing
+    try:
+        assert parsing._evaluated.storageLevel == StorageLevel.MEMORY_AND_DISK_DESER
+        with pytest.raises((Py4JJavaError, PySparkException)) as exc_info:
+            parsing.parsed_df.select("Safe").collect()
+        message = str(exc_info.value)
+        assert "source 'bad'" in message
+        assert "target column 'Bad'" in message
+    finally:
+        parsing.unpersist(blocking=True)
+    assert parsing._evaluated.storageLevel == StorageLevel.NONE
+
+    assert parsing.persist(StorageLevel.DISK_ONLY) is parsing
+    try:
+        assert parsing._evaluated.storageLevel == StorageLevel.DISK_ONLY
+    finally:
+        parsing.unpersist(blocking=True)
+    assert parsing._evaluated.storageLevel == StorageLevel.NONE
 
 
 def test_address_county_and_zip_edge_cases_under_ansi(spark: SparkSession) -> None:
@@ -746,10 +877,22 @@ columns:
         ).alias("event_timestamp"),
     )
 
+    parsed = SparkDataFrameParser().parse_dataframe(
+        bronze_df,
+        config,
+        key_columns=["row_id"],
+    ).parsed_df
     rows = (
-        SparkDataFrameParser()
-        .parse_dataframe(bronze_df, config, key_columns=["row_id"])
-        .parsed_df.orderBy("row_id")
+        parsed.orderBy("row_id")
+        .select(
+            "EventDate",
+            F.date_format("EventTimestamp", "yyyy-MM-dd HH:mm:ss").alias(
+                "EventTimestampText"
+            ),
+            F.date_format("EventTimestampNtz", "yyyy-MM-dd HH:mm:ss").alias(
+                "EventTimestampNtzText"
+            ),
+        )
         .collect()
     )
     assert rows[0].EventDate.isoformat() == "2026-09-29"
@@ -758,18 +901,18 @@ columns:
     assert rows[3].EventDate.isoformat() == "2026-06-11"
     assert rows[4].EventDate.isoformat() == "2026-06-11"
     assert rows[5].EventDate is None
-    assert str(rows[0].EventTimestamp) == "2026-09-29 01:02:03"
-    assert str(rows[1].EventTimestamp) == "2026-09-30 08:08:00"
-    assert str(rows[2].EventTimestamp) == "2026-09-30 08:08:00"
-    assert str(rows[3].EventTimestamp) == "2026-06-11 20:08:17"
-    assert str(rows[4].EventTimestamp) == "2026-06-11 20:08:17"
-    assert rows[5].EventTimestamp is None
-    assert str(rows[0].EventTimestampNtz) == "2026-09-29 01:02:03"
-    assert str(rows[1].EventTimestampNtz) == "2026-09-30 08:08:00"
-    assert str(rows[2].EventTimestampNtz) == "2026-09-30 08:08:00"
-    assert str(rows[3].EventTimestampNtz) == "2026-06-11 20:08:17"
-    assert str(rows[4].EventTimestampNtz) == "2026-06-11 20:08:17"
-    assert rows[5].EventTimestampNtz is None
+    assert rows[0].EventTimestampText == "2026-09-29 01:02:03"
+    assert rows[1].EventTimestampText == "2026-09-30 08:08:00"
+    assert rows[2].EventTimestampText == "2026-09-30 08:08:00"
+    assert rows[3].EventTimestampText == "2026-06-11 20:08:17"
+    assert rows[4].EventTimestampText == "2026-06-11 20:08:17"
+    assert rows[5].EventTimestampText is None
+    assert rows[0].EventTimestampNtzText == "2026-09-29 01:02:03"
+    assert rows[1].EventTimestampNtzText == "2026-09-30 08:08:00"
+    assert rows[2].EventTimestampNtzText == "2026-09-30 08:08:00"
+    assert rows[3].EventTimestampNtzText == "2026-06-11 20:08:17"
+    assert rows[4].EventTimestampNtzText == "2026-06-11 20:08:17"
+    assert rows[5].EventTimestampNtzText is None
 
 
 def test_iso_timestamp_defaults_cover_fractional_and_offset_input(spark: SparkSession) -> None:
@@ -1450,11 +1593,88 @@ columns:
         SparkDataFrameParser().parse_dataframe(df, config, key_columns=["duplicate"])
 
 
-def test_schema_preflight_uses_sparks_active_case_resolver(
+def test_schema_preflight_does_not_read_restricted_case_setting(
     spark: SparkSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Use Catalyst itself when the managed runtime withholds its resolver configuration."""
+    """Use Catalyst's active resolver when a managed runtime withholds its configuration."""
+    lower_probe = "__spark_parser_test_case_probe"
+    upper_probe = lower_probe.upper()
+    probe = spark.range(0).select(F.lit(None).cast("string").alias(lower_probe))
+    case_sensitive = bool(probe.drop(upper_probe).schema.fields)
+    source_name = "value" if case_sensitive else "VALUE"
+    key_name = "row_id" if case_sensitive else "ROW_ID"
+    config = YamlParserConfigCompiler().compile_mapping(
+        {
+            "parser_config_id": "restricted_resolver_setting",
+            "parser_config_name": "Restricted Resolver Setting",
+            "version": "1",
+            "columns": [
+                {
+                    "source_column_name": source_name,
+                    "target_column_name": "Value",
+                    "expected_data_type": "string",
+                    "parser": "string",
+                }
+            ],
+        }
+    )
+    runtime_config_type = type(spark.conf)
+    original_get = runtime_config_type.get
+
+    def restricted_get(runtime_config, key, *args, **kwargs):
+        if key == "spark.sql.caseSensitive":
+            raise RuntimeError("configuration spark.sql.caseSensitive is not available")
+        return original_get(runtime_config, key, *args, **kwargs)
+
+    monkeypatch.setattr(runtime_config_type, "get", restricted_get)
+    parsing = SparkDataFrameParser().parse_dataframe(
+        spark.sql("SELECT 'ok' AS value, 'key' AS row_id"),
+        config,
+        key_columns=[key_name],
+    )
+    assert parsing.key_columns == (key_name,)
+    assert parsing.results_df.columns[0] == key_name
+    assert parsing.parsed_df.first().Value == "ok"
+
+
+def test_schema_preflight_rejects_malformed_unicode_names(spark: SparkSession) -> None:
+    """Reject malformed identifiers without consulting mutable resolver configuration."""
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: malformed_runtime_names
+parser_config_name: Malformed Runtime Names
+version: "1"
+columns:
+  - source_column_name: VALUE
+    target_column_name: Parsed
+    expected_data_type: string
+    parser: string
+"""
+    )
+    safe_df = spark.sql("SELECT 'ok' AS VALUE")
+    with pytest.raises(ValueError, match="column_prefix.*well-formed Unicode"):
+        SparkDataFrameParser().parse_dataframe(
+            safe_df,
+            config,
+            key_columns=["VALUE"],
+            column_prefix="bad\ud800prefix",
+        )
+    with pytest.raises(SchemaValidationError, match="key_columns.*well-formed Unicode"):
+        SparkDataFrameParser().parse_dataframe(
+            safe_df,
+            config,
+            key_columns=["bad\ud800key"],
+        )
+
+
+@pytest.mark.classic_spark
+def test_schema_preflight_matches_both_classic_case_resolver_modes(
+    classic_spark: SparkSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercise both configurable Catalyst resolver modes on classic Spark."""
+    spark = classic_spark
     compiler = YamlParserConfigCompiler()
     base_config = compiler.compile_text(
         """
@@ -1548,21 +1768,6 @@ columns:
         - {source_field_name: second, target_field_name: k, parser: string}
 """
     )
-    safe_df = spark.sql("SELECT 'ok' AS VALUE")
-    with pytest.raises(ValueError, match="column_prefix.*well-formed Unicode"):
-        SparkDataFrameParser().parse_dataframe(
-            safe_df,
-            base_config,
-            key_columns=["VALUE"],
-            column_prefix="bad\ud800prefix",
-        )
-    with pytest.raises(SchemaValidationError, match="key_columns.*well-formed Unicode"):
-        SparkDataFrameParser().parse_dataframe(
-            safe_df,
-            base_config,
-            key_columns=["bad\ud800key"],
-        )
-
     previous_case_sensitive = spark.conf.get("spark.sql.caseSensitive")
     try:
         spark.conf.set("spark.sql.caseSensitive", "false")
@@ -1780,6 +1985,47 @@ columns:
     parser: {type: array, element_parser: boolean}
 """
     )
+    SparkDataFrameParser().parse_dataframe(
+        spark.range(0).select(F.lit("ä").alias("boolean_value")),
+        distinct_config,
+        key_columns=["boolean_value"],
+    )
+    with pytest.raises(SchemaValidationError, match="overlap.*BooleanValue"):
+        SparkDataFrameParser().parse_dataframe(
+            spark.range(0).select(F.lit("Ä").alias("boolean_value")),
+            overlap_config,
+            key_columns=["boolean_value"],
+        )
+    with pytest.raises(SchemaValidationError, match="overlap.*BooleanValues"):
+        SparkDataFrameParser().parse_dataframe(
+            spark.range(0).select(F.lit("[]").alias("boolean_values")),
+            nested_overlap_config,
+            key_columns=["boolean_values"],
+        )
+
+
+@pytest.mark.classic_spark
+def test_boolean_overlap_binding_is_metadata_only_under_classic_optimizer_changes(
+    classic_spark: SparkSession,
+) -> None:
+    """Prove classic optimizer overrides neither start jobs nor alter overlap validation."""
+    spark = classic_spark
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: classic_unicode_overlap_probe
+parser_config_name: Classic Unicode Overlap Probe
+version: "1"
+globals:
+  true_values: ["Ä"]
+  false_values: ["ä"]
+  boolean_case_sensitive: false
+columns:
+  - source_column_name: value
+    target_column_name: Value
+    expected_data_type: boolean
+    parser: boolean
+"""
+    )
     job_group = "spark-parser-unicode-overlap-binding"
     excluded_rules_setting = "spark.sql.optimizer.excludedRules"
     previous_excluded_rules = spark.conf.get(excluded_rules_setting, "")
@@ -1797,24 +2043,11 @@ columns:
             excluded_rules_setting,
             "org.apache.spark.sql.catalyst.optimizer.ConstantFolding",
         )
-        # Analyzer-owned DDL evaluation remains exact when the caller excludes optimizer constant
-        # folding, and validation must not alter that caller-owned setting.
-        SparkDataFrameParser().parse_dataframe(
-            spark.range(0).select(F.lit("ä").alias("boolean_value")),
-            distinct_config,
-            key_columns=["boolean_value"],
-        )
-        with pytest.raises(SchemaValidationError, match="overlap.*BooleanValue"):
+        with pytest.raises(SchemaValidationError, match="overlap.*Value"):
             SparkDataFrameParser().parse_dataframe(
-                spark.range(0).select(F.lit("Ä").alias("boolean_value")),
-                overlap_config,
-                key_columns=["boolean_value"],
-            )
-        with pytest.raises(SchemaValidationError, match="overlap.*BooleanValues"):
-            SparkDataFrameParser().parse_dataframe(
-                spark.range(0).select(F.lit("[]").alias("boolean_values")),
-                nested_overlap_config,
-                key_columns=["boolean_values"],
+                spark.range(0).select(F.lit("Ä").alias("value")),
+                config,
+                key_columns=["value"],
             )
         assert spark.sparkContext.statusTracker().getJobIdsForGroup(job_group) == []
         assert spark.conf.get(excluded_rules_setting) == (
@@ -2060,9 +2293,11 @@ def test_audited_nested_plan_carriers_keep_logical_and_physical_plans_linear(
     assert audit.nested_error_paths == ["$[0][0][0][0]"]
 
 
+@pytest.mark.classic_spark
 def test_analyzer_iteration_exhaustion_is_a_clear_metadata_only_binding_error(
-    spark: SparkSession,
+    classic_spark: SparkSession,
 ) -> None:
+    spark = classic_spark
     previous_iterations = spark.conf.get("spark.sql.analyzer.maxIterations")
     job_group = "spark-parser-analyzer-exhaustion"
     local_property_names = (
@@ -2734,10 +2969,9 @@ columns:
         spark.conf.set("spark.sql.legacy.timeParserPolicy", previous_policy)
 
 
-def test_invalid_custom_datetime_pattern_fails_during_dataframe_binding(
-    spark: SparkSession,
-) -> None:
-    config = YamlParserConfigCompiler().compile_text(
+def _invalid_custom_datetime_config():
+    """Compile the invalid-pattern fixture shared by portable and classic metadata probes."""
+    return YamlParserConfigCompiler().compile_text(
         """
 parser_config_id: invalid_custom_datetime
 parser_config_name: Invalid Custom Datetime
@@ -2752,11 +2986,41 @@ columns:
       on_parse_error: null
 """
     )
+
+
+def test_invalid_custom_datetime_pattern_fails_during_dataframe_binding(
+    spark: SparkSession,
+) -> None:
+    config = _invalid_custom_datetime_config()
     previous_policy = spark.conf.get("spark.sql.legacy.timeParserPolicy")
-    excluded_rules_setting = "spark.sql.optimizer.excludedRules"
-    previous_excluded_rules = spark.conf.get(excluded_rules_setting, "")
     try:
         spark.conf.set("spark.sql.legacy.timeParserPolicy", "CORRECTED")
+        with pytest.raises(
+            SchemaValidationError,
+            match=r"Custom datetime format 'invalid\[' is invalid",
+        ):
+            SparkDataFrameParser().parse_dataframe(
+                spark.sql("SELECT 'anything' AS occurred_at"),
+                config,
+                key_columns=["occurred_at"],
+            )
+    finally:
+        spark.conf.set("spark.sql.legacy.timeParserPolicy", previous_policy)
+
+
+@pytest.mark.classic_spark
+def test_invalid_datetime_probe_preserves_classic_optimizer_configuration(
+    classic_spark: SparkSession,
+) -> None:
+    """Keep invalid-pattern analysis independent of caller optimizer exclusions."""
+    spark = classic_spark
+    config = _invalid_custom_datetime_config()
+    policy_setting = "spark.sql.legacy.timeParserPolicy"
+    excluded_rules_setting = "spark.sql.optimizer.excludedRules"
+    previous_policy = spark.conf.get(policy_setting)
+    previous_excluded_rules = spark.conf.get(excluded_rules_setting, "")
+    try:
+        spark.conf.set(policy_setting, "CORRECTED")
         spark.conf.set(
             excluded_rules_setting,
             "org.apache.spark.sql.catalyst.optimizer.ConstantFolding",
@@ -2774,7 +3038,7 @@ columns:
             "org.apache.spark.sql.catalyst.optimizer.ConstantFolding"
         )
     finally:
-        spark.conf.set("spark.sql.legacy.timeParserPolicy", previous_policy)
+        spark.conf.set(policy_setting, previous_policy)
         spark.conf.set(excluded_rules_setting, previous_excluded_rules)
 
 

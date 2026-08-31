@@ -77,19 +77,28 @@ class DataFrameParsing:
             *[_column(name) for name in (*self._key_columns, *self._result_columns)]
         )
 
-    def persist(self, storage_level: StorageLevel = StorageLevel.MEMORY_AND_DISK):
+    def persist(
+        self,
+        storage_level: StorageLevel = StorageLevel.MEMORY_AND_DISK_DESER,
+    ) -> DataFrameParsing:
         """Persist the shared plan and return ``self`` for fluent orchestration.
 
-        Persistence remains lazy: Spark stores partitions only after the next action.
+        Persistence remains lazy: Spark stores partitions only after the next action. Because the
+        complete evaluated parser plan is persisted, that action can surface a fail-mode error from
+        a target that its selected projection would otherwise let Spark prune.
+        Databricks serverless compute does not support DataFrame cache APIs; on that platform Spark
+        raises its native unsupported-operation error and callers should omit this optional step.
         """
         self._evaluated.persist(storage_level)
         return self
 
-    def unpersist(self, *, blocking: bool = False):
+    def unpersist(self, *, blocking: bool = False) -> DataFrameParsing:
         """Release cached partitions and return ``self``.
 
         Non-blocking release is the Spark default and is appropriate for most job cleanup. Select
         blocking cleanup only when subsequent resource-sensitive work must wait for eviction.
+        Databricks serverless compute rejects this API just as it rejects persistence; callers must
+        omit both cache operations there and the native platform error is propagated if invoked.
         """
         self._evaluated.unpersist(blocking=blocking)
         return self

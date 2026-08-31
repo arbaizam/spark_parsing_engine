@@ -57,6 +57,7 @@ include = [
 pythonpath = ["src"]
 markers = [
     "spark: tests that start a local Spark runtime and require Java",
+    "classic_spark: tests requiring SparkContext or mutable internal SQL configuration",
 ]
 
 [tool.coverage.run]

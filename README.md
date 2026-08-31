@@ -180,8 +180,8 @@ the DataFrame runtime.
 
 - [`dataframe_parsing.py`](src/spark_parser/dataframe_parsing.py) wraps the shared lazy plan produced
   by the runtime. Its `parsed_df` and `results_df` properties expose the target and audit
-  projections, while `persist()` and `unpersist()` let a job avoid recomputing the plan when it
-  materializes both.
+  projections, while `persist()` and `unpersist()` let runtimes with DataFrame-cache support avoid
+  recomputing the plan when materializing both.
 
 ### Package-wide support
 
@@ -303,6 +303,12 @@ CI runs every Python 3.10/3.12 and PySpark 3.5/4.1 boundary pairing plus Python 
 4.1, requires the Spark tier, and enforces at least 90% combined statement-and-branch coverage for
 the package. A separate Spark-independent lane covers Python 3.11, so every advertised Python minor
 is exercised while Python 3.13 runtime coverage stays on the current Spark line.
+
+When executed against an ambient Spark Connect or Databricks serverless session, five tests marked
+`classic_spark` skip before touching unsupported APIs. Those proofs deliberately inspect
+`SparkContext`, mutate internal resolver or optimizer settings, or exercise live cache state. All
+portable parser behavior continues to run, including the restricted-configuration and
+cache-delegation contracts.
 
 The Databricks system notebook lives under `tests/system`. It runs from a repository checkout and
 does not need a wheel, Volume, release metadata, or table writes. See the
@@ -891,8 +897,17 @@ column directly, or perform a full target write, when the job must materialize e
 | `warnings` | Tuple of recoverable schema warnings produced by explicit policies such as `on_missing_source="warn"`. |
 | `key_columns` | Effective ordered result-key names. |
 | `result_columns` | Names of the three parser result columns. |
-| `persist(storage_level=MEMORY_AND_DISK)` | Persist the shared plan and return the same object. Useful before materializing both projections. |
+| `persist(storage_level=MEMORY_AND_DISK_DESER)` | Persist the shared plan and return the same object. Useful before materializing both projections. |
 | `unpersist(blocking=False)` | Release the shared plan and return the same object. |
+
+Persistence does not change parser rules or successful values, but it changes evaluation scope and
+frequency. Databricks serverless compute rejects all DataFrame and SQL cache APIs, including
+`persist()` and `unpersist()`; omit these calls there. Both projections remain valid lazy plans but
+are separate evaluations when independently materialized. The wrapper deliberately propagates
+Spark's platform error rather than pretending that a requested cache operation succeeded. On
+supported runtimes, persisting the shared evaluated plan can surface a configured `fail` policy
+from any target when the first projection is materialized, because Spark populates the cache for
+the complete shared plan.
 
 Row keys belong to `results_df`; they are not copied into `parsed_df` automatically. If a
 downstream join needs the same key in both outputs, configure it as a target column too (the

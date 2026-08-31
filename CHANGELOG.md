@@ -2,6 +2,10 @@
 
 ## 0.4.0
 
+- Keep the portable Spark integration suite independent of optional DataFrame cache APIs, which
+  Databricks serverless compute rejects, while retaining and separately testing classic-Spark
+  `DataFrameParsing.persist()` and `unpersist()` delegation; align the default storage level with
+  PySpark's `MEMORY_AND_DISK_DESER` contract.
 - Remove the recursive Java regular expression that overflowed executor stacks on ordinary long
   strings inside JSON arrays, structs, and maps; add 100,000-character and escape-heavy coverage.
 - Carry each nested value, failure state, and diagnostic-path set through one bound Catalyst struct,
