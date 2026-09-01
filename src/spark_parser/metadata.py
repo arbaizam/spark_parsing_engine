@@ -14,8 +14,6 @@ from spark_parser.defaults import parser_defaults
 from spark_parser.enums import (
     NUMERIC_PARSER_TYPES,
     BinaryEncoding,
-    ChildErrorMode,
-    ComplexInputFormat,
     ParseErrorMode,
     ParserType,
     StringFormat,
@@ -206,90 +204,6 @@ _SPECIFIC_ARGUMENTS: dict[ParserType, list[dict[str, Any]]] = {
             description="Non-empty Spark datetime patterns tried in list order without timezone conversion.",
         )
     ],
-    ParserType.ARRAY: [
-        _argument(
-            "input_format",
-            default=_PARSER_DEFAULTS["array"]["input_format"],
-            allowed_values=[member.value for member in ComplexInputFormat],
-            description="Parse a JSON array or split a scalar array using a literal delimiter.",
-        ),
-        _argument(
-            "delimiter",
-            condition="required when input_format is delimited",
-            description="Literal separator for a delimited scalar array.",
-        ),
-        _argument(
-            "element_parser",
-            required=True,
-            description="Recursive parser matching the element type in expected_data_type.",
-        ),
-        _argument(
-            "on_element_error",
-            default=_PARSER_DEFAULTS["array"]["on_element_error"],
-            allowed_values=[member.value for member in ChildErrorMode],
-            description=(
-                "Handle a direct element-parser failure by failing the row, routing null through "
-                "element final-null handling, dropping the element, or preserving its raw token "
-                "when the element type is string. Successfully decoded complex elements retain "
-                "their descendants' own error policies."
-            ),
-        ),
-        _argument(
-            "drop_null_elements",
-            default=_PARSER_DEFAULTS["array"]["drop_null_elements"],
-            description="Remove source nulls and values resolved to null after parsing.",
-        ),
-        _argument(
-            "distinct",
-            default=_PARSER_DEFAULTS["array"]["distinct"],
-            description="Remove duplicate parsed elements while preserving first occurrence order.",
-        ),
-    ],
-    ParserType.STRUCT: [
-        _argument(
-            "input_format",
-            default=_PARSER_DEFAULTS["struct"]["input_format"],
-            allowed_values=[ComplexInputFormat.JSON.value],
-            description="Struct values are parsed from JSON objects.",
-        ),
-        _argument(
-            "fields",
-            required=True,
-            description=(
-                "Complete ordered source-to-target field mapping with recursive parsers; source "
-                "and target names are preserved verbatim."
-            ),
-        ),
-    ],
-    ParserType.MAP: [
-        _argument(
-            "input_format",
-            default=_PARSER_DEFAULTS["map"]["input_format"],
-            allowed_values=[ComplexInputFormat.JSON.value],
-            description="Map values are parsed from JSON objects with string keys.",
-        ),
-        _argument(
-            "value_parser",
-            required=True,
-            description="Recursive parser matching the map value type in expected_data_type.",
-        ),
-        _argument(
-            "on_value_error",
-            default=_PARSER_DEFAULTS["map"]["on_value_error"],
-            allowed_values=[member.value for member in ChildErrorMode],
-            description=(
-                "Handle a direct value-parser failure by failing the row, routing null through "
-                "value final-null handling, dropping the entry, or preserving its raw value when "
-                "the map value type is string. Successfully decoded complex values retain their "
-                "descendants' own error policies."
-            ),
-        ),
-        _argument(
-            "drop_null_values",
-            default=_PARSER_DEFAULTS["map"]["drop_null_values"],
-            description="Remove entries whose parsed value is null.",
-        ),
-    ],
 }
 
 
@@ -308,9 +222,6 @@ _SUMMARIES = {
     ParserType.DATE: "Cascade through configured Spark datetime patterns and return a date.",
     ParserType.TIMESTAMP: "Cascade through configured Spark datetime patterns and return a timestamp.",
     ParserType.TIMESTAMP_NTZ: "Parse a wall-clock timestamp without timezone interpretation.",
-    ParserType.ARRAY: "Parse a JSON or delimited array and recursively parse every element.",
-    ParserType.STRUCT: "Parse a JSON object into configured, recursively parsed target fields.",
-    ParserType.MAP: "Parse a JSON object into a string-keyed map with recursively parsed values.",
 }
 
 
@@ -344,21 +255,6 @@ _SPECIFIC_BEHAVIORS = {
     ParserType.TIMESTAMP_NTZ: [
         "Formats cascade in order without applying the Spark session timezone.",
         "The defaults accept timezone-free ISO timestamps, optional microseconds, and US month-first 12-hour timestamps with or without seconds.",
-    ],
-    ParserType.ARRAY: [
-        "JSON arrays support recursive element types; delimited arrays support scalar elements.",
-        "Element failures are reported with zero-based paths such as $[2].",
-        "Nested defaults and invalidated zeros are reported in dedicated top-level audit path arrays.",
-    ],
-    ParserType.STRUCT: [
-        "Every target struct field must have exactly one source field mapping and recursive parser.",
-        "Unknown JSON fields are ignored; configured missing fields become null/default.",
-        "Nested defaults and invalidated zeros are reported in dedicated top-level audit path arrays.",
-    ],
-    ParserType.MAP: [
-        "JSON map keys are strings and values may use any recursively supported datatype.",
-        "Value failures are reported with paths such as $['balance'].",
-        "Apostrophes in diagnostic map keys are backslash-escaped so one key remains one path segment.",
     ],
 }
 
@@ -402,41 +298,12 @@ _SPECIFIC_GOTCHAS = {
         "The built-in slash-date fallback is explicitly MM/dd/yyyy, not dd/MM/yyyy.",
         "Formats outside the built-in guarded pattern set require spark.sql.legacy.timeParserPolicy=CORRECTED when binding a DataFrame.",
     ],
-    ParserType.ARRAY: [
-        "Delimited input treats the delimiter literally and does not implement CSV quoting.",
-        "Nested child audit is consolidated into the top-level column audit entry.",
-    ],
-    ParserType.STRUCT: [
-        "Duplicate JSON object keys, including unselected fields, make the whole container a parse "
-        "error handled by on_parse_error or the parent child-error policy."
-    ],
-    ParserType.MAP: [
-        "Duplicate JSON object keys make the whole container a parse error handled by "
-        "on_parse_error or the parent child-error policy."
-    ],
 }
 
 
 def parser_description(parser_type: ParserType) -> dict[str, Any]:
-    """Return a fresh machine-readable description for one parser type.
-
-    Complex containers override the common whitespace-collapse default because rewriting raw JSON
-    could alter quoted child values. Recursive leaf parsers still advertise their own defaults.
-    """
-    expected = {
-        ParserType.DECIMAL: ["decimal(p,s)"],
-        ParserType.ARRAY: ["array<T>"],
-        ParserType.STRUCT: ["struct<field:T,...>"],
-        ParserType.MAP: ["map<string,T>"],
-    }.get(parser_type, [parser_type.value])
-    is_complex = parser_type in {ParserType.ARRAY, ParserType.STRUCT, ParserType.MAP}
-    normalization_behavior = (
-        "Outer complex input is edge-trimmed and collapse_whitespace resolves to false because "
-        "collapsing inside JSON would rewrite quoted values; recursive leaf parsers perform "
-        "their own normalization."
-        if is_complex
-        else "Whitespace collapse, trim, and empty-to-null run before parser-specific conversion."
-    )
+    """Return a fresh machine-readable description for one parser type."""
+    expected = ["decimal(p,s)"] if parser_type is ParserType.DECIMAL else [parser_type.value]
     # Deep copy is part of the public contract: consumers may annotate or reorder metadata locally
     # without changing later calls.
     arguments = deepcopy([*_COMMON_ARGUMENTS, *_SPECIFIC_ARGUMENTS[parser_type]])
@@ -447,31 +314,17 @@ def parser_description(parser_type: ParserType) -> dict[str, Any]:
             if argument["name"] == "on_parse_error":
                 argument["allowed_values"] = [member.value for member in ParseErrorMode]
                 break
-    if is_complex:
-        for argument in arguments:
-            if argument["name"] == "collapse_whitespace":
-                argument["default"] = _PARSER_DEFAULTS[parser_type.value]["collapse_whitespace"]
-                argument["description"] = (
-                    "Always resolves to false for the outer complex container; recursive leaf "
-                    "parsers control their own whitespace collapse."
-                )
-                break
     return {
         "parser_type": parser_type.value,
         "expected_data_types": expected,
         "summary": _SUMMARIES[parser_type],
         "arguments": arguments,
         "key_behaviors": [
-            normalization_behavior,
+            "Whitespace collapse, trim, and empty-to-null run before parser-specific conversion.",
             "Null markers match only when replace_null_markers is true.",
             "Parse errors are resolved before zero and final-null handling.",
             "fail mode raises only when Spark materializes the failing target expression; projection pruning can skip it.",
             "All execution uses native Spark expressions; no Python UDF is used.",
-            *(
-                ["Only the exact lowercase JSON literal null is treated as a JSON null token."]
-                if is_complex
-                else []
-            ),
             *_SPECIFIC_BEHAVIORS.get(parser_type, []),
         ],
         "gotchas": deepcopy(_SPECIFIC_GOTCHAS.get(parser_type, [])),
@@ -538,14 +391,13 @@ def config_description() -> dict[str, Any]:
                 "expected_data_type",
                 required=True,
                 description=(
-                    "Exact scalar or recursive Spark DDL target type; validated against the "
-                    "complete parser tree."
+                    "Exact scalar Spark DDL target type; decimal requires precision and scale."
                 ),
             ),
             _argument(
                 "parser",
                 required=True,
-                description="Scalar or recursive complex parser type/options mapping.",
+                description="Scalar parser type or options mapping.",
             ),
         ],
     }

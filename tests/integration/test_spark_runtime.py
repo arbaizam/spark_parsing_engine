@@ -1,7 +1,6 @@
 """Native-Spark behavioral tests for the complete runtime contract."""
 
 import importlib.util
-import json
 import os
 import shutil
 import sys
@@ -17,7 +16,10 @@ from spark_parser import (
     parser,
 )
 
-if importlib.util.find_spec("pyspark") is None and os.environ.get("SPARK_PARSER_REQUIRE_JAVA") == "1":
+if (
+    importlib.util.find_spec("pyspark") is None
+    and os.environ.get("SPARK_PARSER_REQUIRE_JAVA") == "1"
+):
     pytest.fail(
         "SPARK_PARSER_REQUIRE_JAVA=1, but PySpark is not installed",
         pytrace=False,
@@ -54,9 +56,7 @@ def spark():
     """Use an active Databricks session or a local session when Java exists."""
     active = SparkSession.getActiveSession()
     if active is not None:
-        previous_settings = {
-            key: active.conf.get(key) for key in _PORTABLE_TEST_SESSION_SETTINGS
-        }
+        previous_settings = {key: active.conf.get(key) for key in _PORTABLE_TEST_SESSION_SETTINGS}
         applied_settings: list[str] = []
         try:
             for key, value in _PORTABLE_TEST_SESSION_SETTINGS.items():
@@ -95,9 +95,7 @@ def spark():
 
 def _is_connect_session(session: SparkSession) -> bool:
     """Identify Connect without reading a runtime configuration key."""
-    return _connect_mode_requested() or type(session).__module__.startswith(
-        "pyspark.sql.connect."
-    )
+    return _connect_mode_requested() or type(session).__module__.startswith("pyspark.sql.connect.")
 
 
 @pytest.fixture
@@ -108,7 +106,7 @@ def classic_spark(spark: SparkSession) -> SparkSession:
     return spark
 
 
-def test_native_parsing_and_nested_audit(spark: SparkSession) -> None:
+def test_native_parsing_and_audit(spark: SparkSession) -> None:
     config = YamlParserConfigCompiler().compile_text(
         """
 parser_config_id: smoke
@@ -883,12 +881,8 @@ columns:
     ]
 
     audits = parsed.results_df.orderBy("row_id").collect()
-    assert audits[0].spark_parser_parse_results[0].actions_applied == [
-        "parse_error_preserved"
-    ]
-    assert audits[0].spark_parser_parse_results[1].actions_applied == [
-        "null_marker_replaced"
-    ]
+    assert audits[0].spark_parser_parse_results[0].actions_applied == ["parse_error_preserved"]
+    assert audits[0].spark_parser_parse_results[1].actions_applied == ["null_marker_replaced"]
     assert audits[3].spark_parser_parse_results[0].parsed_value == "Unknown Index 12M"
     assert audits[-2].spark_parser_parse_results[0].actions_applied == []
     assert audits[-1].spark_parser_parse_results[0].actions_applied == []
@@ -1091,65 +1085,6 @@ columns:
     assert [row.Value for row in rows] == [None, None, None, "12345-6789"]
 
 
-def test_nested_string_error_policies_can_preserve_raw_tokens(spark: SparkSession) -> None:
-    """Preserve invalid formatted strings inside structs, arrays, and maps without losing paths."""
-    config = YamlParserConfigCompiler().compile_text(
-        """
-parser_config_id: nested_preserve
-parser_config_name: Nested Preserve
-version: "1"
-columns:
-  - source_column_name: profile
-    target_column_name: Profile
-    expected_data_type: struct<state:string>
-    parser:
-      type: struct
-      fields:
-        - source_field_name: state
-          target_field_name: state
-          parser: {type: string, format: state_us, on_parse_error: preserve}
-      audit: true
-  - source_column_name: states
-    target_column_name: States
-    expected_data_type: array<string>
-    parser:
-      type: array
-      element_parser: {type: string, format: state_us}
-      on_element_error: preserve
-      audit: true
-  - source_column_name: state_map
-    target_column_name: StateMap
-    expected_data_type: map<string,string>
-    parser:
-      type: map
-      value_parser: {type: string, format: state_us}
-      on_value_error: preserve
-      audit: true
-"""
-    )
-    bronze_df = spark.range(1).select(
-        F.lit(1).cast("integer").alias("row_id"),
-        F.lit('{"state":"Mul"}').alias("profile"),
-        F.lit('["Illinois","Mul","ny"]').alias("states"),
-        F.lit('{"home":"Illinois","other":"Mul"}').alias("state_map"),
-    )
-
-    parsing = SparkDataFrameParser().parse_dataframe(bronze_df, config, key_columns=["row_id"])
-    row = parsing.parsed_df.first()
-    assert row.Profile.state == "Mul"
-    assert row.States == ["IL", "Mul", "NY"]
-    assert row.StateMap == {"home": "IL", "other": "Mul"}
-
-    audits = {
-        item.target_column_name: item
-        for item in parsing.results_df.first().spark_parser_parse_results
-    }
-    assert audits["Profile"].nested_error_paths == ["$.state"]
-    assert audits["States"].nested_error_paths == ["$[1]"]
-    assert audits["StateMap"].nested_error_paths == ["$['other']"]
-    assert all(item.actions_applied == ["nested_parse_errors_resolved"] for item in audits.values())
-
-
 def test_datetime_defaults_accept_iso_and_us_12_hour_timestamp(spark: SparkSession) -> None:
     """Keep documented date and timestamp defaults working under production-style ANSI mode."""
     assert spark.conf.get("spark.sql.ansi.enabled") == "true"
@@ -1207,18 +1142,20 @@ columns:
         ).alias("event_timestamp"),
     )
 
-    parsed = SparkDataFrameParser().parse_dataframe(
-        bronze_df,
-        config,
-        key_columns=["row_id"],
-    ).parsed_df
+    parsed = (
+        SparkDataFrameParser()
+        .parse_dataframe(
+            bronze_df,
+            config,
+            key_columns=["row_id"],
+        )
+        .parsed_df
+    )
     rows = (
         parsed.orderBy("row_id")
         .select(
             "EventDate",
-            F.date_format("EventTimestamp", "yyyy-MM-dd HH:mm:ss").alias(
-                "EventTimestampText"
-            ),
+            F.date_format("EventTimestamp", "yyyy-MM-dd HH:mm:ss").alias("EventTimestampText"),
             F.date_format("EventTimestampNtz", "yyyy-MM-dd HH:mm:ss").alias(
                 "EventTimestampNtzText"
             ),
@@ -1368,7 +1305,9 @@ columns:
                 .parsed_df.orderBy("row_id")
                 .collect()
             )
-            assert [None if row.EventDate is None else row.EventDate.isoformat() for row in rows] == [
+            assert [
+                None if row.EventDate is None else row.EventDate.isoformat() for row in rows
+            ] == [
                 "2024-03-05",
                 "2024-03-05",
                 None,
@@ -1421,11 +1360,15 @@ columns:
         F.lit("2024-01-02T03:04:05\r\n").alias("bad_timestamp"),
     )
 
-    row = SparkDataFrameParser().parse_dataframe(
-        df,
-        config,
-        key_columns=["valid_date"],
-    ).parsed_df.first()
+    row = (
+        SparkDataFrameParser()
+        .parse_dataframe(
+            df,
+            config,
+            key_columns=["valid_date"],
+        )
+        .parsed_df.first()
+    )
     assert row.ValidDate.isoformat() == "2024-01-02"
     assert row.BadDate is None
     assert row.BadTimestamp is None
@@ -1522,55 +1465,8 @@ columns:
         spark.conf.set("spark.sql.session.timeZone", previous_timezone)
 
 
-def test_complex_audit_preserves_timestamp_microseconds(spark: SparkSession) -> None:
-    """Serialize nested timestamp and timestamp_ntz values without millisecond truncation."""
-    previous_timezone = spark.conf.get("spark.sql.session.timeZone")
-    spark.conf.set("spark.sql.session.timeZone", "UTC")
-    try:
-        config = YamlParserConfigCompiler().compile_text(
-            """
-parser_config_id: timestamp_audit_precision
-parser_config_name: Timestamp Audit Precision
-version: "1"
-columns:
-  - source_column_name: payload
-    target_column_name: Payload
-    expected_data_type: struct<event:timestamp,local:timestamp_ntz>
-    parser:
-      type: struct
-      fields:
-        - {source_field_name: event, target_field_name: event, parser: timestamp}
-        - {source_field_name: local, target_field_name: local, parser: timestamp_ntz}
-      audit: true
-"""
-        )
-        df = spark.range(1).select(
-            F.lit(
-                '{"event":"2026-08-30T01:02:03.123456Z","local":"2026-08-30T01:02:03.654321"}'
-            ).alias("payload")
-        )
-
-        audit = (
-            SparkDataFrameParser()
-            .parse_dataframe(
-                df,
-                config,
-                key_columns=["payload"],
-            )
-            .results_df.first()
-            .spark_parser_parse_results[0]
-        )
-        assert audit.parsed_value == (
-            '{"event":"2026-08-30T01:02:03.123456Z","local":"2026-08-30T01:02:03.654321"}'
-        )
-    finally:
-        spark.conf.set("spark.sql.session.timeZone", previous_timezone)
-
-
-def test_top_level_and_nested_double_share_one_numeric_token_contract(
-    spark: SparkSession,
-) -> None:
-    """Ensure a numeric token cannot succeed or fail solely because it appears inside an array."""
+def test_double_parser_enforces_one_full_token_contract(spark: SparkSession) -> None:
+    """Accept documented numeric spellings while rejecting partial and nonstandard tokens."""
     config = YamlParserConfigCompiler().compile_text(
         """
 parser_config_id: numeric_parity
@@ -1581,13 +1477,6 @@ columns:
     target_column_name: Scalar
     expected_data_type: double
     parser: {type: double, on_parse_error: null}
-  - source_column_name: nested
-    target_column_name: Nested
-    expected_data_type: array<double>
-    parser:
-      type: array
-      element_parser: double
-      on_element_error: null
 """
     )
     tokens = [
@@ -1614,10 +1503,6 @@ columns:
             F.array(*(F.lit(token) for token in tokens)),
             (F.col("id") + 1).cast("integer"),
         ).alias("scalar"),
-        F.element_at(
-            F.array(*(F.lit(f'["{token}"]') for token in tokens)),
-            (F.col("id") + 1).cast("integer"),
-        ).alias("nested"),
     )
 
     rows = (
@@ -1646,7 +1531,6 @@ columns:
         7.0,
     ]
     assert [row.Scalar for row in rows] == expected
-    assert [row.Nested[0] for row in rows] == expected
 
 
 def test_numeric_full_token_guards_reject_final_line_terminators(spark: SparkSession) -> None:
@@ -1664,16 +1548,6 @@ columns:
       collapse_whitespace: false
       trim_whitespace: false
       on_parse_error: null
-  - source_column_name: nested
-    target_column_name: Nested
-    expected_data_type: array<integer>
-    parser:
-      type: array
-      element_parser:
-        type: integer
-        collapse_whitespace: false
-        trim_whitespace: false
-      on_element_error: null
 """
     )
     tokens = ["123", "123\n", "123\r", "123\r\n", "123\u2028"]
@@ -1683,10 +1557,6 @@ columns:
             F.array(*(F.lit(token) for token in tokens)),
             (F.col("id") + 1).cast("integer"),
         ).alias("scalar"),
-        F.element_at(
-            F.array(*(F.lit(json.dumps([token])) for token in tokens)),
-            (F.col("id") + 1).cast("integer"),
-        ).alias("nested"),
     )
 
     rows = (
@@ -1696,7 +1566,6 @@ columns:
         .collect()
     )
     assert [row.Scalar for row in rows] == [123, None, None, None, None]
-    assert [row.Nested for row in rows] == [[123], [None], [None], [None], [None]]
 
 
 def test_ansi_and_non_ansi_modes_produce_identical_handled_outputs(
@@ -1725,14 +1594,6 @@ columns:
     target_column_name: DateValue
     expected_data_type: date
     parser: {type: date, on_parse_error: null, audit: true}
-  - source_column_name: array_value
-    target_column_name: ArrayValue
-    expected_data_type: array<double>
-    parser:
-      type: array
-      element_parser: double
-      on_element_error: null
-      audit: true
 """
     )
     bronze_df = spark.sql(
@@ -1741,8 +1602,7 @@ SELECT
   '1.9' AS integer_value,
   '1d' AS double_value,
   'Ill.' AS state_value,
-  '09/30/2026 12:00 AM' AS date_value,
-  '["1d","2.5"]' AS array_value
+  '09/30/2026 12:00 AM' AS date_value
 """
     )
     previous_ansi = spark.conf.get("spark.sql.ansi.enabled")
@@ -1770,84 +1630,6 @@ SELECT
     assert target["DoubleValue"] is None
     assert target["StateValue"] == "IL"
     assert target["DateValue"].isoformat() == "2026-09-30"
-    assert target["ArrayValue"] == [None, 2.5]
-
-
-def test_nested_defaults_and_zero_invalidation_are_visible_in_audit(
-    spark: SparkSession,
-) -> None:
-    """Record every nested fabricated value so target data remains explainable downstream."""
-    config = YamlParserConfigCompiler().compile_text(
-        """
-parser_config_id: nested_default_audit
-parser_config_name: Nested Default Audit
-version: "1"
-columns:
-  - source_column_name: values
-    target_column_name: Values
-    expected_data_type: array<integer>
-    parser:
-      type: array
-      element_parser:
-        type: integer
-        zero_is_valid: false
-        is_nullable: false
-        default_on_null: -1
-      on_element_error: null
-      audit: true
-"""
-    )
-    parsing = SparkDataFrameParser().parse_dataframe(
-        spark.range(1).select(
-            F.lit(1).cast("integer").alias("row_id"),
-            F.lit('[1,"bad",0,null]').alias("values"),
-        ),
-        config,
-        key_columns=["row_id"],
-    )
-
-    assert parsing.parsed_df.first().Values == [1, -1, -1, -1]
-    audit = parsing.results_df.first().spark_parser_parse_results[0]
-    assert audit.nested_error_paths == ["$[1]"]
-    assert audit.nested_default_on_null_paths == ["$[1]", "$[2]", "$[3]"]
-    assert audit.nested_zero_invalidated_paths == ["$[2]"]
-    assert audit.actions_applied == [
-        "nested_parse_errors_resolved",
-        "nested_zero_invalidated",
-        "nested_default_on_null_applied",
-    ]
-    assert audit.changed is True
-
-
-def test_map_error_paths_escape_apostrophes_in_keys(spark: SparkSession) -> None:
-    """Keep a diagnostic map key unambiguous when the source key itself contains an apostrophe."""
-    config = YamlParserConfigCompiler().compile_text(
-        """
-parser_config_id: escaped_map_path
-parser_config_name: Escaped Map Path
-version: "1"
-columns:
-  - source_column_name: values
-    target_column_name: Values
-    expected_data_type: map<string,integer>
-    parser:
-      type: map
-      value_parser: integer
-      on_value_error: null
-      audit: true
-"""
-    )
-    parsing = SparkDataFrameParser().parse_dataframe(
-        spark.range(1).select(
-            F.lit(1).cast("integer").alias("row_id"),
-            F.lit('{"a\'b":"bad"}').alias("values"),
-        ),
-        config,
-        key_columns=["row_id"],
-    )
-
-    audit = parsing.results_df.first().spark_parser_parse_results[0]
-    assert audit.nested_error_paths == ["$['a\\'b']"]
 
 
 def test_audit_schema_is_consistent_with_or_without_audited_columns(spark: SparkSession) -> None:
@@ -1891,9 +1673,6 @@ columns:
         "actions_applied",
         "options",
         "error",
-        "nested_error_paths",
-        "nested_default_on_null_paths",
-        "nested_zero_invalidated_paths",
     ]
     assert audited.results_df.first().spark_parser_parse_results
     assert empty.results_df.first().spark_parser_parse_results == []
@@ -2066,38 +1845,6 @@ columns:
     parser: string
 """
     )
-    nested_source_collision_config = compiler.compile_text(
-        """
-parser_config_id: resolver_nested_sources
-parser_config_name: Resolver Nested Sources
-version: "1"
-columns:
-  - source_column_name: payload
-    target_column_name: Payload
-    expected_data_type: struct<x:string,y:string>
-    parser:
-      type: struct
-      fields:
-        - {source_field_name: A, target_field_name: x, parser: string}
-        - {source_field_name: a, target_field_name: y, parser: string}
-"""
-    )
-    nested_target_collision_config = compiler.compile_text(
-        """
-parser_config_id: resolver_nested_targets
-parser_config_name: Resolver Nested Targets
-version: "1"
-columns:
-  - source_column_name: payload
-    target_column_name: Payload
-    expected_data_type: struct<`K`:string,k:string>
-    parser:
-      type: struct
-      fields:
-        - {source_field_name: first, target_field_name: K, parser: string}
-        - {source_field_name: second, target_field_name: k, parser: string}
-"""
-    )
     previous_case_sensitive = spark.conf.get("spark.sql.caseSensitive")
     try:
         spark.conf.set("spark.sql.caseSensitive", "false")
@@ -2177,23 +1924,6 @@ columns:
                 key_columns=["Value"],
             )
 
-        nested_df = spark.range(1).select(
-            F.lit("key").alias("row_id"),
-            F.lit('{"A":"one","a":"two"}').alias("payload"),
-        )
-        with pytest.raises(SchemaValidationError, match="struct source fields collide"):
-            SparkDataFrameParser().parse_dataframe(
-                nested_df,
-                nested_source_collision_config,
-                key_columns=["row_id"],
-            )
-        with pytest.raises(SchemaValidationError, match="struct target fields collide"):
-            SparkDataFrameParser().parse_dataframe(
-                nested_df,
-                nested_target_collision_config,
-                key_columns=["row_id"],
-            )
-
         spark.conf.set("spark.sql.caseSensitive", "true")
         exact = SparkDataFrameParser().parse_dataframe(
             ambiguous_source,
@@ -2238,11 +1968,15 @@ columns:
         F.lit(marker).alias("null_value"),
     )
 
-    row = SparkDataFrameParser().parse_dataframe(
-        df,
-        config,
-        key_columns=["boolean_value"],
-    ).parsed_df.first()
+    row = (
+        SparkDataFrameParser()
+        .parse_dataframe(
+            df,
+            config,
+            key_columns=["boolean_value"],
+        )
+        .parsed_df.first()
+    )
     assert row.BooleanValue is True
     assert row.NullValue is None
 
@@ -2268,9 +2002,7 @@ columns:
         .parse_dataframe(
             spark.range(2).select(
                 F.col("id").alias("row_id"),
-                F.when(F.col("id") == 0, F.lit("ä"))
-                .otherwise(F.lit("ö"))
-                .alias("boolean_value"),
+                F.when(F.col("id") == 0, F.lit("ä")).otherwise(F.lit("ö")).alias("boolean_value"),
             ),
             distinct_config,
             key_columns=["row_id"],
@@ -2282,7 +2014,7 @@ columns:
 
     # A familiar non-ASCII case pair is allowed through Spark-free compilation, then rejected at
     # DataFrame binding by the same Spark lowercasing implementation used for row values. Binding
-    # must not depend on rows existing or on a nested Boolean element being evaluated.
+    # must not depend on any rows existing.
     overlap_config = YamlParserConfigCompiler().compile_text(
         """
 parser_config_id: unicode_overlapping_vocabularies
@@ -2299,22 +2031,6 @@ columns:
     parser: {type: boolean, on_parse_error: null}
 """
     )
-    nested_overlap_config = YamlParserConfigCompiler().compile_text(
-        """
-parser_config_id: nested_unicode_overlapping_vocabularies
-parser_config_name: Nested Unicode Overlapping Vocabularies
-version: "1"
-globals:
-  true_values: ["Ä"]
-  false_values: ["ä"]
-  boolean_case_sensitive: false
-columns:
-  - source_column_name: boolean_values
-    target_column_name: BooleanValues
-    expected_data_type: array<boolean>
-    parser: {type: array, element_parser: boolean}
-"""
-    )
     SparkDataFrameParser().parse_dataframe(
         spark.range(0).select(F.lit("ä").alias("boolean_value")),
         distinct_config,
@@ -2325,12 +2041,6 @@ columns:
             spark.range(0).select(F.lit("Ä").alias("boolean_value")),
             overlap_config,
             key_columns=["boolean_value"],
-        )
-    with pytest.raises(SchemaValidationError, match="overlap.*BooleanValues"):
-        SparkDataFrameParser().parse_dataframe(
-            spark.range(0).select(F.lit("[]").alias("boolean_values")),
-            nested_overlap_config,
-            key_columns=["boolean_values"],
         )
 
 
@@ -2548,85 +2258,11 @@ def test_wide_config_uses_constant_depth_projection_stages(
     assert analyzed.count("Project") <= 10
 
 
-def test_audited_nested_plan_carriers_keep_logical_and_physical_plans_linear(
-    spark: SparkSession,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Budget expression size, not only Project depth, for recursively audited containers."""
-
-    def depth_config(depth: int):
-        data_type = "integer"
-        parser_options: dict[str, object] = {"type": "integer"}
-        for _ in range(depth):
-            data_type = f"array<{data_type}>"
-            parser_options = {
-                "type": "array",
-                "element_parser": parser_options,
-                "on_element_error": "null",
-            }
-        parser_options["audit"] = True
-        return YamlParserConfigCompiler().compile_mapping(
-            {
-                "parser_config_id": f"audited_depth_{depth}",
-                "parser_config_name": "Audited Depth",
-                "version": "1",
-                "columns": [
-                    {
-                        "source_column_name": "src",
-                        "target_column_name": "Value",
-                        "expected_data_type": data_type,
-                        "parser": parser_options,
-                    }
-                ],
-            }
-        )
-
-    analyzed_sizes: list[int] = []
-    deepest = None
-    deepest_explain = ""
-    for depth in range(1, 5):
-        payload: object = "bad"
-        for _ in range(depth):
-            payload = [payload]
-        parsing = SparkDataFrameParser().parse_dataframe(
-            spark.range(1).select(
-                F.lit("key").alias("key"),
-                F.lit(json.dumps(payload)).alias("src"),
-            ),
-            depth_config(depth),
-            key_columns=["key"],
-        )
-        parsing.parsed_df.explain(mode="extended")
-        explain_output = capsys.readouterr().out
-        analyzed = explain_output.split("== Analyzed Logical Plan ==", maxsplit=1)[1].split(
-            "== Optimized Logical Plan ==",
-            maxsplit=1,
-        )[0]
-        analyzed_sizes.append(len(analyzed))
-        deepest = parsing
-        deepest_explain = explain_output
-
-    assert deepest is not None
-    # Before the carrier binding, depth four was about 7.4 MB and 148 times depth one. Keep a
-    # generous cross-version budget while making exponential re-embedding unambiguously fail.
-    assert analyzed_sizes[-1] < 500_000
-    assert analyzed_sizes[-1] < analyzed_sizes[0] * 6
-    optimized = deepest_explain.split("== Optimized Logical Plan ==", maxsplit=1)[1].split(
-        "== Physical Plan ==",
-        maxsplit=1,
-    )[0]
-    physical = deepest_explain.split("== Physical Plan ==", maxsplit=1)[1]
-    assert len(optimized) < 500_000
-    assert len(physical) < 500_000
-
-    audit = deepest.results_df.first().spark_parser_parse_results[0]
-    assert audit.nested_error_paths == ["$[0][0][0][0]"]
-
-
 @pytest.mark.classic_spark
 def test_analyzer_iteration_exhaustion_is_a_clear_metadata_only_binding_error(
     classic_spark: SparkSession,
 ) -> None:
+    """Translate width-related analyzer failures without starting a Spark job."""
     spark = classic_spark
     previous_iterations = spark.conf.get("spark.sql.analyzer.maxIterations")
     job_group = "spark-parser-analyzer-exhaustion"
@@ -2646,61 +2282,43 @@ def test_analyzer_iteration_exhaustion_is_a_clear_metadata_only_binding_error(
             "version": "1",
             "columns": [
                 {
-                    "source_column_name": "src",
-                    "target_column_name": "Value",
-                    "expected_data_type": "array<array<array<array<integer>>>>",
-                    "parser": {
-                        "type": "array",
-                        "audit": True,
-                        "on_element_error": "null",
-                        "element_parser": {
-                            "type": "array",
-                            "on_element_error": "null",
-                            "element_parser": {
-                                "type": "array",
-                                "on_element_error": "null",
-                                "element_parser": {
-                                    "type": "array",
-                                    "on_element_error": "null",
-                                    "element_parser": "integer",
-                                },
-                            },
-                        },
-                    },
+                    "source_column_name": f"src_{index}",
+                    "target_column_name": f"Value{index}",
+                    "expected_data_type": "integer",
+                    "parser": "integer",
                 }
+                for index in range(3)
             ],
         }
     )
+
+    class IterationExhaustedPlan:
+        """Minimal analyzed plan exposing the caller's Spark configuration."""
+
+        sparkSession = spark
+
+        def withColumns(self, _columns):
+            raise RuntimeError("Max iterations (2) reached for batch Resolution")
+
+    class StackExhaustedPlan:
+        """Minimal plan reproducing the JVM stack-overflow error text."""
+
+        def withColumns(self, _columns):
+            raise RuntimeError(
+                "java.lang.StackOverflowError at ColumnNodeToExpressionConverter.apply"
+            )
+
     try:
         spark.conf.set("spark.sql.analyzer.maxIterations", "2")
         with pytest.raises(
             SchemaValidationError,
-            match=(
-                r"spark\.sql\.analyzer\.maxIterations=2.*"
-                r"maximum configured complex nesting depth is 4"
-            ),
+            match=r"maxIterations=2 for 3 configured columns.*exceptionally wide configuration",
         ):
-            SparkDataFrameParser().parse_dataframe(
-                spark.range(1).select(
-                    F.lit("key").alias("key"),
-                    F.lit('[[[["bad"]]]]').alias("src"),
-                ),
-                config,
-                key_columns=["key"],
-            )
-
-        class StackExhaustedPlan:
-            """Minimal plan object that reproduces the JVM error text without a long depth-64 run."""
-
-            def withColumns(self, _columns):
-                raise RuntimeError(
-                    "java.lang.StackOverflowError at "
-                    "ColumnNodeToExpressionConverter.apply"
-                )
+            SparkDataFrameParser._with_columns_checked(IterationExhaustedPlan(), {}, config)
 
         with pytest.raises(
             SchemaValidationError,
-            match=r"driver JVM thread stack.*maximum configured complex nesting depth is 4",
+            match=r"driver JVM thread stack.*3 configured columns.*exceptionally wide configuration",
         ):
             SparkDataFrameParser._with_columns_checked(StackExhaustedPlan(), {}, config)
         assert spark.sparkContext.statusTracker().getJobIdsForGroup(job_group) == []
@@ -2728,135 +2346,6 @@ columns:
     )
     value = config.columns[0].parser.default_on_null
     assert SparkDataFrameParser._option_text(value) == "1970-01-01T00:00:00"
-
-
-def test_complex_types_parse_recursively_with_paths_and_canonical_audit(
-    spark: SparkSession,
-) -> None:
-    config = YamlParserConfigCompiler().compile_text(
-        """
-parser_config_id: complex_runtime
-parser_config_name: Complex Runtime
-version: "1"
-globals:
-  true_values: [Y]
-  false_values: [N]
-  boolean_case_sensitive: false
-columns:
-  - source_column_name: names
-    target_column_name: Names
-    expected_data_type: array<string>
-    parser:
-      type: array
-      element_parser: {type: string, format: upper}
-      on_element_error: drop
-      drop_null_elements: true
-      distinct: true
-      audit: true
-  - source_column_name: object
-    target_column_name: Object
-    expected_data_type: struct<street:string,zip:string,scores:array<integer>,approved:boolean,due:date>
-    parser:
-      type: struct
-      fields:
-        - source_field_name: address
-          target_field_name: street
-          parser: {type: string, format: address_us_v1}
-        - source_field_name: postal
-          target_field_name: zip
-          parser: {type: string, format: zip, on_parse_error: null}
-        - source_field_name: values
-          target_field_name: scores
-          parser: {type: array, element_parser: integer, on_element_error: null}
-        - {source_field_name: is_approved, target_field_name: approved, parser: boolean}
-        - source_field_name: due_date
-          target_field_name: due
-          parser: date
-      audit: true
-  - source_column_name: attributes
-    target_column_name: Attributes
-    expected_data_type: map<string,decimal(8,2)>
-    parser: {type: map, value_parser: decimal, on_value_error: drop, audit: true}
-"""
-    )
-    df = spark.sql(
-        """
-SELECT
-  1 AS id,
-  '[" alice ","BOB",null,"alice"]' AS names,
-  '{"address":"123 mccormick st. apt #4b","postal":"1234","values":[1,"bad",3],"is_approved":"y","due_date":"08/27/2026 12:00 AM"}' AS object,
-  '{"a":12.345,"bad":"x","empty":null}' AS attributes
-"""
-    )
-
-    parsing = SparkDataFrameParser().parse_dataframe(df, config, key_columns=["id"])
-    row = parsing.parsed_df.first()
-    assert row.Names == ["ALICE", "BOB"]
-    assert row.Object.street == "123 McCormick St Apt #4B"
-    assert row.Object.zip == "01234"
-    assert row.Object.scores == [1, None, 3]
-    assert row.Object.approved is True
-    assert str(row.Object.due) == "2026-08-27"
-    assert str(row.Attributes["a"]) == "12.35"
-    assert "bad" not in row.Attributes
-    assert row.Attributes["empty"] is None
-
-    audits = {
-        item.target_column_name: item
-        for item in parsing.results_df.first().spark_parser_parse_results
-    }
-    assert audits["Names"].parsed_value == '["ALICE","BOB"]'
-    assert audits["Object"].nested_error_paths == ["$.scores[1]"]
-    assert audits["Attributes"].nested_error_paths == ["$['bad']"]
-    assert "nested_parse_errors_resolved" in audits["Object"].actions_applied
-    assert '"type":"string"' in audits["Names"].options["element_parser"]
-
-
-def test_delimited_arrays_complex_defaults_and_malformed_json(
-    spark: SparkSession,
-) -> None:
-    config = YamlParserConfigCompiler().compile_text(
-        """
-parser_config_id: complex_edges
-parser_config_name: Complex Edges
-version: "1"
-columns:
-  - source_column_name: numbers
-    target_column_name: Numbers
-    expected_data_type: array<integer>
-    parser:
-      type: array
-      input_format: delimited
-      delimiter: "|"
-      element_parser: integer
-      on_element_error: drop
-      distinct: true
-      audit: true
-  - source_column_name: object
-    target_column_name: Object
-    expected_data_type: struct<a:integer>
-    parser:
-      type: struct
-      fields:
-        - {source_field_name: a, target_field_name: a, parser: integer}
-      on_parse_error: default
-      default_on_error: {a: -1}
-      audit: true
-"""
-    )
-    df = spark.sql("SELECT 1 AS id, '001|2|bad|2' AS numbers, 'not json' AS object")
-
-    parsing = SparkDataFrameParser().parse_dataframe(df, config, key_columns=["id"])
-    row = parsing.parsed_df.first()
-    assert row.Numbers == [1, 2]
-    assert row.Object.a == -1
-    audits = {
-        item.target_column_name: item
-        for item in parsing.results_df.first().spark_parser_parse_results
-    }
-    assert audits["Numbers"].nested_error_paths == ["$[2]"]
-    assert audits["Object"].nested_error_paths == ["$"]
-    assert audits["Object"].actions_applied == ["parse_error_default_applied"]
 
 
 def test_new_scalar_types_are_first_class(spark: SparkSession) -> None:
@@ -2923,26 +2412,6 @@ columns:
     target_column_name: PascalValue
     expected_data_type: string
     parser: {type: string, format: pascal}
-  - source_column_name: map_value
-    target_column_name: MapValue
-    expected_data_type: map<string,string>
-    parser:
-      type: map
-      value_parser: string
-      drop_null_values: true
-  - source_column_name: struct_value
-    target_column_name: StructValue
-    expected_data_type: struct<count:integer>
-    parser:
-      type: struct
-      audit: true
-      fields:
-        - source_field_name: count
-          target_field_name: count
-          parser:
-            type: integer
-            on_parse_error: default
-            default_on_error: -1
   - source_column_name: binary_value
     target_column_name: BinaryValue
     expected_data_type: binary
@@ -2951,12 +2420,11 @@ columns:
       encoding: base64
       is_nullable: false
       default_on_null: SGk=
+      audit: true
 """
     )
     df = spark.range(1).select(
         F.lit(" hELLo wORLD ").alias("display"),
-        F.lit('{"a":"","b":"x"}').alias("map_value"),
-        F.lit('{"count":"bad"}').alias("struct_value"),
         F.lit(None).cast("string").alias("binary_value"),
     )
 
@@ -2964,12 +2432,10 @@ columns:
     row = parsing.parsed_df.first()
     assert row.LowerValue == "hello world"
     assert row.PascalValue == "HelloWorld"
-    assert row.MapValue == {"b": "x"}
-    assert row.StructValue["count"] == -1
     assert bytes(row.BinaryValue) == b"Hi"
     audit = parsing.results_df.first().spark_parser_parse_results[0]
-    assert audit.nested_error_paths == ["$.count"]
-    assert audit.actions_applied == ["nested_parse_errors_resolved"]
+    assert audit.parsed_value == "SGk="
+    assert audit.actions_applied == ["default_on_null_applied"]
 
 
 def test_base64_runtime_uses_the_compilers_strict_padded_alphabet(
@@ -3040,7 +2506,7 @@ columns:
 
 
 def test_integral_boundaries_reject_byte_wraparound(spark: SparkSession) -> None:
-    """Keep signed byte bounds identical at top level and inside arrays."""
+    """Reject unsigned-byte spellings instead of allowing Spark to wrap them."""
     compiler = YamlParserConfigCompiler()
     config = compiler.compile_text(
         """
@@ -3056,10 +2522,6 @@ columns:
     target_column_name: ShortValue
     expected_data_type: short
     parser: {type: short, on_parse_error: null}
-  - source_column_name: nested
-    target_column_name: NestedByte
-    expected_data_type: array<byte>
-    parser: {type: array, element_parser: byte, on_element_error: null}
 """
     )
     tokens = ["127", "128", "200", "255", "256", "-128", "-129"]
@@ -3072,10 +2534,6 @@ columns:
                     F.array(*(F.lit(token) for token in tokens)),
                     (F.col("id") + 1).cast("integer"),
                 ).alias("scalar"),
-                F.element_at(
-                    F.array(*(F.lit(f'["{token}"]') for token in tokens)),
-                    (F.col("id") + 1).cast("integer"),
-                ).alias("nested"),
             ),
             config,
             key_columns=["row_id"],
@@ -3084,15 +2542,6 @@ columns:
         .collect()
     )
     assert [row.ByteValue for row in rows] == [127, None, None, None, None, -128, None]
-    assert [row.NestedByte[0] for row in rows] == [
-        127,
-        None,
-        None,
-        None,
-        None,
-        -128,
-        None,
-    ]
     assert [row.ShortValue for row in rows] == [127, 128, 200, 255, 256, -128, -129]
 
     failing = SparkDataFrameParser().parse_dataframe(
@@ -3115,115 +2564,6 @@ columns:
         failing.parsed_df.collect()
 
 
-def test_nested_fail_policy_raises_when_materialized(spark: SparkSession) -> None:
-    config = YamlParserConfigCompiler().compile_text(
-        """
-parser_config_id: nested_fail
-parser_config_name: Nested Fail
-version: "1"
-columns:
-  - source_column_name: values
-    target_column_name: Values
-    expected_data_type: array<integer>
-    parser: {type: array, element_parser: integer, on_element_error: fail}
-"""
-    )
-    parsing = SparkDataFrameParser().parse_dataframe(
-        spark.sql("SELECT '[1,\"bad\"]' AS values"),
-        config,
-        key_columns=["values"],
-    )
-
-    with pytest.raises((Py4JJavaError, PySparkException)) as exc_info:
-        parsing.parsed_df.collect()
-    message = str(exc_info.value)
-    assert "source 'values'" in message
-    assert "target column 'Values'" in message
-    assert "$[1]" in message
-
-
-def test_arbitrarily_nested_containers_fail_at_the_exact_child_path(
-    spark: SparkSession,
-) -> None:
-    config = YamlParserConfigCompiler().compile_text(
-        """
-parser_config_id: recursive
-parser_config_name: Recursive
-version: "1"
-columns:
-  - source_column_name: payload
-    target_column_name: Payload
-    expected_data_type: array<struct<name:string,scores:array<integer>>>
-    parser:
-      type: array
-      on_element_error: drop
-      element_parser:
-        type: struct
-        fields:
-          - {source_field_name: raw_name, target_field_name: name, parser: {type: string, format: upper}}
-          - source_field_name: raw_scores
-            target_field_name: scores
-            parser: {type: array, element_parser: integer, on_element_error: null}
-      audit: true
-  - source_column_name: nested_map
-    target_column_name: NestedMap
-    expected_data_type: map<string,array<integer>>
-    parser:
-      type: map
-      value_parser:
-        type: array
-        element_parser: integer
-        on_element_error: null
-      on_value_error: fail
-      audit: true
-"""
-    )
-    df = spark.sql(
-        'SELECT \'[{"raw_name":"alice","raw_scores":[1,"bad"]},"wrong shape"]\' AS payload, '
-        '\'{"x":[1,"bad"]}\' AS nested_map'
-    )
-
-    parsing = SparkDataFrameParser().parse_dataframe(df, config, key_columns=["payload"])
-    row = parsing.parsed_df.first().Payload
-    assert len(row) == 1
-    assert row[0].name == "ALICE"
-    assert row[0].scores == [1, None]
-    assert parsing.parsed_df.first().NestedMap["x"] == [1, None]
-    audits = parsing.results_df.first().spark_parser_parse_results
-    assert audits[0].nested_error_paths == ["$[0].scores[1]", "$[1]"]
-    assert audits[1].nested_error_paths == ["$['x'][1]"]
-
-
-def test_json_null_is_a_successful_complex_null(spark: SparkSession) -> None:
-    config = YamlParserConfigCompiler().compile_text(
-        """
-parser_config_id: json_null
-parser_config_name: JSON Null
-version: "1"
-columns:
-  - source_column_name: payload
-    target_column_name: Payload
-    expected_data_type: array<string>
-    parser:
-      type: array
-      element_parser: string
-      is_nullable: false
-      default_on_null: []
-      audit: true
-"""
-    )
-    parsing = SparkDataFrameParser().parse_dataframe(
-        spark.sql("SELECT 'null' AS payload"),
-        config,
-        key_columns=["payload"],
-    )
-
-    assert parsing.parsed_df.first().Payload == []
-    audit = parsing.results_df.first().spark_parser_parse_results[0]
-    assert audit.actions_applied == ["json_null_to_null", "default_on_null_applied"]
-    assert audit.error is None
-
-
 def test_timestamp_ntz_honors_error_policies_under_ansi(
     spark: SparkSession,
     monkeypatch: pytest.MonkeyPatch,
@@ -3242,19 +2582,18 @@ columns:
       formats: [MM/dd/yyyy HH:mm]
       on_parse_error: null
       audit: true
-  - source_column_name: local_times
-    target_column_name: LocalTimes
-    expected_data_type: array<timestamp_ntz>
+  - source_column_name: valid_time
+    target_column_name: ValidTime
+    expected_data_type: timestamp_ntz
     parser:
-      type: array
-      element_parser: {type: timestamp_ntz, formats: [MM/dd/yyyy HH:mm]}
-      on_element_error: null
-      audit: true
+      type: timestamp_ntz
+      formats: [MM/dd/yyyy HH:mm]
+      on_parse_error: null
 """
     )
     df = spark.range(1).select(
         F.lit("not-a-time").alias("local_time"),
-        F.lit('["08/27/2026 14:30","bad"]').alias("local_times"),
+        F.lit("08/27/2026 14:30").alias("valid_time"),
     )
 
     previous_policy = spark.conf.get("spark.sql.legacy.timeParserPolicy")
@@ -3293,11 +2632,9 @@ columns:
         )
         row = parsing.parsed_df.first()
         assert row.LocalTime is None
-        assert str(row.LocalTimes[0]) == "2026-08-27 14:30:00"
-        assert row.LocalTimes[1] is None
-        audits = parsing.results_df.first().spark_parser_parse_results
-        assert audits[0].actions_applied == ["parse_error_to_null"]
-        assert audits[1].nested_error_paths == ["$[1]"]
+        assert str(row.ValidTime) == "2026-08-27 14:30:00"
+        audit = parsing.results_df.first().spark_parser_parse_results[0]
+        assert audit.actions_applied == ["parse_error_to_null"]
     finally:
         spark.conf.set("spark.sql.legacy.timeParserPolicy", previous_policy)
 
@@ -3373,550 +2710,3 @@ def test_invalid_datetime_probe_preserves_classic_optimizer_configuration(
     finally:
         spark.conf.set(policy_setting, previous_policy)
         spark.conf.set(excluded_rules_setting, previous_excluded_rules)
-
-
-def test_nested_numeric_parser_rejects_json_wrapper_injection(spark: SparkSession) -> None:
-    config = YamlParserConfigCompiler().compile_text(
-        """
-parser_config_id: nested_numeric_guard
-parser_config_name: Nested Numeric Guard
-version: "1"
-columns:
-  - source_column_name: numbers
-    target_column_name: Numbers
-    expected_data_type: array<integer>
-    parser:
-      type: array
-      element_parser: integer
-      on_element_error: null
-      audit: true
-  - source_column_name: rates
-    target_column_name: Rates
-    expected_data_type: array<double>
-    parser:
-      type: array
-      input_format: delimited
-      delimiter: ";"
-      element_parser: double
-      on_element_error: drop
-"""
-    )
-    df = spark.range(1).select(
-        F.lit('["1,\\"value\\":2"]').alias("numbers"),
-        F.lit("NaN;Infinity;-Infinity;1.5").alias("rates"),
-    )
-
-    parsing = SparkDataFrameParser().parse_dataframe(df, config, key_columns=["numbers"])
-    row = parsing.parsed_df.first()
-    assert row.Numbers == [None]
-    assert row.Rates == [1.5]
-    audit = parsing.results_df.first().spark_parser_parse_results[0]
-    assert audit.nested_error_paths == ["$[0]"]
-
-
-def test_strict_json_validation_and_duplicate_map_keys_follow_error_policy(
-    spark: SparkSession,
-) -> None:
-    config = YamlParserConfigCompiler().compile_text(
-        """
-parser_config_id: strict_json
-parser_config_name: Strict JSON
-version: "1"
-columns:
-  - source_column_name: object
-    target_column_name: Object
-    expected_data_type: struct<a:integer>
-    parser:
-      type: struct
-      fields:
-        - {source_field_name: a, target_field_name: a, parser: integer}
-      on_parse_error: null
-      audit: true
-  - source_column_name: duplicate_object
-    target_column_name: DuplicateObject
-    expected_data_type: struct<a:integer>
-    parser:
-      type: struct
-      fields:
-        - {source_field_name: a, target_field_name: a, parser: integer}
-      on_parse_error: null
-      audit: true
-  - source_column_name: empty_array
-    target_column_name: EmptyArray
-    expected_data_type: array<string>
-    parser: {type: array, element_parser: string}
-  - source_column_name: empty_map
-    target_column_name: EmptyMap
-    expected_data_type: map<string,string>
-    parser: {type: map, value_parser: string}
-  - source_column_name: duplicate_map
-    target_column_name: DuplicateMap
-    expected_data_type: map<string,integer>
-    parser:
-      type: map
-      value_parser:
-        type: integer
-        is_nullable: false
-        default_on_null: -1
-      on_parse_error: null
-      audit: true
-  - source_column_name: duplicate_map
-    target_column_name: DefaultedDuplicateMap
-    expected_data_type: map<string,integer>
-    parser:
-      type: map
-      value_parser: integer
-      on_parse_error: default
-      default_on_error: {}
-  - source_column_name: nested_duplicate_map
-    target_column_name: NestedDuplicateMap
-    expected_data_type: array<map<string,integer>>
-    parser:
-      type: array
-      element_parser:
-        type: map
-        value_parser:
-          type: integer
-          is_nullable: false
-          default_on_null: -1
-      on_element_error: null
-      audit: true
-"""
-    )
-    df = spark.range(1).select(
-        F.lit("{'a':1}").alias("object"),
-        F.lit('{"a":1,"unused":1,"unused":2}').alias("duplicate_object"),
-        F.lit("[]").alias("empty_array"),
-        F.lit("{}").alias("empty_map"),
-        F.lit('{"a":null,"a":2}').alias("duplicate_map"),
-        F.lit('[{"a":null,"a":2}]').alias("nested_duplicate_map"),
-    )
-
-    parsing = SparkDataFrameParser().parse_dataframe(df, config, key_columns=["object"])
-    row = parsing.parsed_df.first()
-    assert row.Object is None
-    assert row.DuplicateObject is None
-    assert row.EmptyArray == []
-    assert row.EmptyMap == {}
-    assert row.DuplicateMap is None
-    assert row.DefaultedDuplicateMap == {}
-    assert row.NestedDuplicateMap == [None]
-    audits = {
-        item.target_column_name: item
-        for item in parsing.results_df.first().spark_parser_parse_results
-    }
-    assert audits["Object"].nested_error_paths == ["$"]
-    assert audits["Object"].actions_applied == ["parse_error_to_null"]
-    assert audits["DuplicateObject"].nested_error_paths == ["$"]
-    assert audits["DuplicateObject"].actions_applied == ["parse_error_to_null"]
-    assert audits["DuplicateMap"].nested_error_paths == ["$"]
-    assert audits["DuplicateMap"].nested_default_on_null_paths == []
-    assert audits["DuplicateMap"].actions_applied == ["parse_error_to_null"]
-    assert audits["NestedDuplicateMap"].nested_error_paths == ["$[0]"]
-    assert audits["NestedDuplicateMap"].nested_default_on_null_paths == []
-    assert audits["NestedDuplicateMap"].actions_applied == ["nested_parse_errors_resolved"]
-
-
-def test_json_requires_one_complete_standard_container_token(spark: SparkSession) -> None:
-    """Reject valid prefixes, appended documents, and non-standard numeric tokens."""
-    config = YamlParserConfigCompiler().compile_text(
-        """
-parser_config_id: strict_complete_json
-parser_config_name: Strict Complete JSON
-version: "1"
-columns:
-  - source_column_name: array_trailing
-    target_column_name: ArrayTrailing
-    expected_data_type: array<integer>
-    parser: {type: array, element_parser: integer, on_parse_error: null, audit: true}
-  - source_column_name: struct_trailing
-    target_column_name: StructTrailing
-    expected_data_type: struct<a:integer>
-    parser:
-      type: struct
-      fields:
-        - {source_field_name: a, target_field_name: a, parser: integer}
-      on_parse_error: null
-  - source_column_name: map_trailing
-    target_column_name: MapTrailing
-    expected_data_type: map<string,integer>
-    parser: {type: map, value_parser: integer, on_parse_error: null}
-  - source_column_name: array_early_close
-    target_column_name: ArrayEarlyClose
-    expected_data_type: array<integer>
-    parser: {type: array, element_parser: integer, on_parse_error: null, audit: true}
-  - source_column_name: struct_member_injection
-    target_column_name: StructMemberInjection
-    expected_data_type: struct<a:integer>
-    parser:
-      type: struct
-      fields:
-        - {source_field_name: a, target_field_name: a, parser: integer}
-      on_parse_error: null
-      audit: true
-  - source_column_name: map_member_injection
-    target_column_name: MapMemberInjection
-    expected_data_type: map<string,integer>
-    parser: {type: map, value_parser: integer, on_parse_error: null, audit: true}
-  - source_column_name: escaped_array
-    target_column_name: EscapedArray
-    expected_data_type: array<string>
-    parser: {type: array, element_parser: string, on_parse_error: null}
-  - source_column_name: nonfinite_array
-    target_column_name: NonfiniteArray
-    expected_data_type: array<string>
-    parser: {type: array, element_parser: string, on_parse_error: null}
-  - source_column_name: nonfinite_map
-    target_column_name: NonfiniteMap
-    expected_data_type: map<string,string>
-    parser: {type: map, value_parser: string, on_parse_error: null}
-  - source_column_name: nested_nonfinite
-    target_column_name: NestedNonfinite
-    expected_data_type: struct<payload:array<string>>
-    parser:
-      type: struct
-      fields:
-        - source_field_name: payload
-          target_field_name: payload
-          parser: {type: array, element_parser: string, on_parse_error: null}
-      audit: true
-"""
-    )
-    df = spark.range(1).select(
-        F.lit("[1] trailing").alias("array_trailing"),
-        F.lit('{"a":1}{"a":2}').alias("struct_trailing"),
-        F.lit('{"a":1} trailing').alias("map_trailing"),
-        F.lit("[]} ignored []").alias("array_early_close"),
-        F.lit('{"a":1}, "junk":1').alias("struct_member_injection"),
-        F.lit('{"a":1}, "junk":1').alias("map_member_injection"),
-        F.lit(json.dumps(["]", "{", 'quote " and slash \\'])).alias("escaped_array"),
-        F.lit("[NaN]").alias("nonfinite_array"),
-        F.lit('{"a":Infinity}').alias("nonfinite_map"),
-        F.lit('{"payload":"[NaN]"}').alias("nested_nonfinite"),
-    )
-
-    parsing = SparkDataFrameParser().parse_dataframe(
-        df,
-        config,
-        key_columns=["array_trailing"],
-    )
-    row = parsing.parsed_df.first()
-    assert row.asDict(recursive=True) == {
-        "ArrayTrailing": None,
-        "StructTrailing": None,
-        "MapTrailing": None,
-        "ArrayEarlyClose": None,
-        "StructMemberInjection": None,
-        "MapMemberInjection": None,
-        "EscapedArray": ["]", "{", 'quote " and slash \\'],
-        "NonfiniteArray": None,
-        "NonfiniteMap": None,
-        "NestedNonfinite": {"payload": None},
-    }
-    audits = {
-        item.target_column_name: item
-        for item in parsing.results_df.first().spark_parser_parse_results
-    }
-    assert audits["ArrayTrailing"].nested_error_paths == ["$"]
-    assert audits["ArrayTrailing"].actions_applied == ["parse_error_to_null"]
-    for target in (
-        "ArrayEarlyClose",
-        "StructMemberInjection",
-        "MapMemberInjection",
-    ):
-        assert audits[target].nested_error_paths == ["$"]
-        assert audits[target].actions_applied == ["parse_error_to_null"]
-    assert audits["NestedNonfinite"].nested_error_paths == ["$.payload"]
-    assert audits["NestedNonfinite"].actions_applied == ["nested_parse_errors_resolved"]
-
-
-def test_complex_json_handles_large_strings_and_escape_runs_without_jvm_stack_growth(
-    spark: SparkSession,
-) -> None:
-    """Keep ordinary large bronze text inside JSON on a constant-stack regex path."""
-    config = YamlParserConfigCompiler().compile_text(
-        """
-parser_config_id: large_json_strings
-parser_config_name: Large JSON Strings
-version: "1"
-columns:
-  - source_column_name: array_value
-    target_column_name: ArrayValue
-    expected_data_type: array<string>
-    parser: {type: array, element_parser: string, on_parse_error: null}
-  - source_column_name: struct_value
-    target_column_name: StructValue
-    expected_data_type: struct<note:string>
-    parser:
-      type: struct
-      fields:
-        - {source_field_name: note, target_field_name: note, parser: string}
-      on_parse_error: null
-  - source_column_name: map_value
-    target_column_name: MapValue
-    expected_data_type: map<string,string>
-    parser: {type: map, value_parser: string, on_parse_error: null}
-  - source_column_name: nested_value
-    target_column_name: NestedValue
-    expected_data_type: array<struct<note:string>>
-    parser:
-      type: array
-      element_parser:
-        type: struct
-        fields:
-          - {source_field_name: note, target_field_name: note, parser: string}
-      on_parse_error: null
-  - source_column_name: escaped_value
-    target_column_name: EscapedValue
-    expected_data_type: array<string>
-    parser: {type: array, element_parser: string, on_parse_error: null}
-  - source_column_name: malformed_value
-    target_column_name: MalformedValue
-    expected_data_type: array<string>
-    parser: {type: array, element_parser: string, on_parse_error: null}
-"""
-    )
-    long_text = "a" * 100_000
-    escape_text = '"' * 50_000
-    df = spark.range(1).select(
-        F.lit(json.dumps([long_text])).alias("array_value"),
-        F.lit(json.dumps({"note": long_text})).alias("struct_value"),
-        F.lit(json.dumps({"note": long_text})).alias("map_value"),
-        F.lit(json.dumps([{"note": long_text}])).alias("nested_value"),
-        F.lit(json.dumps([escape_text])).alias("escaped_value"),
-        F.lit('["' + long_text).alias("malformed_value"),
-    )
-
-    row = SparkDataFrameParser().parse_dataframe(
-        df,
-        config,
-        key_columns=["array_value"],
-    ).parsed_df.first()
-    assert row.ArrayValue == [long_text]
-    assert row.StructValue.note == long_text
-    assert row.MapValue == {"note": long_text}
-    assert row.NestedValue[0].note == long_text
-    assert row.EscapedValue == [escape_text]
-    assert row.MalformedValue is None
-
-
-def test_nested_delimited_arrays_honor_their_input_format(spark: SparkSession) -> None:
-    config = YamlParserConfigCompiler().compile_text(
-        """
-parser_config_id: nested_delimited
-parser_config_name: Nested Delimited
-version: "1"
-columns:
-  - source_column_name: payload
-    target_column_name: Payload
-    expected_data_type: struct<tags:array<string>>
-    parser:
-      type: struct
-      fields:
-        - source_field_name: raw_tags
-          target_field_name: tags
-          parser:
-            type: array
-            input_format: delimited
-            delimiter: "|"
-            element_parser: {type: string, format: upper}
-      audit: true
-"""
-    )
-    df = spark.range(1).select(F.lit('{"raw_tags":"a|b|c"}').alias("payload"))
-
-    parsing = SparkDataFrameParser().parse_dataframe(df, config, key_columns=["payload"])
-    assert parsing.parsed_df.first().Payload.tags == ["A", "B", "C"]
-    audit = parsing.results_df.first().spark_parser_parse_results[0]
-    assert audit.nested_error_paths == []
-
-
-def test_only_lowercase_json_null_is_the_json_literal(spark: SparkSession) -> None:
-    config = YamlParserConfigCompiler().compile_text(
-        """
-parser_config_id: json_null_case
-parser_config_name: JSON Null Case
-version: "1"
-columns:
-  - source_column_name: payload
-    target_column_name: Payload
-    expected_data_type: array<string>
-    parser:
-      type: array
-      element_parser: string
-      is_nullable: false
-      default_on_null: [NULL_DEFAULT]
-      on_parse_error: default
-      default_on_error: [ERROR_DEFAULT]
-      audit: true
-"""
-    )
-    df = (
-        spark.range(1)
-        .select(
-            F.lit(1).alias("id"),
-            F.lit("null").alias("payload"),
-        )
-        .union(
-            spark.range(1).select(
-                F.lit(2).alias("id"),
-                F.lit("NULL").alias("payload"),
-            )
-        )
-    )
-
-    parsing = SparkDataFrameParser().parse_dataframe(df, config, key_columns=["id"])
-    assert [row.Payload for row in parsing.parsed_df.collect()] == [
-        ["NULL_DEFAULT"],
-        ["ERROR_DEFAULT"],
-    ]
-    audits = {row.id: row.spark_parser_parse_results[0] for row in parsing.results_df.collect()}
-    assert audits[1].actions_applied == ["json_null_to_null", "default_on_null_applied"]
-    assert audits[2].actions_applied == ["parse_error_default_applied"]
-
-
-def test_complex_defaults_apply_recursive_child_final_value_contracts(
-    spark: SparkSession,
-) -> None:
-    """Apply child null defaults and zero invalidation inside parent complex defaults."""
-    config = YamlParserConfigCompiler().compile_text(
-        """
-parser_config_id: recursive_complex_defaults
-parser_config_name: Recursive Complex Defaults
-version: "1"
-columns:
-  - source_column_name: array_value
-    target_column_name: ArrayValue
-    expected_data_type: array<integer>
-    parser:
-      type: array
-      element_parser:
-        type: integer
-        zero_is_valid: false
-        is_nullable: false
-        default_on_null: -1
-      is_nullable: false
-      default_on_null: [null, 0, 2]
-  - source_column_name: struct_value
-    target_column_name: StructValue
-    expected_data_type: struct<a:integer,values:array<integer>>
-    parser:
-      type: struct
-      fields:
-        - source_field_name: a
-          target_field_name: a
-          parser: {type: integer, is_nullable: false, default_on_null: 5}
-        - source_field_name: values
-          target_field_name: values
-          parser:
-            type: array
-            element_parser:
-              type: integer
-              zero_is_valid: false
-              is_nullable: false
-              default_on_null: 6
-      is_nullable: false
-      default_on_null: {a: null, values: [0, null]}
-  - source_column_name: map_value
-    target_column_name: MapValue
-    expected_data_type: map<string,integer>
-    parser:
-      type: map
-      value_parser:
-        type: integer
-        zero_is_valid: false
-        is_nullable: false
-        default_on_null: -1
-      is_nullable: false
-      default_on_null: {z: 0, a: null, m: 2}
-      audit: true
-"""
-    )
-    df = spark.range(1).select(
-        F.col("id").alias("row_id"),
-        F.lit(None).cast("string").alias("array_value"),
-        F.lit(None).cast("string").alias("struct_value"),
-        F.lit(None).cast("string").alias("map_value"),
-    )
-
-    parsing = SparkDataFrameParser().parse_dataframe(df, config, key_columns=["row_id"])
-    row = parsing.parsed_df.first()
-    assert row.ArrayValue == [-1, -1, 2]
-    assert row.StructValue.asDict(recursive=True) == {"a": 5, "values": [6, 6]}
-    assert row.MapValue == {"a": -1, "m": 2, "z": -1}
-    audit = parsing.results_df.first().spark_parser_parse_results[0]
-    assert audit.parsed_value == '{"a":-1,"m":2,"z":-1}'
-
-
-def test_nested_paths_and_map_results_are_unambiguous_and_deterministic(
-    spark: SparkSession,
-) -> None:
-    """Sort map keys and escape every unsafe dynamic or configured path segment."""
-    config = YamlParserConfigCompiler().compile_mapping(
-        {
-            "parser_config_id": "deterministic_paths",
-            "parser_config_name": "Deterministic Paths",
-            "version": "1",
-            "columns": [
-                {
-                    "source_column_name": "map_value",
-                    "target_column_name": "MapValue",
-                    "expected_data_type": "map<string,integer>",
-                    "parser": {
-                        "type": "map",
-                        "value_parser": "integer",
-                        "on_value_error": "null",
-                        "audit": True,
-                    },
-                },
-                {
-                    "source_column_name": "struct_value",
-                    "target_column_name": "StructValue",
-                    "expected_data_type": "struct<`a.b`:integer>",
-                    "parser": {
-                        "type": "struct",
-                        "fields": [
-                            {
-                                "source_field_name": "raw",
-                                "target_field_name": "a.b",
-                                "parser": {"type": "integer", "on_parse_error": "null"},
-                            }
-                        ],
-                        "audit": True,
-                    },
-                },
-            ],
-        }
-    )
-    map_value = {
-        "z": "bad",
-        "a.b": "bad",
-        "O'Brien": "bad",
-        "back\\slash": "bad",
-        "line\nbreak": "bad",
-        "雪": "bad",
-        "m": "1",
-    }
-    df = spark.range(1).select(
-        F.lit(json.dumps(map_value, ensure_ascii=False)).alias("map_value"),
-        F.lit('{"raw":"bad"}').alias("struct_value"),
-    )
-
-    parsing = SparkDataFrameParser().parse_dataframe(
-        df,
-        config,
-        key_columns=["map_value"],
-    )
-    audits = {
-        item.target_column_name: item
-        for item in parsing.results_df.first().spark_parser_parse_results
-    }
-    assert audits["MapValue"].nested_error_paths == [
-        "$['O\\'Brien']",
-        "$['a.b']",
-        "$['back\\\\slash']",
-        "$['line\\nbreak']",
-        "$['z']",
-        "$['雪']",
-    ]
-    assert audits["StructValue"].nested_error_paths == ["$['a.b']"]

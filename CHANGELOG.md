@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.5.0
+
+- Narrow the package contract to top-level bronze strings and scalar Spark targets. Configured
+  `array`, `struct`, and `map` parsing is intentionally removed; decode or flatten complex input
+  upstream, parse its scalar leaves, and reconstruct complex output downstream when needed.
+- Remove recursive datatype models, parser options, child-error policies, container defaults,
+  serialization branches, metadata accessors, audit-path fields, and runtime expression carriers.
+- Replace the recursive Spark DDL parser with a small scalar grammar that retains every scalar
+  alias plus bounded `decimal(p,s)` validation.
+- Simplify the runtime and audit contract without changing scalar normalization, display formats,
+  typed defaults, error policies, schema checks, or deterministic configuration identity.
+- Update the reference YAML, Databricks guide, system tests, and package documentation around the
+  explicit scalar processing boundary.
+
 ## 0.4.0
 
 - Remove cosmetic family/value separator hyphens from canonical interest-rate labels while

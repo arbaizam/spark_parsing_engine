@@ -3,16 +3,13 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from types import MappingProxyType
 from typing import Any
 
 import pytest
-import yaml
 
 from spark_parser import (
     PARSER_DEFAULTS,
     BooleanValuesMode,
-    ChildErrorMode,
     CompilationError,
     NullMarkersMode,
     ParseErrorMode,
@@ -62,109 +59,38 @@ def _compile_default(
     )
 
 
-def test_recursive_spark_datatype_grammar_is_canonical() -> None:
-    parsed = parse_spark_data_type(
-        " STRUCT<`Display Name`: STRING, values: ARRAY<DECIMAL(18, 2)>, attrs: MAP<STRING, INT>> "
-    )
-
-    assert parsed.canonical == (
-        "struct<`Display Name`:string,values:array<decimal(18,2)>,attrs:map<string,integer>>"
-    )
-    assert parsed.fields[1].data_type.element_type is not None
-
-
-def test_complex_parsers_compile_recursively_and_round_trip() -> None:
-    compiler = YamlParserConfigCompiler()
-    config = compiler.compile_text(
-        """
-parser_config_id: complex
-parser_config_name: Complex
-version: "1"
-columns:
-  - source_column_name: names
-    target_column_name: Names
-    expected_data_type: array<string>
-    parser:
-      type: array
-      element_parser: {type: string, format: upper}
-      on_element_error: drop
-      distinct: true
-  - source_column_name: object
-    target_column_name: Object
-    expected_data_type: struct<name:string,scores:array<integer>>
-    parser:
-      type: struct
-      fields:
-        - {source_field_name: raw_name, target_field_name: name, parser: string}
-        - source_field_name: raw_scores
-          target_field_name: scores
-          parser: {type: array, element_parser: integer, on_element_error: null}
-  - source_column_name: attributes
-    target_column_name: Attributes
-    expected_data_type: map<string,decimal(8,2)>
-    parser: {type: map, value_parser: decimal, on_value_error: drop}
-"""
-    )
-
-    assert [column.parser.parser_type for column in config.columns] == [
-        ParserType.ARRAY,
-        ParserType.STRUCT,
-        ParserType.MAP,
-    ]
-    struct_options = config.columns[1].parser
-    assert struct_options.field_parsers[1].parser.element_parser is not None
-    serializer = ParserConfigSerializer()
-    payload = serializer.to_mapping(config)
-    assert serializer.canonical_json(
-        compiler.compile_mapping(payload)
-    ) == serializer.canonical_json(config)
-
-
 @pytest.mark.parametrize(
-    ("expected_data_type", "parser_yaml", "message"),
+    "expected_data_type",
     [
-        ("map<integer,string>", "{type: map, value_parser: string}", "map<string"),
-        (
-            "array<array<string>>",
-            "{type: array, input_format: delimited, delimiter: ',', element_parser: array}",
-            "scalar element",
-        ),
-        (
-            "array<string>",
-            "{type: array, input_format: delimited, element_parser: string}",
-            "delimiter",
-        ),
-        (
-            "struct<a:string,b:string>",
-            "{type: struct, fields: [{source_field_name: a, target_field_name: a, parser: string}]}",
-            "missing field",
-        ),
-        (
-            "array<map<string,string>>",
-            "{type: array, element_parser: {type: map, value_parser: string}, distinct: true}",
-            "non-comparable",
-        ),
-        ("variant", "string", "Unsupported datatype"),
+        "array<string>",
+        "map<string,integer>",
+        "struct<name:string>",
     ],
 )
-def test_invalid_complex_contracts_fail_compilation(
-    expected_data_type: str,
-    parser_yaml: str,
-    message: str,
-) -> None:
-    with pytest.raises(CompilationError, match=message):
+def test_complex_expected_data_types_are_not_supported(expected_data_type: str) -> None:
+    with pytest.raises(CompilationError, match="Unsupported datatype"):
         YamlParserConfigCompiler().compile_text(
             f"""
-parser_config_id: invalid
-parser_config_name: Invalid
+parser_config_id: scalar_only
+parser_config_name: Scalar Only
 version: "1"
 columns:
   - source_column_name: value
     target_column_name: Value
     expected_data_type: {expected_data_type}
-    parser: {parser_yaml}
+    parser: string
 """
         )
+
+
+def test_unknown_datatypes_fail_compilation() -> None:
+    with pytest.raises(CompilationError, match="Unsupported datatype"):
+        _compile_default("variant", "value")
+
+
+def test_expected_data_type_rejects_malformed_unicode() -> None:
+    with pytest.raises(CompilationError, match="well-formed Unicode"):
+        parse_spark_data_type("\ud800")
 
 
 @pytest.mark.parametrize(
@@ -403,8 +329,8 @@ columns:
     assert config.columns[0].parser.string_format is expected_format
 
 
-def test_preserve_error_modes_compile_only_for_string_positions() -> None:
-    """Allow exact raw fallback wherever—and only where—the typed result position is string."""
+def test_preserve_error_mode_compiles_for_strings() -> None:
+    """Allow an exact raw fallback when the scalar result position is a string."""
     config = YamlParserConfigCompiler().compile_text(
         """
 parser_config_id: preserve_strings
@@ -415,42 +341,12 @@ columns:
     target_column_name: State
     expected_data_type: string
     parser: {type: string, format: state_us, on_parse_error: preserve}
-  - source_column_name: profile
-    target_column_name: Profile
-    expected_data_type: struct<state:string>
-    parser:
-      type: struct
-      fields:
-        - source_field_name: state
-          target_field_name: state
-          parser: {type: string, format: state_us, on_parse_error: preserve}
-  - source_column_name: states
-    target_column_name: States
-    expected_data_type: array<string>
-    parser:
-      type: array
-      element_parser: {type: string, format: state_us}
-      on_element_error: preserve
-  - source_column_name: state_map
-    target_column_name: StateMap
-    expected_data_type: map<string,string>
-    parser:
-      type: map
-      value_parser: {type: string, format: state_us}
-      on_value_error: preserve
 """
     )
 
     assert config.columns[0].parser.on_parse_error is ParseErrorMode.PRESERVE
-    assert (
-        config.columns[1].parser.field_parsers[0].parser.on_parse_error is ParseErrorMode.PRESERVE
-    )
-    assert config.columns[2].parser.on_element_error is ChildErrorMode.PRESERVE
-    assert config.columns[3].parser.on_value_error is ChildErrorMode.PRESERVE
     canonical = ParserConfigSerializer().to_mapping(config)
     assert canonical["columns"][0]["parser"]["on_parse_error"] == "preserve"
-    assert canonical["columns"][2]["parser"]["on_element_error"] == "preserve"
-    assert canonical["columns"][3]["parser"]["on_value_error"] == "preserve"
 
 
 @pytest.mark.parametrize(
@@ -478,18 +374,6 @@ columns:
             "expected_data_type: integer\n    parser:\n"
             "      type: integer\n      on_parse_error: preserve",
             "requires a string parser",
-        ),
-        (
-            "expected_data_type: array<integer>\n    parser:\n"
-            "      type: array\n      element_parser: integer\n"
-            "      on_element_error: preserve",
-            "requires a string child parser",
-        ),
-        (
-            "expected_data_type: map<string,decimal(8,2)>\n    parser:\n"
-            "      type: map\n      value_parser: decimal\n"
-            "      on_value_error: preserve",
-            "requires a string child parser",
         ),
     ],
 )
@@ -770,15 +654,6 @@ columns:
     target_column_name: "  Value  "
     expected_data_type: " string "
     parser: string
-  - source_column_name: "  raw_object  "
-    target_column_name: "  Object  "
-    expected_data_type: "struct<`  Field  `:string>"
-    parser:
-      type: struct
-      fields:
-        - source_field_name: "  raw_field  "
-          target_field_name: "  Field  "
-          parser: string
 """
     )
 
@@ -787,15 +662,9 @@ columns:
     assert config.version == "1"
     assert config.columns[0].source_column_name == "  raw_value  "
     assert config.columns[0].target_column_name == "  Value  "
-    field = config.columns[1].parser.field_parsers[0]
-    assert field.source_field_name == "  raw_field  "
-    assert field.target_field_name == "  Field  "
 
     resolved = serializer.to_mapping(config)
     assert resolved["columns"][0]["source_column_name"] == "  raw_value  "
-    assert resolved["columns"][1]["parser"]["fields"][0]["source_field_name"] == (
-        "  raw_field  "
-    )
     recompiled = compiler.compile_mapping(resolved)
     assert serializer.content_hash(recompiled) == serializer.content_hash(config)
     changed_names = serializer.to_mapping(config)
@@ -804,54 +673,6 @@ columns:
     assert serializer.content_hash(compiler.compile_mapping(changed_names)) != (
         serializer.content_hash(config)
     )
-
-
-def test_complex_parsers_resolve_collapse_whitespace_to_false() -> None:
-    config = YamlParserConfigCompiler().compile_text(
-        """
-parser_config_id: complex_normalization
-parser_config_name: Complex Normalization
-version: "1"
-columns:
-  - source_column_name: names
-    target_column_name: Names
-    expected_data_type: array<string>
-    parser:
-      type: array
-      collapse_whitespace: true
-      element_parser: string
-  - source_column_name: object
-    target_column_name: Object
-    expected_data_type: struct<name:string>
-    parser:
-      type: struct
-      fields:
-        - {source_field_name: name, target_field_name: name, parser: string}
-  - source_column_name: attributes
-    target_column_name: Attributes
-    expected_data_type: map<string,string>
-    parser: {type: map, value_parser: string}
-  - source_column_name: label
-    target_column_name: Label
-    expected_data_type: string
-    parser: string
-"""
-    )
-
-    array_options, struct_options, map_options, string_options = (
-        column.parser for column in config.columns
-    )
-    assert array_options.collapse_whitespace is False
-    assert struct_options.collapse_whitespace is False
-    assert map_options.collapse_whitespace is False
-    assert array_options.element_parser is not None
-    assert array_options.element_parser.parser.collapse_whitespace is True
-    assert struct_options.field_parsers[0].parser.collapse_whitespace is True
-    assert string_options.collapse_whitespace is True
-
-    payload = ParserConfigSerializer().to_mapping(config)
-    assert payload["columns"][0]["parser"]["collapse_whitespace"] is False
-    assert payload["columns"][3]["parser"]["collapse_whitespace"] is True
 
 
 @pytest.mark.parametrize(
@@ -905,48 +726,6 @@ columns:
     assert config.columns[0].parser.parser_type is ParserType.DECIMAL
 
 
-def test_ddl_nesting_has_a_deterministic_limit() -> None:
-    deepest_supported = "array<" * 64 + "string" + ">" * 64
-    assert parse_spark_data_type(deepest_supported).canonical == deepest_supported
-
-    too_deep = "array<" * 65 + "string" + ">" * 65
-    with pytest.raises(CompilationError, match="maximum depth of 64"):
-        parse_spark_data_type(too_deep)
-
-
-def test_yaml_authoring_supports_the_full_logical_datatype_depth() -> None:
-    expected_data_type = "string"
-    nested_parser: Any = "string"
-    for _ in range(64):
-        expected_data_type = f"struct<value:{expected_data_type}>"
-        nested_parser = {
-            "type": "struct",
-            "fields": [
-                {
-                    "source_field_name": "value",
-                    "target_field_name": "value",
-                    "parser": nested_parser,
-                }
-            ],
-        }
-    payload = {
-        "parser_config_id": "deep_yaml",
-        "parser_config_name": "Deep YAML",
-        "version": "1",
-        "columns": [
-            {
-                "source_column_name": "value",
-                "target_column_name": "Value",
-                "expected_data_type": expected_data_type,
-                "parser": nested_parser,
-            }
-        ],
-    }
-
-    config = YamlParserConfigCompiler().compile_text(yaml.safe_dump(payload, sort_keys=False))
-    assert config.columns[0].expected_data_type == expected_data_type
-
-
 def test_decimal_parameters_use_bounded_ascii_integer_tokens() -> None:
     assert parse_spark_data_type("decimal(00038,00002)").canonical == "decimal(38,2)"
 
@@ -956,14 +735,6 @@ def test_decimal_parameters_use_bounded_ascii_integer_tokens() -> None:
 
     with pytest.raises(CompilationError, match="Decimal precision"):
         parse_spark_data_type(f"decimal({'9' * 5_000},2)")
-
-
-def test_ddl_unicode_fields_round_trip_and_unpaired_surrogates_fail() -> None:
-    parsed = parse_spark_data_type("struct<`emoji😀`:string>")
-    assert parse_spark_data_type(parsed.canonical) == parsed
-
-    with pytest.raises(CompilationError, match="well-formed Unicode"):
-        parse_spark_data_type("struct<`\ud800`:string>")
 
 
 def test_yaml_key_errors_include_source_location_and_depth_is_bounded() -> None:
@@ -1008,22 +779,6 @@ columns:
     with pytest.raises(CompilationError, match="well-formed Unicode"):
         _compile_default("string", "\ud800")
 
-    with pytest.raises(CompilationError, match="well-formed Unicode"):
-        _compile_default(
-            "map<string,string>",
-            {"\ud800": "value"},
-            value_parser="string",
-        )
-
-    with pytest.raises(CompilationError, match="well-formed Unicode"):
-        _compile_default(
-            "array<string>",
-            ["value"],
-            input_format="delimited",
-            delimiter="\ud800",
-            element_parser="string",
-        )
-
 
 def test_compile_path_reports_malformed_utf8(tmp_path: Path) -> None:
     config_path = tmp_path / "invalid.yaml"
@@ -1031,202 +786,6 @@ def test_compile_path_reports_malformed_utf8(tmp_path: Path) -> None:
 
     with pytest.raises(CompilationError, match="well-formed UTF-8"):
         YamlParserConfigCompiler().compile_path(config_path)
-
-
-def test_complex_defaults_are_deeply_frozen_and_round_trip() -> None:
-    config = _compile_default(
-        "array<map<string,string>>",
-        [{"key": "value"}],
-        element_parser={"type": "map", "value_parser": "string"},
-    )
-    compiled_default = config.columns[0].parser.default_on_null
-
-    assert isinstance(compiled_default, tuple)
-    assert isinstance(compiled_default[0], MappingProxyType)
-    with pytest.raises(AttributeError):
-        compiled_default.append({})
-    with pytest.raises(TypeError):
-        compiled_default[0]["key"] = "mutated"
-
-    serializer = ParserConfigSerializer()
-    serialized = serializer.to_mapping(config)
-    round_tripped = YamlParserConfigCompiler().compile_mapping(serialized)
-    assert serializer.content_hash(round_tripped) == serializer.content_hash(config)
-    serialized["columns"][0]["parser"]["default_on_null"][0]["key"] = "changed"
-    assert compiled_default[0]["key"] == "value"
-
-
-def test_expanded_default_size_limit_has_an_exact_round_trip_boundary() -> None:
-    # The array container plus 9,999 scalar elements consumes the complete 10,000-node budget.
-    exact_boundary = list(range(9_999))
-    config = _compile_default(
-        "array<integer>",
-        exact_boundary,
-        element_parser="integer",
-    )
-    serializer = ParserConfigSerializer()
-    round_tripped = YamlParserConfigCompiler().compile_mapping(serializer.to_mapping(config))
-
-    assert len(config.columns[0].parser.default_on_null) == 9_999
-    assert serializer.content_hash(round_tripped) == serializer.content_hash(config)
-
-    with pytest.raises(CompilationError, match=r"default_on_null\[9999\].*10,000 nodes"):
-        _compile_default(
-            "array<integer>",
-            list(range(10_000)),
-            element_parser="integer",
-        )
-    with pytest.raises(CompilationError, match=r"default_on_null\[9999\].*10,000 nodes"):
-        _compile_default(
-            "array<integer>",
-            [None] * 10_000,
-            element_parser="integer",
-        )
-
-
-def test_expanded_default_budget_counts_map_keys_and_values() -> None:
-    oversized = {f"key{index}": index for index in range(5_000)}
-
-    with pytest.raises(CompilationError, match=r'default_on_null\["key4999"\].*10,000 nodes'):
-        _compile_default(
-            "map<string,integer>",
-            oversized,
-            value_parser="integer",
-        )
-
-
-def test_shared_default_aliases_cannot_evade_the_expanded_size_limit() -> None:
-    value: Any = 0
-    data_type = "integer"
-    parser: Any = "integer"
-    for _ in range(6):
-        # Only six unique list objects, but five aliases per level expand beyond 10,000 literals.
-        value = [value] * 5
-        data_type = f"array<{data_type}>"
-        parser = {"type": "array", "element_parser": parser}
-
-    with pytest.raises(
-        CompilationError,
-        match=r"default_on_null\[.*maximum expanded default size of 10,000 nodes",
-    ):
-        _compile_default(
-            data_type,
-            value,
-            element_parser=parser["element_parser"],
-        )
-
-
-def test_complex_default_cycles_report_the_reference_path() -> None:
-    direct_cycle: list[Any] = []
-    direct_cycle.append(direct_cycle)
-    with pytest.raises(CompilationError, match=r"default_on_null\[0\].*cyclic"):
-        _compile_default(
-            "array<array<integer>>",
-            direct_cycle,
-            element_parser={"type": "array", "element_parser": "integer"},
-        )
-
-    indirect_cycle: list[Any] = []
-    middle = [indirect_cycle]
-    indirect_cycle.append(middle)
-    with pytest.raises(CompilationError, match=r"default_on_null\[0\]\[0\].*cyclic"):
-        _compile_default(
-            "array<array<array<integer>>>",
-            indirect_cycle,
-            element_parser={
-                "type": "array",
-                "element_parser": {"type": "array", "element_parser": "integer"},
-            },
-        )
-
-    with pytest.raises(CompilationError, match=r"default_on_null\[0\].*cyclic"):
-        YamlParserConfigCompiler().compile_text(
-            """
-parser_config_id: cyclic_alias
-parser_config_name: Cyclic Alias
-version: "1"
-columns:
-  - source_column_name: value
-    target_column_name: Value
-    expected_data_type: array<array<integer>>
-    parser:
-      type: array
-      element_parser: {type: array, element_parser: integer}
-      is_nullable: false
-      default_on_null: &cycle [*cycle]
-"""
-        )
-
-
-@pytest.mark.parametrize(
-    ("data_type", "value", "element_parser", "expected_path"),
-    [
-        ("array<integer>", [1, "bad", 3], "integer", "default_on_null[1]"),
-        (
-            "array<array<integer>>",
-            [[1], [2, "bad"]],
-            {"type": "array", "element_parser": "integer"},
-            "default_on_null[1][1]",
-        ),
-    ],
-)
-def test_array_default_errors_include_the_full_element_path(
-    data_type: str,
-    value: Any,
-    element_parser: Any,
-    expected_path: str,
-) -> None:
-    with pytest.raises(CompilationError) as exc_info:
-        _compile_default(data_type, value, element_parser=element_parser)
-
-    assert f"{expected_path} for integer must be an integer" in str(exc_info.value)
-
-
-@pytest.mark.parametrize(
-    ("field_name", "expected_path"),
-    [
-        ("a.b", 'default_on_null["a.b"]'),
-        ("line\nbreak", 'default_on_null["line\\nbreak"]'),
-    ],
-)
-def test_struct_default_errors_quote_unsafe_field_paths(
-    field_name: str,
-    expected_path: str,
-) -> None:
-    expected_data_type = f"struct<`{field_name}`:integer>"
-    with pytest.raises(CompilationError) as exc_info:
-        _compile_default(
-            expected_data_type,
-            {field_name: "bad"},
-            fields=[
-                {
-                    "source_field_name": field_name,
-                    "target_field_name": field_name,
-                    "parser": "integer",
-                }
-            ],
-        )
-
-    message = str(exc_info.value)
-    assert f"{expected_path} for integer must be an integer" in message
-    assert "\n" not in message
-
-
-def test_binary_default_errors_quote_unsafe_struct_field_paths() -> None:
-    with pytest.raises(CompilationError) as exc_info:
-        _compile_default(
-            "struct<`a.b`:binary>",
-            {"a.b": "GG"},
-            fields=[
-                {
-                    "source_field_name": "a.b",
-                    "target_field_name": "a.b",
-                    "parser": {"type": "binary", "encoding": "hex"},
-                }
-            ],
-        )
-
-    assert 'default_on_null["a.b"] is not valid hex binary text' in str(exc_info.value)
 
 
 def test_decimal_defaults_are_canonical_at_the_declared_scale() -> None:
@@ -1443,10 +1002,7 @@ def test_float_conversion_range_failures_are_compilation_errors() -> None:
             _compile_default(parser_type, Decimal("1E-10000"))
 
 
-def test_duplicate_scans_report_each_name_once_in_sorted_order() -> None:
-    with pytest.raises(CompilationError, match=r"duplicate fields: \['a', 'b'\]"):
-        parse_spark_data_type("struct<b:string,a:string,b:string,a:string,b:string>")
-
+def test_duplicate_target_scan_reports_each_name_once_in_sorted_order() -> None:
     payload = {
         "parser_config_id": "duplicates",
         "parser_config_name": "Duplicates",
@@ -1466,34 +1022,3 @@ def test_duplicate_scans_report_each_name_once_in_sorted_order() -> None:
         match=r"Duplicate target_column_name values: \['a', 'b'\]",
     ):
         YamlParserConfigCompiler().compile_mapping(payload)
-
-    with pytest.raises(CompilationError, match=r"duplicate source fields \['raw'\]"):
-        YamlParserConfigCompiler().compile_mapping(
-            {
-                "parser_config_id": "struct_duplicates",
-                "parser_config_name": "Struct Duplicates",
-                "version": "1",
-                "columns": [
-                    {
-                        "source_column_name": "object",
-                        "target_column_name": "Object",
-                        "expected_data_type": "struct<a:string,b:string>",
-                        "parser": {
-                            "type": "struct",
-                            "fields": [
-                                {
-                                    "source_field_name": "raw",
-                                    "target_field_name": "a",
-                                    "parser": "string",
-                                },
-                                {
-                                    "source_field_name": "raw",
-                                    "target_field_name": "b",
-                                    "parser": "string",
-                                },
-                            ],
-                        },
-                    }
-                ],
-            }
-        )

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "spark-parser"
 dynamic = ["version"]
-description = "Strict YAML parsing of bronze strings into scalar and complex Spark types."
+description = "Strict YAML parsing of bronze strings into scalar Spark types."
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{name = "Matt Arbaiza"}]

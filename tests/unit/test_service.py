@@ -107,23 +107,9 @@ def test_parser_metadata_is_discoverable_and_detached() -> None:
     assert set(parser.describe()) == {member.value for member in ParserType}
     assert parser.describe("numeric")["parser_type"] == "decimal"
     assert parser.describe("TIMESTAMP_LTZ")["parser_type"] == "timestamp"
-    assert parser.array.describe()["parser_type"] == "array"
-    assert parser.struct.describe()["parser_type"] == "struct"
-    assert parser.map.describe()["parser_type"] == "map"
-    array_child_modes = next(
-        argument["allowed_values"]
-        for argument in parser.array.describe()["arguments"]
-        if argument["name"] == "on_element_error"
-    )
-    assert "preserve" in array_child_modes
-    array_collapse = next(
-        argument
-        for argument in parser.array.describe()["arguments"]
-        if argument["name"] == "collapse_whitespace"
-    )
-    assert array_collapse["default"] is False
-    assert "whole container" in parser.map.describe()["gotchas"][0]
-    assert parser.normalize_data_type("ARRAY < INT >") == "array<integer>"
+    assert parser.normalize_data_type(" NUMERIC ( 18, 2 ) ") == "decimal(18,2)"
+    with pytest.raises(CompilationError, match="Unsupported datatype"):
+        parser.normalize_data_type("array<integer>")
 
 
 def test_unknown_parser_description_uses_the_public_error_hierarchy() -> None:
@@ -132,22 +118,17 @@ def test_unknown_parser_description_uses_the_public_error_hierarchy() -> None:
         parser.describe("bogus")
 
 
-def test_public_compile_and_serialization_facade_round_trips_complex_schema() -> None:
+def test_public_compile_and_serialization_facade_round_trips_scalar_schema() -> None:
     config = parser.compile_yaml(
         """
 parser_config_id: facade
 parser_config_name: Facade
 version: "1"
 columns:
-  - source_column_name: payload
-    target_column_name: Payload
-    expected_data_type: array<struct<amount:decimal(8,2)>>
-    parser:
-      type: array
-      element_parser:
-        type: struct
-        fields:
-          - {source_field_name: raw_amount, target_field_name: amount, parser: decimal}
+  - source_column_name: raw_amount
+    target_column_name: Amount
+    expected_data_type: decimal(8,2)
+    parser: decimal
 """
     )
     mapping = parser.to_mapping(config)
@@ -158,9 +139,7 @@ columns:
     report = parser.review_yaml(mapping)
     assert report.is_valid is True
     assert report.column_reviews[0]["schema_tree"].splitlines() == [
-        '"Payload": array<struct<amount:decimal(8,2)>> [array] <- "payload"',
-        "  []: struct<amount:decimal(8,2)> [struct; on error=fail]",
-        '    ."amount": decimal(8,2) [decimal] <- "raw_amount"',
+        '"Amount": decimal(8,2) [decimal] <- "raw_amount"',
     ]
 
 
@@ -350,7 +329,7 @@ columns:
 def test_compiler_keys_and_datetime_guards_match_published_contracts() -> None:
     compiler = YamlParserConfigCompiler()
     for parser_type in ParserType:
-        allowed = compiler._parser_allowed_keys(parser_type, allow_audit=True)
+        allowed = compiler._parser_allowed_keys(parser_type)
         documented = {
             argument["name"] for argument in parser.describe(parser_type.value)["arguments"]
         }

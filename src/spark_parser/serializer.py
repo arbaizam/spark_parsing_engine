@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
@@ -22,8 +21,8 @@ class ParserConfigSerializer:
     """Produce explicit, JSON-compatible canonical parser metadata.
 
     Returned structures are newly allocated and safe for a caller to modify. Enum members,
-    decimals, dates, timestamps, tuples, and nested parser nodes are converted into deterministic public
-    representations before JSON encoding.
+    decimals, dates, timestamps, and tuples are converted into deterministic public representations
+    before JSON encoding.
     """
 
     def to_mapping(self, config: ParserConfig) -> dict[str, Any]:
@@ -37,11 +36,7 @@ class ParserConfigSerializer:
                 "source_column_name": column.source_column_name,
                 "target_column_name": column.target_column_name,
                 "expected_data_type": column.expected_data_type,
-                "parser": self.parser_mapping(
-                    column.parser,
-                    include_audit=True,
-                    include_error_mode=True,
-                ),
+                "parser": self.parser_mapping(column.parser),
             }
             for column in config.columns
         ]
@@ -62,19 +57,8 @@ class ParserConfigSerializer:
             "columns": columns,
         }
 
-    def parser_mapping(
-        self,
-        options: ParserOptions,
-        *,
-        include_audit: bool,
-        include_error_mode: bool,
-    ) -> dict[str, Any]:
-        """Serialize one parser node, recursively including applicable child parsers.
-
-        Nested array/map children delegate immediate failures to the parent container policy, so
-        callers can omit child ``on_parse_error`` fields. Struct fields own their error policy and
-        therefore include it. ``include_audit`` follows the same top-level-only ownership rule.
-        """
+    def parser_mapping(self, options: ParserOptions) -> dict[str, Any]:
+        """Serialize one scalar parser's fully resolved behavior."""
         payload: dict[str, Any] = {
             "type": options.parser_type.value,
             "trim_whitespace": options.trim_whitespace,
@@ -85,14 +69,12 @@ class ParserConfigSerializer:
             "null_markers_mode": options.null_markers_mode.value,
             "null_marker_case_sensitive": options.null_marker_case_sensitive,
             "is_nullable": options.is_nullable,
+            "on_parse_error": options.on_parse_error.value,
+            "audit": options.audit,
         }
-        if include_error_mode:
-            payload["on_parse_error"] = options.on_parse_error.value
-        if include_audit:
-            payload["audit"] = options.audit
         if options.default_on_null is not None:
             payload["default_on_null"] = self._json_value(options.default_on_null)
-        if include_error_mode and options.default_on_error is not None:
+        if options.default_on_error is not None:
             payload["default_on_error"] = self._json_value(options.default_on_error)
         if options.parser_type in NUMERIC_PARSER_TYPES:
             payload["zero_is_valid"] = options.zero_is_valid
@@ -115,53 +97,6 @@ class ParserConfigSerializer:
                 boolean_case_sensitive=options.boolean_case_sensitive,
                 boolean_values_mode=options.boolean_values_mode.value,
             )
-        if options.parser_type is ParserType.ARRAY:
-            assert options.element_parser is not None
-            # Audit and direct parse-error policy belong to the array container. The element node
-            # still carries normalization, nullability, formatting, and typed-default behavior.
-            payload.update(
-                input_format=options.input_format.value,
-                element_parser=self.parser_mapping(
-                    options.element_parser.parser,
-                    include_audit=False,
-                    include_error_mode=False,
-                ),
-                on_element_error=options.on_element_error.value,
-                drop_null_elements=options.drop_null_elements,
-                distinct=options.distinct,
-            )
-            if options.delimiter is not None:
-                payload["delimiter"] = options.delimiter
-        if options.parser_type is ParserType.STRUCT:
-            # Preserve compiled schema order rather than authoring-list order. The compiler has
-            # already aligned every configured field to its expected Spark struct field.
-            payload.update(
-                input_format=options.input_format.value,
-                fields=[
-                    {
-                        "source_field_name": field.source_field_name,
-                        "target_field_name": field.target_field_name,
-                        "parser": self.parser_mapping(
-                            field.parser,
-                            include_audit=False,
-                            include_error_mode=True,
-                        ),
-                    }
-                    for field in options.field_parsers
-                ],
-            )
-        if options.parser_type is ParserType.MAP:
-            assert options.value_parser is not None
-            payload.update(
-                input_format=options.input_format.value,
-                value_parser=self.parser_mapping(
-                    options.value_parser.parser,
-                    include_audit=False,
-                    include_error_mode=False,
-                ),
-                on_value_error=options.on_value_error.value,
-                drop_null_values=options.drop_null_values,
-            )
         return payload
 
     def canonical_json(self, config: ParserConfig) -> str:
@@ -179,17 +114,11 @@ class ParserConfigSerializer:
 
     @staticmethod
     def _json_value(value: Any) -> Any:
-        """Recursively convert typed defaults into lossless JSON-compatible values."""
+        """Convert a typed scalar default into a lossless JSON-compatible value."""
         # Decimal is rendered as text so binary floating-point conversion cannot change an exact
         # default before it contributes to a content hash.
         if isinstance(value, Decimal):
             return str(value)
         if isinstance(value, (date, datetime)):
             return value.isoformat()
-        if isinstance(value, Mapping):
-            # Mapping order is retained here for readable reports; canonical_json sorts keys when
-            # byte-for-byte stability matters.
-            return {key: ParserConfigSerializer._json_value(item) for key, item in value.items()}
-        if isinstance(value, (list, tuple)):
-            return [ParserConfigSerializer._json_value(item) for item in value]
         return value

@@ -4,9 +4,9 @@
 # MAGIC # Spark Parser System Tests
 # MAGIC
 # MAGIC These tests cover behavior that requires a real Databricks Spark session: native scalar
-# MAGIC and complex parsing, lazy fail-mode materialization, ANSI-mode parity, generated output
-# MAGIC schemas, row-level audit data, and input-schema validation. Compiler-only permutations
-# MAGIC remain in the pytest suite.
+# MAGIC parsing and display profiles, lazy fail-mode materialization, ANSI-mode parity, generated
+# MAGIC output schemas, row-level audit data, and input-schema validation. Compiler-only
+# MAGIC permutations remain in the pytest suite.
 # MAGIC
 # MAGIC Run this notebook from a Databricks Git checkout of the repository. It reads source directly
 # MAGIC from the checkout, requires no built wheel or release artifact, and writes no tables.
@@ -94,7 +94,9 @@ def _expect_raises(exception_type, operation, *, contains=None):
         return exc
     expected_names = ", ".join(
         candidate.__name__
-        for candidate in (exception_type if isinstance(exception_type, tuple) else (exception_type,))
+        for candidate in (
+            exception_type if isinstance(exception_type, tuple) else (exception_type,)
+        )
     )
     raise AssertionError(f"Expected one of [{expected_names}] to be raised.")
 
@@ -149,7 +151,7 @@ SYSTEM_CONFIG_YAML = """
 parser_config_id: databricks_system_tests
 parser_config_name: Databricks System Tests
 version: "1"
-description: Representative real-Spark system coverage for scalar and recursive parsing.
+description: Representative real-Spark system coverage for scalar parsing.
 owner: Data Engineering
 owner_department: Enterprise Data
 
@@ -181,6 +183,23 @@ columns:
     parser:
       type: string
       format: title
+      audit: true
+
+  - source_column_name: business_label
+    target_column_name: BusinessLabel
+    expected_data_type: string
+    parser:
+      type: string
+      format: title_business_v1
+      audit: true
+
+  - source_column_name: rate_index
+    target_column_name: RateIndex
+    expected_data_type: string
+    parser:
+      type: string
+      format: interest_rate_index_v1
+      on_parse_error: preserve
       audit: true
 
   - source_column_name: state
@@ -230,72 +249,19 @@ columns:
       type: timestamp_ntz
       audit: true
 
-  - source_column_name: aliases
-    target_column_name: Aliases
-    expected_data_type: array<string>
-    parser:
-      type: array
-      element_parser:
-        type: string
-        format: upper
-      on_element_error: drop
-      drop_null_elements: true
-      distinct: true
-      on_parse_error: default
-      default_on_error: [UNKNOWN]
-      audit: true
-
-  - source_column_name: profile
-    target_column_name: Profile
-    expected_data_type: struct<postal_code:string,scores:array<integer>>
-    parser:
-      type: struct
-      fields:
-        - source_field_name: zip_code
-          target_field_name: postal_code
-          parser:
-            type: string
-            format: zip
-            on_parse_error: null
-        - source_field_name: raw_scores
-          target_field_name: scores
-          parser:
-            type: array
-            element_parser:
-              type: integer
-              zero_is_valid: false
-              is_nullable: false
-              default_on_null: -1
-            on_element_error: null
-      on_parse_error: default
-      default_on_error:
-        postal_code: "00000"
-        scores: []
-      audit: true
-
-  - source_column_name: attributes
-    target_column_name: Attributes
-    expected_data_type: map<string,decimal(10,2)>
-    parser:
-      type: map
-      value_parser: decimal
-      on_value_error: drop
-      on_parse_error: null
-      audit: true
 """
 
 BRONZE_SCHEMA = """
 record_id string,
 customer_name string,
 loan_status string,
+business_label string,
+rate_index string,
 state string,
 amount string,
 quantity string,
 event_date string,
-event_timestamp string,
-aliases string,
-profile string,
-attributes string
+event_timestamp string
 """
 
 BRONZE_ROWS = [
@@ -303,27 +269,25 @@ BRONZE_ROWS = [
         "good-1",
         "  Alice   Smith  ",
         "  ACTIVE   loan ",
+        "fhlb 12-month advance",
+        "SOFR Term - 12M",
         "Illinois",
         "12.345",
         "7",
         "09/30/2026 12:00:00 AM",
         "09/30/2026 12:00:00 AM",
-        '[" ally ","ALLY",null]',
-        '{"zip_code":"1234","raw_scores":[1,"bad",0]}',
-        '{"principal":"10.125","bad":"x","empty":null}',
     ),
     (
         "handled-errors-1",
         "n/a",
         "charged OFF",
+        "ust rcf cmt",
+        "NAP",
         "Mul",
         "not-a-decimal",
         "not-an-integer",
         "2026-08-28",
         "2026-08-28 13:45:00",
-        "not-json",
-        "not-json",
-        "not-json",
     ),
 ]
 
@@ -384,6 +348,8 @@ with _spark_conf_scope(STRICT_SQL_SETTINGS):
         in {
             "CustomerName",
             "LoanStatus",
+            "BusinessLabel",
+            "RateIndex",
             "StateCode",
             "Amount",
             "Quantity",
@@ -397,6 +363,8 @@ with _spark_conf_scope(STRICT_SQL_SETTINGS):
             "RecordId",
             "CustomerName",
             "LoanStatus",
+            "BusinessLabel",
+            "RateIndex",
             "StateCode",
             "Amount",
             "Quantity",
@@ -410,6 +378,8 @@ with _spark_conf_scope(STRICT_SQL_SETTINGS):
 assert scalar_schema == {
     "CustomerName": "string",
     "LoanStatus": "string",
+    "BusinessLabel": "string",
+    "RateIndex": "string",
     "StateCode": "string",
     "Amount": "decimal(10,2)",
     "Quantity": "int",
@@ -420,6 +390,8 @@ assert scalar_schema == {
 good = scalar_rows["good-1"]
 assert good["CustomerName"] == "ALICE SMITH"
 assert good["LoanStatus"] == "Active Loan"
+assert good["BusinessLabel"] == "FHLB 12-Month Advance"
+assert good["RateIndex"] == "SOFR Term 12-Month"
 assert good["StateCode"] == "IL"
 assert good["Amount"] == Decimal("12.35")
 assert good["Quantity"] == 7
@@ -431,46 +403,36 @@ _pass("ST-002", "Native scalar expressions retain their expected Databricks valu
 
 # COMMAND ----------
 
-_start("ST-003", "Parse recursive arrays, structs, and maps with exact nested audit paths")
+_start("ST-003", "Apply bounded business-title and interest-rate display profiles")
 
 with _spark_conf_scope(STRICT_SQL_SETTINGS):
-    complex_parsing = parser.parse_dataframe(
+    profile_parsing = parser.parse_dataframe(
         bronze_df,
         config,
         key_columns=["record_id"],
         column_prefix="system_parser",
     )
-    complex_rows = _rows_by_key(
-        complex_parsing.parsed_df.select("RecordId", "Aliases", "Profile", "Attributes"),
+    profile_rows = _rows_by_key(
+        profile_parsing.parsed_df.select("RecordId", "BusinessLabel", "RateIndex"),
         "RecordId",
     )
-    complex_audit_rows = _audit_by_key(
-        complex_parsing.results_df,
+    profile_audit_rows = _audit_by_key(
+        profile_parsing.results_df,
         "record_id",
         "system_parser_parse_results",
     )
 
-good_complex = complex_rows["good-1"]
-assert good_complex["Aliases"] == ["ALLY"]
-assert good_complex["Profile"]["postal_code"] == "01234"
-assert good_complex["Profile"]["scores"] == [1, -1, -1]
-assert good_complex["Attributes"] == {"principal": Decimal("10.13"), "empty": None}
-
-good_audit = complex_audit_rows["good-1"]
-assert good_audit["Profile"].nested_error_paths == ["$.scores[1]"]
-assert good_audit["Profile"].nested_default_on_null_paths == [
-    "$.scores[1]",
-    "$.scores[2]",
+assert profile_rows["good-1"]["BusinessLabel"] == "FHLB 12-Month Advance"
+assert profile_rows["good-1"]["RateIndex"] == "SOFR Term 12-Month"
+assert profile_rows["handled-errors-1"]["BusinessLabel"] == "UST RCF CMT"
+assert profile_rows["handled-errors-1"]["RateIndex"] == "NAP"
+assert profile_audit_rows["handled-errors-1"]["RateIndex"].actions_applied == [
+    "parse_error_preserved"
 ]
-assert good_audit["Profile"].nested_zero_invalidated_paths == ["$.scores[2]"]
-assert good_audit["Attributes"].nested_error_paths == ["$['bad']"]
-assert "nested_parse_errors_resolved" in good_audit["Profile"].actions_applied
-assert "nested_default_on_null_applied" in good_audit["Profile"].actions_applied
-assert "nested_zero_invalidated" in good_audit["Profile"].actions_applied
 
 _pass(
     "ST-003",
-    "Recursive native expressions retain nested values and JSONPath-like audit evidence.",
+    "Business exceptions, tenor casing, approved indexes, and preserved unknowns are stable.",
 )
 
 # COMMAND ----------
@@ -495,23 +457,20 @@ with _spark_conf_scope(STRICT_SQL_SETTINGS):
 
 assert handled["CustomerName"] is None
 assert handled["LoanStatus"] == "Charged Off"
+assert handled["BusinessLabel"] == "UST RCF CMT"
+assert handled["RateIndex"] == "NAP"
 assert handled["StateCode"] == "Mul"
 assert handled["Amount"] is None
 assert handled["Quantity"] == 0
-assert handled["Aliases"] == ["UNKNOWN"]
-assert handled["Profile"] == {"postal_code": "00000", "scores": []}
-assert handled["Attributes"] is None
 
 handled_audit = {
     result.target_column_name: result for result in handled_result.system_parser_parse_results
 }
 assert handled_audit["CustomerName"].actions_applied == ["null_marker_replaced"]
+assert handled_audit["RateIndex"].actions_applied == ["parse_error_preserved"]
 assert handled_audit["StateCode"].actions_applied == ["parse_error_preserved"]
 assert handled_audit["Amount"].actions_applied == ["parse_error_to_null"]
 assert handled_audit["Quantity"].actions_applied == ["parse_error_default_applied"]
-assert handled_audit["Aliases"].actions_applied == ["parse_error_default_applied"]
-assert handled_audit["Profile"].actions_applied == ["parse_error_default_applied"]
-assert handled_audit["Attributes"].actions_applied == ["parse_error_to_null"]
 
 fail_config = parser.compile_text(
     """
@@ -541,7 +500,7 @@ with _spark_conf_scope(STRICT_SQL_SETTINGS):
     )
 print(f"Expected fail-mode materialization error: {type(fail_exception).__name__}")
 
-_pass("ST-004", "Null, default, preserve, nested handling, and lazy fail behavior are enforced.")
+_pass("ST-004", "Null, default, preserve, and lazy fail behavior are enforced.")
 
 # COMMAND ----------
 
@@ -596,15 +555,14 @@ assert contract_parsing.parsed_df.columns == [
     "RecordId",
     "CustomerName",
     "LoanStatus",
+    "BusinessLabel",
+    "RateIndex",
     "StateCode",
     "Amount",
     "Quantity",
     "EventDate",
     "EventTimestamp",
     "EventTimestampNtz",
-    "Aliases",
-    "Profile",
-    "Attributes",
 ]
 assert contract_parsing.key_columns == ("record_id",)
 assert contract_parsing.result_columns == (
@@ -639,9 +597,6 @@ assert audit_fields == [
     "actions_applied",
     "options",
     "error",
-    "nested_error_paths",
-    "nested_default_on_null_paths",
-    "nested_zero_invalidated_paths",
 ]
 
 _pass("ST-006", "Ordered DataFrame and row-level audit metadata match the public contract.")

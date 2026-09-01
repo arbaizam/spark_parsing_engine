@@ -1,4 +1,7 @@
-# Spark Parser complete YAML argument reference.
+# Spark Parser complete scalar YAML argument reference.
+#
+# Complex sources are decoded or flattened upstream into top-level strings. This configuration
+# parses those scalar leaves; downstream code may reconstruct arrays, structs, or maps afterward.
 #
 # Indicators:
 #   [required]               must be supplied
@@ -255,7 +258,6 @@ columns:                                   # [required] Non-empty ordered list.
         - "yyyy-MM-dd HH:mm:ss[.SSSSSS]"
         - "MM/dd/yyyy h:mm a"
         - "MM/dd/yyyy h:mm:ss a"
-
   # Timestamp parser. Formats cascade in list order; the first successful parse wins.
   - source_column_name: timestamp_value
     target_column_name: TimestampValue
@@ -306,85 +308,4 @@ columns:                                   # [required] Non-empty ordered list.
         - "yyyy-MM-dd HH:mm:ss[.SSSSSS]"
         - "MM/dd/yyyy h:mm a"
         - "MM/dd/yyyy h:mm:ss a"
-
-  # Array parser. JSON supports recursive element types; delimited supports scalar elements.
-  - source_column_name: array_value
-    target_column_name: ArrayValue
-    expected_data_type: array<string>
-    parser:
-      type: array
-      collapse_whitespace: false           # [resolved: false for outer complex containers]
-      trim_whitespace: true
-      empty_is_null: true
-      replace_null_markers: false
-      # null_markers: [NA]
-      # null_markers_mode: extend
-      null_marker_case_sensitive: true
-      is_nullable: true
-      # default_on_null: []
-      on_parse_error: fail
-      # default_on_error: []
-      audit: false
-      input_format: json                    # [optional; default: json; json|delimited]
-      # delimiter: ","                     # [conditionally required for delimited input]
-      element_parser:                       # [required] Recursive parser matching array<T>.
-        type: string
-        format: null
-      on_element_error: fail                # [optional; fail|null|drop|preserve for string child]
-      drop_null_elements: false             # [optional; default: false]
-      distinct: false                       # [optional; default: false]
-
-  # Struct parser. Every target field must have one source-to-target mapping.
-  - source_column_name: struct_value
-    target_column_name: StructValue
-    expected_data_type: struct<name:string,zip:string>
-    parser:
-      type: struct
-      collapse_whitespace: false           # [resolved: false for outer complex containers]
-      trim_whitespace: true
-      empty_is_null: true
-      replace_null_markers: false
-      # null_markers: [NA]
-      # null_markers_mode: extend
-      null_marker_case_sensitive: true
-      is_nullable: true
-      # default_on_null: {name: UNKNOWN, zip: "00000"}
-      on_parse_error: fail
-      # default_on_error: {name: UNKNOWN, zip: "00000"}
-      audit: false
-      input_format: json                    # [optional; default: json; JSON only]
-      fields:                               # [required] Complete recursive field list.
-        - source_field_name: name
-          target_field_name: name
-          parser:
-            type: string
-            format: null
-        - source_field_name: postal_code
-          target_field_name: zip
-          parser:
-            type: string
-            format: zip
-            on_parse_error: null
-
-  # Map parser. JSON input currently requires string keys.
-  - source_column_name: map_value
-    target_column_name: MapValue
-    expected_data_type: map<string,decimal(18,2)>
-    parser:
-      type: map
-      collapse_whitespace: false           # [resolved: false for outer complex containers]
-      trim_whitespace: true
-      empty_is_null: true
-      replace_null_markers: false
-      # null_markers: [NA]
-      # null_markers_mode: extend
-      null_marker_case_sensitive: true
-      is_nullable: true
-      # default_on_null: {}
-      on_parse_error: fail
-      # default_on_error: {}
-      audit: false
-      input_format: json                    # [optional; default: json; JSON only]
-      value_parser: decimal                 # [required] Recursive parser matching map value type.
-      on_value_error: fail                  # [optional; fail|null|drop|preserve for string child]
-      drop_null_values: false               # [optional; default: false]
+  # End of scalar parser reference.

@@ -28,8 +28,6 @@ from spark_parser.metadata import config_description, parser_description
 from spark_parser.models import (
     ColumnParser,
     ParserConfig,
-    ParserOptions,
-    iter_parser_options,
     needs_spark_boolean_overlap_check,
 )
 from spark_parser.serializer import ParserConfigSerializer
@@ -94,37 +92,11 @@ def _fenced_code(content: str, language: str) -> str:
 
 
 def _schema_tree(column: ColumnParser) -> str:
-    """Render one column's recursive source-to-target parser tree as plain text."""
-    lines = [
+    """Render one column's source-to-target parser binding as plain text."""
+    return (
         f"{_schema_name(column.target_column_name)}: {column.expected_data_type} "
         f"[{column.parser.parser_type.value}] <- {_schema_name(column.source_column_name)}"
-    ]
-
-    def append(options: ParserOptions, prefix: str) -> None:
-        """Append child nodes using indentation while preserving compiled schema order."""
-        if options.element_parser is not None:
-            element = options.element_parser
-            lines.append(
-                f"{prefix}[]: {element.expected_data_type} "
-                f"[{element.parser.parser_type.value}; on error={options.on_element_error.value}]"
-            )
-            append(element.parser, prefix + "  ")
-        for field in options.field_parsers:
-            lines.append(
-                f"{prefix}.{_schema_name(field.target_field_name)}: {field.expected_data_type} "
-                f"[{field.parser.parser_type.value}] <- {_schema_name(field.source_field_name)}"
-            )
-            append(field.parser, prefix + "  ")
-        if options.value_parser is not None:
-            value = options.value_parser
-            lines.append(
-                f"{prefix}{{value}}: {value.expected_data_type} "
-                f"[{value.parser.parser_type.value}; on error={options.on_value_error.value}]"
-            )
-            append(value.parser, prefix + "  ")
-
-    append(column.parser, "  ")
-    return "\n".join(lines)
+    )
 
 
 @dataclass
@@ -367,9 +339,6 @@ class SparkParserService:
     date = _ParserMetadataAccessor(ParserType.DATE)
     timestamp = _ParserMetadataAccessor(ParserType.TIMESTAMP)
     timestamp_ntz = _ParserMetadataAccessor(ParserType.TIMESTAMP_NTZ)
-    array = _ParserMetadataAccessor(ParserType.ARRAY)
-    struct = _ParserMetadataAccessor(ParserType.STRUCT)
-    map = _ParserMetadataAccessor(ParserType.MAP)
 
     def __init__(self) -> None:
         """Create the stateless compiler and serializer collaborators used by this facade."""
@@ -381,8 +350,10 @@ class SparkParserService:
         if parser_type is None:
             return {member.value: parser_description(member) for member in ParserType}
         try:
-            normalized = parser_type if isinstance(parser_type, ParserType) else ParserType(
-                canonical_type_name(parser_type)
+            normalized = (
+                parser_type
+                if isinstance(parser_type, ParserType)
+                else ParserType(canonical_type_name(parser_type))
             )
         except (AttributeError, ValueError) as exc:
             allowed = ", ".join(member.value for member in ParserType)
@@ -525,11 +496,7 @@ class SparkParserService:
                 }
             )
 
-        # Flatten the recursive parser forest once so validation evidence includes nested parser
-        # nodes rather than reporting only top-level columns.
-        all_options = [
-            options for column in config.columns for options in iter_parser_options(column.parser)
-        ]
+        all_options = [column.parser for column in config.columns]
         if config.globals.null_markers and not any(
             options.replace_null_markers for options in all_options
         ):

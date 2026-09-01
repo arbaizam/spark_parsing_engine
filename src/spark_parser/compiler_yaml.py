@@ -1,15 +1,14 @@
-"""Compile strict YAML authoring metadata into an executable parser contract.
+"""Compile scalar YAML authoring metadata into an executable parser contract.
 
 This module is the package's trust boundary. It rejects ambiguity early, resolves every inherited
-or omitted option, validates typed defaults recursively, and returns immutable models that runtime
-code can use without defensive revalidation. Compilation never requires a Spark session.
+or omitted option, validates typed defaults, and returns immutable models that runtime code can use
+without defensive revalidation. Compilation never requires a Spark session.
 """
 
 from __future__ import annotations
 
 import base64
 import binascii
-import json
 import math
 import re
 import struct
@@ -18,26 +17,20 @@ from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from pathlib import Path
-from types import MappingProxyType
 from typing import Any, TypeVar
 
 import yaml
 
 from spark_parser.data_types import SparkDataType, canonical_type_name, parse_spark_data_type
 from spark_parser.defaults import (
-    DEFAULT_ARRAY_DISTINCT,
     DEFAULT_AUDIT,
     DEFAULT_BINARY_ENCODING,
     DEFAULT_BOOLEAN_CASE_SENSITIVE,
     DEFAULT_BOOLEAN_FALSE_VALUES,
     DEFAULT_BOOLEAN_TRUE_VALUES,
     DEFAULT_BOOLEAN_VALUES_MODE,
-    DEFAULT_CHILD_ERROR_MODE,
     DEFAULT_COLLAPSE_WHITESPACE,
-    DEFAULT_COMPLEX_INPUT_FORMAT,
     DEFAULT_DATE_FORMATS,
-    DEFAULT_DROP_NULL_ELEMENTS,
-    DEFAULT_DROP_NULL_VALUES,
     DEFAULT_EMPTY_IS_NULL,
     DEFAULT_IS_NULLABLE,
     DEFAULT_NULL_MARKER_CASE_SENSITIVE,
@@ -51,26 +44,16 @@ from spark_parser.defaults import (
     DEFAULT_ZERO_IS_VALID,
 )
 from spark_parser.enums import (
-    COMPLEX_PARSER_TYPES,
     NUMERIC_PARSER_TYPES,
     BinaryEncoding,
     BooleanValuesMode,
-    ChildErrorMode,
-    ComplexInputFormat,
     NullMarkersMode,
     ParseErrorMode,
     ParserType,
     StringFormat,
 )
 from spark_parser.exceptions import CompilationError
-from spark_parser.models import (
-    ColumnParser,
-    NestedValueParser,
-    ParserConfig,
-    ParserGlobals,
-    ParserOptions,
-    StructFieldParser,
-)
+from spark_parser.models import ColumnParser, ParserConfig, ParserGlobals, ParserOptions
 
 # ``None`` is a legitimate YAML value, so a private sentinel is required to distinguish an omitted
 # key from an explicitly authored null.
@@ -95,16 +78,11 @@ _TIMESTAMP_DEFAULT_PATTERN = re.compile(
     r"(?:\.[0-9]{1,6})?"
     r"(?:Z|[+-](?:(?:0[0-9]|1[0-7]):[0-5][0-9]|18:00))?"
 )
-_DECIMAL_DEFAULT_PATTERN = re.compile(
-    r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?"
-)
+_DECIMAL_DEFAULT_PATTERN = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
 _ASCII_HEX_PATTERN = re.compile(r"[0-9A-Fa-f]*")
-_DEFAULT_PATH_IDENTIFIER_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-
 # Composer recursion happens before constructor validation. Bound it separately so deeply nested
 # untrusted YAML cannot depend on the host interpreter's recursion limit or leak RecursionError.
 _MAX_YAML_COMPOSE_DEPTH = 256
-_MAX_EXPANDED_DEFAULT_NODES = 10_000
 _EnumT = TypeVar("_EnumT", bound=Enum)
 
 
@@ -118,18 +96,6 @@ def _validate_utf8_string(value: str, label: str) -> str:
             f"invalid code point at character {exc.start + 1}."
         ) from exc
     return value
-
-
-def _struct_default_path(label: str, field_name: str) -> str:
-    """Append an unambiguous, single-line struct field to a default diagnostic path."""
-    if _DEFAULT_PATH_IDENTIFIER_PATTERN.fullmatch(field_name):
-        return f"{label}.{field_name}"
-    return _map_default_path(label, field_name)
-
-
-def _map_default_path(label: str, key: str) -> str:
-    """Append one JSON-quoted map key to a default diagnostic path."""
-    return f"{label}[{json.dumps(key, ensure_ascii=False)}]"
 
 
 def _has_unquoted_timezone_pattern(pattern: str) -> bool:
@@ -147,43 +113,6 @@ def _has_unquoted_timezone_pattern(pattern: str) -> bool:
             return True
         index += 1
     return False
-
-
-class _DefaultTraversal:
-    """Bound one authored default's expanded size and reject active-container cycles."""
-
-    def __init__(self) -> None:
-        self.expanded_nodes = 0
-        self.active_container_ids: set[int] = set()
-
-    def consume(self, path: str) -> None:
-        """Account for one emitted container, element, scalar, null, or map key."""
-        self.expanded_nodes += 1
-        if self.expanded_nodes > _MAX_EXPANDED_DEFAULT_NODES:
-            raise CompilationError(
-                f"{path} exceeds the maximum expanded default size of "
-                f"{_MAX_EXPANDED_DEFAULT_NODES:,} nodes."
-            )
-
-    def enter_container(self, value: Any, path: str) -> int:
-        """Mark a list or mapping active and reject direct or indirect reference cycles."""
-        container_id = id(value)
-        if container_id in self.active_container_ids:
-            raise CompilationError(
-                f"{path} contains a cyclic default container; complex defaults must be acyclic."
-            )
-        self.active_container_ids.add(container_id)
-        return container_id
-
-    def leave_container(self, container_id: int) -> None:
-        """Remove a fully visited container from the active recursion path."""
-        self.active_container_ids.remove(container_id)
-
-
-def _typed_default_null(label: str, *, allow_null: bool) -> None:
-    """Return an allowed nested null or reject a null authored as the root default."""
-    if not allow_null:
-        raise CompilationError(f"{label} must be non-null.")
 
 
 class _UniqueKeyLoader(yaml.SafeLoader):
@@ -410,7 +339,7 @@ class YamlParserConfigCompiler:
         globals_config: ParserGlobals,
         index: int,
     ) -> ColumnParser:
-        """Compile one top-level source-to-target mapping and its recursive parser tree."""
+        """Compile one top-level source-to-target scalar mapping."""
         payload = self._ensure_mapping(raw_column, f"column at index {index}")
         self._reject_keys(
             payload,
@@ -424,8 +353,8 @@ class YamlParserConfigCompiler:
         )
         source_column_name = self._required_identifier(payload, "source_column_name")
         target_column_name = self._required_identifier(payload, "target_column_name")
-        # Parse DDL once and carry both the recursive model and its canonical text. Re-parsing in
-        # nested validation or runtime code would create opportunities for inconsistent behavior.
+        # Parse the scalar DDL once and carry both its model and canonical text. Complex DDL is
+        # rejected by ``parse_spark_data_type`` before parser options are considered.
         data_type = parse_spark_data_type(self._required_string(payload, "expected_data_type"))
         expected_data_type = data_type.canonical
         options = self._compile_parser(
@@ -433,7 +362,6 @@ class YamlParserConfigCompiler:
             globals_config,
             data_type,
             target_column_name,
-            allow_audit=True,
         )
         return ColumnParser(
             source_column_name=source_column_name,
@@ -449,16 +377,8 @@ class YamlParserConfigCompiler:
         globals_config: ParserGlobals,
         data_type: SparkDataType,
         target_column_name: str,
-        *,
-        allow_audit: bool,
-        child_error_owned_by_parent: bool = False,
     ) -> ParserOptions:
-        """Resolve one scalar or complex parser node against its expected datatype.
-
-        ``allow_audit`` is true only for top-level columns. ``child_error_owned_by_parent`` marks
-        array elements and map values, whose immediate failure outcome belongs to their container's
-        child-error policy. Struct fields instead own normal parse-error settings.
-        """
+        """Resolve one scalar parser against its expected datatype."""
         if raw_parser is _MISSING:
             raise CompilationError(f"parser is required for column {target_column_name!r}.")
         # Scalar shorthand such as ``parser: date`` is normalized into the same mapping path as
@@ -476,14 +396,11 @@ class YamlParserConfigCompiler:
                 f"{expected_data_type!r} for target column {target_column_name!r}; "
                 f"expected {data_type.parser_type.value!r}."
             )
-        self._validate_nested_parser_contract(
+        self._reject_keys(
             payload,
-            target_column_name,
-            allow_audit=allow_audit,
-            child_error_owned_by_parent=child_error_owned_by_parent,
+            self._parser_allowed_keys(parser_type),
+            f"Parser for {target_column_name!r}",
         )
-        allowed_keys = self._parser_allowed_keys(parser_type, allow_audit=allow_audit)
-        self._reject_keys(payload, allowed_keys, f"Parser for {target_column_name!r}")
 
         # Resolve marker inheritance before validating ``replace_null_markers``. A column can use
         # global markers, replace them, or append its own markers while preserving first-seen order.
@@ -551,7 +468,7 @@ class YamlParserConfigCompiler:
             "on_parse_error",
         )
         # Preserving an invalid token is type-safe only when the target itself is a string. A raw
-        # value such as ``Mul`` cannot inhabit an integer, date, binary, or complex Spark column.
+        # value such as ``Mul`` cannot inhabit an integer, date, or binary Spark column.
         # Enforcing this during compilation keeps runtime expressions schema-consistent and gives the
         # author a useful error before any Spark job starts.
         if on_parse_error is ParseErrorMode.PRESERVE and parser_type is not ParserType.STRING:
@@ -599,17 +516,6 @@ class YamlParserConfigCompiler:
                 f"Column {target_column_name!r} rejects zero but uses zero as default_on_error."
             )
 
-        collapse_whitespace = self._bool(
-            payload,
-            "collapse_whitespace",
-            DEFAULT_COLLAPSE_WHITESPACE,
-        )
-        if parser_type in COMPLEX_PARSER_TYPES:
-            # Collapsing internal whitespace in raw JSON would mutate quoted string values before
-            # decoding. Outer containers therefore always disable collapse; recursive leaf parsers
-            # still use their independently resolved normalization settings.
-            collapse_whitespace = False
-
         string_format = self._compile_string_format(payload, parser_type)
         formats = self._compile_formats(payload, parser_type)
         (
@@ -623,12 +529,6 @@ class YamlParserConfigCompiler:
             target_column_name,
             globals_config,
         )
-        complex_options = self._compile_complex_options(
-            payload,
-            data_type,
-            globals_config,
-            target_column_name,
-        )
         # Construct one fully resolved immutable node only after every conditional relationship has
         # passed. Runtime code may safely branch on parser_type without looking back at raw YAML.
         compiled_options = ParserOptions(
@@ -638,7 +538,11 @@ class YamlParserConfigCompiler:
                 "trim_whitespace",
                 DEFAULT_TRIM_WHITESPACE,
             ),
-            collapse_whitespace=collapse_whitespace,
+            collapse_whitespace=self._bool(
+                payload,
+                "collapse_whitespace",
+                DEFAULT_COLLAPSE_WHITESPACE,
+            ),
             empty_is_null=self._bool(payload, "empty_is_null", DEFAULT_EMPTY_IS_NULL),
             replace_null_markers=replace_null_markers,
             null_markers=markers,
@@ -652,7 +556,7 @@ class YamlParserConfigCompiler:
             default_on_null=default_on_null,
             on_parse_error=on_parse_error,
             default_on_error=default_on_error,
-            audit=self._bool(payload, "audit", DEFAULT_AUDIT) if allow_audit else False,
+            audit=self._bool(payload, "audit", DEFAULT_AUDIT),
             zero_is_valid=zero_is_valid,
             string_format=string_format,
             formats=formats,
@@ -665,45 +569,23 @@ class YamlParserConfigCompiler:
                 payload.get("encoding", DEFAULT_BINARY_ENCODING.value),
                 "encoding",
             ),
-            **complex_options,
         )
-        self._validate_binary_defaults(compiled_options, data_type)
+        self._validate_binary_defaults(compiled_options)
         return compiled_options
 
     def _validate_binary_defaults(
         self,
         options: ParserOptions,
-        data_type: SparkDataType,
     ) -> None:
-        """Validate encoded binary defaults anywhere in the recursive default value tree."""
-        if options.default_on_null is not None:
-            self._validate_binary_value(
-                options.default_on_null,
-                data_type,
-                options,
-                "default_on_null",
-            )
-        if options.default_on_error is not None:
-            self._validate_binary_value(
-                options.default_on_error,
-                data_type,
-                options,
-                "default_on_error",
-            )
-
-    def _validate_binary_value(
-        self,
-        value: Any,
-        data_type: SparkDataType,
-        options: ParserOptions,
-        label: str,
-    ) -> None:
-        """Walk a typed default and verify each binary leaf uses its configured encoding."""
-        if value is None:
-            # Child nulls are allowed inside complex defaults; container/nullability rules are
-            # validated separately.
+        """Verify each authored binary default uses the parser's configured encoding."""
+        if options.parser_type is not ParserType.BINARY:
             return
-        if data_type.parser_type is ParserType.BINARY:
+        for label, value in (
+            ("default_on_null", options.default_on_null),
+            ("default_on_error", options.default_on_error),
+        ):
+            if value is None:
+                continue
             try:
                 if options.binary_encoding is BinaryEncoding.BASE64:
                     base64.b64decode(value, validate=True)
@@ -719,61 +601,10 @@ class YamlParserConfigCompiler:
                 raise CompilationError(
                     f"{label} is not valid {options.binary_encoding.value} binary text."
                 ) from exc
-            return
-        if data_type.parser_type is ParserType.ARRAY:
-            assert data_type.element_type is not None and options.element_parser is not None
-            for index, item in enumerate(value):
-                self._validate_binary_value(
-                    item,
-                    data_type.element_type,
-                    options.element_parser.parser,
-                    f"{label}[{index}]",
-                )
-            return
-        if data_type.parser_type is ParserType.STRUCT:
-            for field in options.field_parsers:
-                self._validate_binary_value(
-                    value[field.target_field_name],
-                    field.data_type,
-                    field.parser,
-                    _struct_default_path(label, field.target_field_name),
-                )
-            return
-        if data_type.parser_type is ParserType.MAP:
-            assert data_type.value_type is not None and options.value_parser is not None
-            for key, item in value.items():
-                self._validate_binary_value(
-                    item,
-                    data_type.value_type,
-                    options.value_parser.parser,
-                    f"{label}[{key!r}]",
-                )
 
     @staticmethod
-    def _validate_nested_parser_contract(
-        payload: Mapping[str, Any],
-        label: str,
-        *,
-        allow_audit: bool,
-        child_error_owned_by_parent: bool,
-    ) -> None:
-        """Enforce ownership rules that keep nested audit and error behavior unambiguous."""
-        if not allow_audit and "audit" in payload:
-            raise CompilationError(
-                f"Nested parser {label!r} cannot enable audit; audit belongs to its "
-                "configured top-level column."
-            )
-        if child_error_owned_by_parent and (
-            "on_parse_error" in payload or "default_on_error" in payload
-        ):
-            raise CompilationError(
-                f"Nested parser {label!r} is controlled by its parent child-error policy "
-                "and cannot set on_parse_error or default_on_error."
-            )
-
-    @staticmethod
-    def _parser_allowed_keys(parser_type: ParserType, *, allow_audit: bool) -> set[str]:
-        """Return the exact common and parser-specific keys accepted for one node."""
+    def _parser_allowed_keys(parser_type: ParserType) -> set[str]:
+        """Return the exact common and parser-specific keys accepted for one scalar parser."""
         common = {
             "type",
             "trim_whitespace",
@@ -787,9 +618,8 @@ class YamlParserConfigCompiler:
             "default_on_null",
             "on_parse_error",
             "default_on_error",
+            "audit",
         }
-        if allow_audit:
-            common.add("audit")
         specific = {
             ParserType.STRING: {"format"},
             ParserType.BYTE: {"zero_is_valid"},
@@ -809,21 +639,6 @@ class YamlParserConfigCompiler:
             ParserType.DATE: {"formats"},
             ParserType.TIMESTAMP: {"formats"},
             ParserType.TIMESTAMP_NTZ: {"formats"},
-            ParserType.ARRAY: {
-                "input_format",
-                "delimiter",
-                "element_parser",
-                "on_element_error",
-                "drop_null_elements",
-                "distinct",
-            },
-            ParserType.STRUCT: {"input_format", "fields"},
-            ParserType.MAP: {
-                "input_format",
-                "value_parser",
-                "on_value_error",
-                "drop_null_values",
-            },
         }
         return common | specific[parser_type]
 
@@ -871,230 +686,6 @@ class YamlParserConfigCompiler:
                     f"pattern fields: {timezone_formats}."
                 )
         return formats
-
-    def _compile_complex_options(
-        self,
-        payload: Mapping[str, Any],
-        data_type: SparkDataType,
-        globals_config: ParserGlobals,
-        label: str,
-    ) -> dict[str, Any]:
-        """Compile recursive array, struct, or map options into ``ParserOptions`` fields.
-
-        A complete defaults dictionary is also returned for scalar parsers. This keeps the single
-        ``ParserOptions`` constructor simple and guarantees inapplicable complex fields remain at
-        known inert values.
-        """
-        defaults: dict[str, Any] = {
-            "input_format": DEFAULT_COMPLEX_INPUT_FORMAT,
-            "delimiter": None,
-            "element_parser": None,
-            "field_parsers": (),
-            "value_parser": None,
-            "on_element_error": DEFAULT_CHILD_ERROR_MODE,
-            "on_value_error": DEFAULT_CHILD_ERROR_MODE,
-            "drop_null_elements": DEFAULT_DROP_NULL_ELEMENTS,
-            "distinct": DEFAULT_ARRAY_DISTINCT,
-            "drop_null_values": DEFAULT_DROP_NULL_VALUES,
-        }
-        parser_type = data_type.parser_type
-        if parser_type not in COMPLEX_PARSER_TYPES:
-            return defaults
-
-        input_format = self._enum_value(
-            ComplexInputFormat,
-            payload.get("input_format", DEFAULT_COMPLEX_INPUT_FORMAT.value),
-            "input_format",
-        )
-        if parser_type in {ParserType.STRUCT, ParserType.MAP} and (
-            input_format is not ComplexInputFormat.JSON
-        ):
-            raise CompilationError(
-                f"{parser_type.value} parser {label!r} supports only JSON input."
-            )
-        defaults["input_format"] = input_format
-
-        if parser_type is ParserType.ARRAY:
-            assert data_type.element_type is not None
-            raw_element_parser = payload.get("element_parser", _MISSING)
-            if raw_element_parser is _MISSING:
-                raise CompilationError(f"Array parser {label!r} requires element_parser.")
-            if input_format is ComplexInputFormat.DELIMITED:
-                # Delimited input intentionally means a literal split, not CSV. Complex children
-                # require JSON so nested structure cannot be misread around delimiter characters.
-                if data_type.element_type.is_complex:
-                    raise CompilationError(
-                        f"Delimited array parser {label!r} requires a scalar element type."
-                    )
-                delimiter = payload.get("delimiter")
-                if not isinstance(delimiter, str) or not delimiter:
-                    raise CompilationError(
-                        f"delimiter for array parser {label!r} must be a non-empty string."
-                    )
-                _validate_utf8_string(delimiter, f"delimiter for array parser {label!r}")
-                defaults["delimiter"] = delimiter
-            elif "delimiter" in payload:
-                raise CompilationError(
-                    f"delimiter for array parser {label!r} requires input_format: delimited."
-                )
-            element_options = self._compile_parser(
-                raw_element_parser,
-                globals_config,
-                data_type.element_type,
-                f"{label}[]",
-                allow_audit=False,
-                child_error_owned_by_parent=True,
-            )
-            distinct = self._bool(payload, "distinct", DEFAULT_ARRAY_DISTINCT)
-            if distinct and not data_type.element_type.supports_equality:
-                # Spark cannot compare maps (including maps nested inside arrays/structs), so
-                # array_distinct would fail only after a job starts. Reject it during authoring.
-                raise CompilationError(
-                    f"Array parser {label!r} cannot use distinct with non-comparable element "
-                    f"type {data_type.element_type.canonical!r}."
-                )
-            defaults.update(
-                element_parser=NestedValueParser(
-                    expected_data_type=data_type.element_type.canonical,
-                    data_type=data_type.element_type,
-                    parser=element_options,
-                ),
-                on_element_error=self._child_error_mode(
-                    payload,
-                    "on_element_error",
-                    data_type.element_type,
-                    label,
-                ),
-                drop_null_elements=self._bool(
-                    payload,
-                    "drop_null_elements",
-                    DEFAULT_DROP_NULL_ELEMENTS,
-                ),
-                distinct=distinct,
-            )
-            return defaults
-
-        if parser_type is ParserType.STRUCT:
-            raw_fields = payload.get("fields")
-            if not isinstance(raw_fields, list) or not raw_fields:
-                raise CompilationError(f"Struct parser {label!r} requires a non-empty fields list.")
-            expected_fields = {field.name: field.data_type for field in data_type.fields}
-            compiled_by_name: dict[str, StructFieldParser] = {}
-            source_names: list[str] = []
-            for index, raw_field in enumerate(raw_fields, start=1):
-                field_payload = self._ensure_mapping(
-                    raw_field,
-                    f"field {index} for struct parser {label!r}",
-                )
-                self._reject_keys(
-                    field_payload,
-                    {"source_field_name", "target_field_name", "parser"},
-                    f"Field {index} for struct parser {label!r}",
-                )
-                source_name = self._required_identifier(field_payload, "source_field_name")
-                target_name = self._required_identifier(field_payload, "target_field_name")
-                if target_name not in expected_fields:
-                    raise CompilationError(
-                        f"Struct parser {label!r} configures unknown target field "
-                        f"{target_name!r}; expected {sorted(expected_fields)}."
-                    )
-                if target_name in compiled_by_name:
-                    raise CompilationError(
-                        f"Struct parser {label!r} has duplicate target field {target_name!r}."
-                    )
-                field_type = expected_fields[target_name]
-                field_options = self._compile_parser(
-                    field_payload.get("parser", _MISSING),
-                    globals_config,
-                    field_type,
-                    f"{label}.{target_name}",
-                    allow_audit=False,
-                )
-                compiled_by_name[target_name] = StructFieldParser(
-                    source_field_name=source_name,
-                    target_field_name=target_name,
-                    expected_data_type=field_type.canonical,
-                    data_type=field_type,
-                    parser=field_options,
-                )
-                source_names.append(source_name)
-            missing_fields = sorted(set(expected_fields) - set(compiled_by_name))
-            if missing_fields:
-                raise CompilationError(
-                    f"Struct parser {label!r} is missing field configs for {missing_fields}."
-                )
-            duplicate_sources = self._duplicates(source_names)
-            if duplicate_sources:
-                raise CompilationError(
-                    f"Struct parser {label!r} has duplicate source fields {duplicate_sources}."
-                )
-            # Emit fields in expected_data_type order, regardless of the order used in YAML. Spark
-            # struct position is part of the schema contract and must remain deterministic.
-            defaults["field_parsers"] = tuple(
-                compiled_by_name[field.name] for field in data_type.fields
-            )
-            return defaults
-
-        # Maps are represented by JSON objects, so keys are text by definition. Only values need a
-        # recursive parser and a container-owned child-error policy.
-        assert parser_type is ParserType.MAP
-        assert data_type.key_type is not None and data_type.value_type is not None
-        if data_type.key_type.parser_type is not ParserType.STRING:
-            raise CompilationError(
-                f"JSON map parser {label!r} requires map<string,...>; found "
-                f"{data_type.key_type.canonical} keys."
-            )
-        raw_value_parser = payload.get("value_parser", _MISSING)
-        if raw_value_parser is _MISSING:
-            raise CompilationError(f"Map parser {label!r} requires value_parser.")
-        value_options = self._compile_parser(
-            raw_value_parser,
-            globals_config,
-            data_type.value_type,
-            f"{label}{{value}}",
-            allow_audit=False,
-            child_error_owned_by_parent=True,
-        )
-        defaults.update(
-            value_parser=NestedValueParser(
-                expected_data_type=data_type.value_type.canonical,
-                data_type=data_type.value_type,
-                parser=value_options,
-            ),
-            on_value_error=self._child_error_mode(
-                payload,
-                "on_value_error",
-                data_type.value_type,
-                label,
-            ),
-            drop_null_values=self._bool(
-                payload,
-                "drop_null_values",
-                DEFAULT_DROP_NULL_VALUES,
-            ),
-        )
-        return defaults
-
-    def _child_error_mode(
-        self,
-        payload: Mapping[str, Any],
-        key: str,
-        child_data_type: SparkDataType,
-        label: str,
-    ) -> ChildErrorMode:
-        """Resolve and type-check an array/map child-error policy.
-
-        YAML's unquoted null token names the null policy. Preserve is narrower: it may retain a bad
-        child only when that exact position is typed as string, so the raw token remains valid in
-        the final array or map schema.
-        """
-        raw_value = payload.get(key, DEFAULT_CHILD_ERROR_MODE.value)
-        if key in payload and raw_value is None:
-            raw_value = ChildErrorMode.NULL.value
-        mode = self._enum_value(ChildErrorMode, raw_value, key)
-        if mode is ChildErrorMode.PRESERVE and child_data_type.parser_type is not ParserType.STRING:
-            raise CompilationError(f"{key}: preserve for {label!r} requires a string child parser.")
-        return mode
 
     def _compile_boolean_values(
         self,
@@ -1201,19 +792,14 @@ class YamlParserConfigCompiler:
         value: Any,
         data_type: SparkDataType,
         label: str,
-        *,
-        _traversal: _DefaultTraversal | None = None,
-        _allow_null: bool = False,
     ) -> Any:
-        """Validate and normalize one scalar or recursively complex default value.
+        """Validate and normalize one scalar default value.
 
         Returned values use precise Python types such as ``Decimal``, ``date``, and ``datetime``.
-        The runtime later turns this already-validated tree into native Spark literals.
+        The runtime later turns this already-validated value into a native Spark literal.
         """
-        traversal = _traversal if _traversal is not None else _DefaultTraversal()
-        traversal.consume(label)
         if value is None:
-            return _typed_default_null(label, allow_null=_allow_null)
+            raise CompilationError(f"{label} must be non-null.")
         parser_type = data_type.parser_type
         if parser_type is ParserType.STRING:
             if not isinstance(value, str):
@@ -1242,74 +828,6 @@ class YamlParserConfigCompiler:
             if not isinstance(value, str):
                 raise CompilationError(f"{label} for binary must be an encoded string.")
             return _validate_utf8_string(value, f"{label} for binary")
-        if parser_type is ParserType.ARRAY:
-            if not isinstance(value, list):
-                raise CompilationError(f"{label} for array must be a YAML list.")
-            assert data_type.element_type is not None
-            container_id = traversal.enter_container(value, label)
-            # Null child items are retained intentionally. Child nullability/default behavior is
-            # represented by the nested parser and applied when Spark literals are constructed.
-            try:
-                return tuple(
-                    self._typed_default(
-                        item,
-                        data_type.element_type,
-                        f"{label}[{index}]",
-                        _traversal=traversal,
-                        _allow_null=True,
-                    )
-                    for index, item in enumerate(value)
-                )
-            finally:
-                traversal.leave_container(container_id)
-        if parser_type is ParserType.STRUCT:
-            mapping = self._ensure_mapping(value, f"{label} for struct")
-            container_id = traversal.enter_container(mapping, label)
-            try:
-                expected = {field.name: field.data_type for field in data_type.fields}
-                # Exact field coverage prevents a default struct from silently diverging from the
-                # configured target schema.
-                unknown = sorted(set(mapping) - set(expected))
-                missing = sorted(set(expected) - set(mapping))
-                if unknown or missing:
-                    raise CompilationError(
-                        f"{label} for struct has missing fields {missing} and unknown fields {unknown}."
-                    )
-                return MappingProxyType(
-                    {
-                        name: self._typed_default(
-                            mapping[name],
-                            field_type,
-                            _struct_default_path(label, name),
-                            _traversal=traversal,
-                            _allow_null=True,
-                        )
-                        for name, field_type in expected.items()
-                    }
-                )
-            finally:
-                traversal.leave_container(container_id)
-        if parser_type is ParserType.MAP:
-            mapping = self._ensure_mapping(value, f"{label} for map")
-            assert data_type.key_type is not None and data_type.value_type is not None
-            if data_type.key_type.parser_type is not ParserType.STRING:
-                raise CompilationError(f"{label} supports only string-keyed map defaults.")
-            container_id = traversal.enter_container(mapping, label)
-            try:
-                compiled: dict[str, Any] = {}
-                for key, item in mapping.items():
-                    item_path = _map_default_path(label, key)
-                    traversal.consume(f"{item_path} (map key)")
-                    compiled[key] = self._typed_default(
-                        item,
-                        data_type.value_type,
-                        item_path,
-                        _traversal=traversal,
-                        _allow_null=True,
-                    )
-                return MappingProxyType(compiled)
-            finally:
-                traversal.leave_container(container_id)
         raise CompilationError(f"Unsupported parser type for {label}: {parser_type.value}.")
 
     @staticmethod

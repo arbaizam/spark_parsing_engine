@@ -23,9 +23,6 @@ class ParserType(str, Enum):
     DATE = "date"
     TIMESTAMP = "timestamp"
     TIMESTAMP_NTZ = "timestamp_ntz"
-    ARRAY = "array"
-    STRUCT = "struct"
-    MAP = "map"
 
 
 class NullMarkersMode(str, Enum):
@@ -66,22 +63,6 @@ class StringFormat(str, Enum):
     INTEREST_RATE_INDEX_V1 = "interest_rate_index_v1"
 
 
-class ComplexInputFormat(str, Enum):
-    """Supported bronze encodings for complex values."""
-
-    JSON = "json"
-    DELIMITED = "delimited"
-
-
-class ChildErrorMode(str, Enum):
-    """Resolution for an invalid array element or map value."""
-
-    FAIL = "fail"
-    NULL = "null"
-    DROP = "drop"
-    PRESERVE = "preserve"
-
-
 class BinaryEncoding(str, Enum):
     """Supported encodings for bronze binary strings."""
 
@@ -101,13 +82,5 @@ NUMERIC_PARSER_TYPES = frozenset(
         ParserType.FLOAT,
         ParserType.DECIMAL,
         ParserType.DOUBLE,
-    }
-)
-
-COMPLEX_PARSER_TYPES = frozenset(
-    {
-        ParserType.ARRAY,
-        ParserType.STRUCT,
-        ParserType.MAP,
     }
 )

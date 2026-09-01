@@ -7,24 +7,18 @@ Frozen instances also make configuration hashing and lazy Spark-plan constructio
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
 from spark_parser.data_types import SparkDataType
 from spark_parser.defaults import (
-    DEFAULT_ARRAY_DISTINCT,
     DEFAULT_AUDIT,
     DEFAULT_BINARY_ENCODING,
     DEFAULT_BOOLEAN_CASE_SENSITIVE,
     DEFAULT_BOOLEAN_FALSE_VALUES,
     DEFAULT_BOOLEAN_TRUE_VALUES,
     DEFAULT_BOOLEAN_VALUES_MODE,
-    DEFAULT_CHILD_ERROR_MODE,
     DEFAULT_COLLAPSE_WHITESPACE,
-    DEFAULT_COMPLEX_INPUT_FORMAT,
-    DEFAULT_DROP_NULL_ELEMENTS,
-    DEFAULT_DROP_NULL_VALUES,
     DEFAULT_EMPTY_IS_NULL,
     DEFAULT_IS_NULLABLE,
     DEFAULT_NULL_MARKER_CASE_SENSITIVE,
@@ -39,8 +33,6 @@ from spark_parser.defaults import (
 from spark_parser.enums import (
     BinaryEncoding,
     BooleanValuesMode,
-    ChildErrorMode,
-    ComplexInputFormat,
     NullMarkersMode,
     ParseErrorMode,
     ParserType,
@@ -65,12 +57,7 @@ class ParserGlobals:
 
 @dataclass(frozen=True)
 class ParserOptions:
-    """Fully resolved options for one parser node.
-
-    One model represents scalar and complex parsers. Fields that do not apply to a parser type stay
-    at harmless defaults; the compiler strictly rejects misplaced authoring keys before this model
-    is created. Nested parser references form the same recursive tree as ``expected_data_type``.
-    """
+    """Fully resolved options for one scalar parser."""
 
     parser_type: ParserType
     trim_whitespace: bool = DEFAULT_TRIM_WHITESPACE
@@ -93,49 +80,6 @@ class ParserOptions:
     boolean_case_sensitive: bool = DEFAULT_BOOLEAN_CASE_SENSITIVE
     boolean_values_mode: BooleanValuesMode = DEFAULT_BOOLEAN_VALUES_MODE
     binary_encoding: BinaryEncoding = DEFAULT_BINARY_ENCODING
-    input_format: ComplexInputFormat = DEFAULT_COMPLEX_INPUT_FORMAT
-    delimiter: str | None = None
-    # These three references are the edges of the recursive parser tree. Adding another child kind
-    # is a cross-cutting schema change: update compiler recursion, serializer.parser_mapping,
-    # iter_parser_options/schema reporting, and Spark runtime nested dispatch together.
-    # Keeping that coordination note beside the model makes the dependency visible at the place a
-    # maintainer is most likely to begin such a change.
-    element_parser: NestedValueParser | None = None
-    field_parsers: tuple[StructFieldParser, ...] = ()
-    value_parser: NestedValueParser | None = None
-    on_element_error: ChildErrorMode = DEFAULT_CHILD_ERROR_MODE
-    on_value_error: ChildErrorMode = DEFAULT_CHILD_ERROR_MODE
-    drop_null_elements: bool = DEFAULT_DROP_NULL_ELEMENTS
-    distinct: bool = DEFAULT_ARRAY_DISTINCT
-    drop_null_values: bool = DEFAULT_DROP_NULL_VALUES
-
-
-@dataclass(frozen=True)
-class NestedValueParser:
-    """Parser bound to an array element or map value datatype.
-
-    The canonical DDL string is stored alongside the parsed datatype to avoid reparsing it while
-    Spark expressions are generated recursively.
-    """
-
-    expected_data_type: str
-    data_type: SparkDataType
-    parser: ParserOptions
-
-
-@dataclass(frozen=True)
-class StructFieldParser:
-    """Source-to-target parser for one configured struct field.
-
-    Source and target names may differ. Runtime JSON decoding uses the source name, while emitted
-    struct order and field aliases follow the target schema.
-    """
-
-    source_field_name: str
-    target_field_name: str
-    expected_data_type: str
-    data_type: SparkDataType
-    parser: ParserOptions
 
 
 @dataclass(frozen=True)
@@ -166,25 +110,6 @@ class ParserConfig:
     description: str | None = None
     owner: str | None = None
     owner_department: str | None = None
-
-
-def iter_parser_options(options: ParserOptions) -> Iterator[ParserOptions]:
-    """Yield one compiled parser tree in stable pre-order.
-
-    An explicit stack keeps reporting and runtime validation aligned on the model's recursive
-    edges without adding a second recursion limit to the compiler's bounded contract.
-    """
-    pending = [options]
-    while pending:
-        current = pending.pop()
-        yield current
-        children: list[ParserOptions] = []
-        if current.element_parser is not None:
-            children.append(current.element_parser.parser)
-        children.extend(field.parser for field in current.field_parsers)
-        if current.value_parser is not None:
-            children.append(current.value_parser.parser)
-        pending.extend(reversed(children))
 
 
 def needs_spark_boolean_overlap_check(

@@ -12,8 +12,6 @@ from typing import Any, Final
 from spark_parser.enums import (
     BinaryEncoding,
     BooleanValuesMode,
-    ChildErrorMode,
-    ComplexInputFormat,
     NullMarkersMode,
     ParseErrorMode,
 )
@@ -45,19 +43,13 @@ SQL_LOCAL_TIMESTAMP_FORMAT: Final = "yyyy-MM-dd HH:mm:ss[.SSSSSS]"
 # defaults and runtime guards cannot drift apart.
 BUILTIN_DATETIME_FORMAT_SHAPES: Final[dict[str, str]] = {
     "yyyy-MM-dd": r"\A\d{4}-\d{2}-\d{2}\z",
-    ISO_LOCAL_TIMESTAMP_FORMAT: (
-        r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?\z"
-    ),
+    ISO_LOCAL_TIMESTAMP_FORMAT: (r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?\z"),
     ISO_OFFSET_TIMESTAMP_FORMAT: (
         r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?"
         r"(?:Z|[+-]\d{2}:\d{2})\z"
     ),
-    SQL_LOCAL_TIMESTAMP_FORMAT: (
-        r"\A\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{1,6})?\z"
-    ),
-    US_MONTH_FIRST_12_HOUR_FORMAT: (
-        r"\A\d{2}/\d{2}/\d{4} \d{1,2}:\d{2} [AaPp][Mm]\z"
-    ),
+    SQL_LOCAL_TIMESTAMP_FORMAT: (r"\A\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{1,6})?\z"),
+    US_MONTH_FIRST_12_HOUR_FORMAT: (r"\A\d{2}/\d{2}/\d{4} \d{1,2}:\d{2} [AaPp][Mm]\z"),
     US_MONTH_FIRST_12_HOUR_SECONDS_FORMAT: (
         r"\A\d{2}/\d{2}/\d{4} \d{1,2}:\d{2}:\d{2} [AaPp][Mm]\z"
     ),
@@ -98,12 +90,6 @@ DEFAULT_BOOLEAN_FALSE_VALUES: Final[tuple[str, ...]] = ("false",)
 DEFAULT_BOOLEAN_CASE_SENSITIVE: Final = False
 DEFAULT_BOOLEAN_VALUES_MODE: Final = BooleanValuesMode.REPLACE
 
-# Container defaults. Child failures fail closed unless an author chooses null/drop explicitly.
-DEFAULT_COMPLEX_INPUT_FORMAT: Final = ComplexInputFormat.JSON
-DEFAULT_CHILD_ERROR_MODE: Final = ChildErrorMode.FAIL
-DEFAULT_DROP_NULL_ELEMENTS: Final = False
-DEFAULT_ARRAY_DISTINCT: Final = False
-DEFAULT_DROP_NULL_VALUES: Final = False
 
 # Canonical public view used by metadata and authoring clients. Nested mapping proxies and tuple
 # values make the exported object genuinely immutable; ``parser.defaults()`` is the JSON-shaped,
@@ -113,63 +99,45 @@ def _freeze_defaults(
 ) -> Mapping[str, Mapping[str, Any]]:
     """Return a deeply read-only mapping without retaining caller-owned dictionaries."""
     return MappingProxyType(
-        {
-            section: MappingProxyType(dict(values))
-            for section, values in defaults.items()
-        }
+        {section: MappingProxyType(dict(values)) for section, values in defaults.items()}
     )
 
 
-PARSER_DEFAULTS: Final[Mapping[str, Mapping[str, Any]]] = _freeze_defaults({
-    "globals": {
-        "null_markers": DEFAULT_NULL_MARKERS,
-        "null_marker_case_sensitive": DEFAULT_NULL_MARKER_CASE_SENSITIVE,
-        "true_values": DEFAULT_BOOLEAN_TRUE_VALUES,
-        "false_values": DEFAULT_BOOLEAN_FALSE_VALUES,
-        "boolean_case_sensitive": DEFAULT_BOOLEAN_CASE_SENSITIVE,
-    },
-    "common": {
-        "collapse_whitespace": DEFAULT_COLLAPSE_WHITESPACE,
-        "trim_whitespace": DEFAULT_TRIM_WHITESPACE,
-        "empty_is_null": DEFAULT_EMPTY_IS_NULL,
-        "replace_null_markers": DEFAULT_REPLACE_NULL_MARKERS,
-        "null_markers": DEFAULT_NULL_MARKERS,
-        "null_markers_mode": DEFAULT_NULL_MARKERS_MODE.value,
-        "null_marker_case_sensitive": DEFAULT_NULL_MARKER_CASE_SENSITIVE,
-        "is_nullable": DEFAULT_IS_NULLABLE,
-        "on_parse_error": DEFAULT_ON_PARSE_ERROR.value,
-        "audit": DEFAULT_AUDIT,
-    },
-    "string": {"format": DEFAULT_STRING_FORMAT},
-    "numeric": {"zero_is_valid": DEFAULT_ZERO_IS_VALID},
-    "date": {"formats": DEFAULT_DATE_FORMATS},
-    "timestamp": {"formats": DEFAULT_TIMESTAMP_FORMATS},
-    "timestamp_ntz": {"formats": DEFAULT_TIMESTAMP_NTZ_FORMATS},
-    "binary": {"encoding": DEFAULT_BINARY_ENCODING.value},
-    "array": {
-        "collapse_whitespace": False,
-        "input_format": DEFAULT_COMPLEX_INPUT_FORMAT.value,
-        "on_element_error": DEFAULT_CHILD_ERROR_MODE.value,
-        "drop_null_elements": DEFAULT_DROP_NULL_ELEMENTS,
-        "distinct": DEFAULT_ARRAY_DISTINCT,
-    },
-    "struct": {
-        "collapse_whitespace": False,
-        "input_format": DEFAULT_COMPLEX_INPUT_FORMAT.value,
-    },
-    "map": {
-        "collapse_whitespace": False,
-        "input_format": DEFAULT_COMPLEX_INPUT_FORMAT.value,
-        "on_value_error": DEFAULT_CHILD_ERROR_MODE.value,
-        "drop_null_values": DEFAULT_DROP_NULL_VALUES,
-    },
-    "boolean": {
-        "true_values": DEFAULT_BOOLEAN_TRUE_VALUES,
-        "false_values": DEFAULT_BOOLEAN_FALSE_VALUES,
-        "boolean_case_sensitive": DEFAULT_BOOLEAN_CASE_SENSITIVE,
-        "boolean_values_mode": DEFAULT_BOOLEAN_VALUES_MODE.value,
-    },
-})
+PARSER_DEFAULTS: Final[Mapping[str, Mapping[str, Any]]] = _freeze_defaults(
+    {
+        "globals": {
+            "null_markers": DEFAULT_NULL_MARKERS,
+            "null_marker_case_sensitive": DEFAULT_NULL_MARKER_CASE_SENSITIVE,
+            "true_values": DEFAULT_BOOLEAN_TRUE_VALUES,
+            "false_values": DEFAULT_BOOLEAN_FALSE_VALUES,
+            "boolean_case_sensitive": DEFAULT_BOOLEAN_CASE_SENSITIVE,
+        },
+        "common": {
+            "collapse_whitespace": DEFAULT_COLLAPSE_WHITESPACE,
+            "trim_whitespace": DEFAULT_TRIM_WHITESPACE,
+            "empty_is_null": DEFAULT_EMPTY_IS_NULL,
+            "replace_null_markers": DEFAULT_REPLACE_NULL_MARKERS,
+            "null_markers": DEFAULT_NULL_MARKERS,
+            "null_markers_mode": DEFAULT_NULL_MARKERS_MODE.value,
+            "null_marker_case_sensitive": DEFAULT_NULL_MARKER_CASE_SENSITIVE,
+            "is_nullable": DEFAULT_IS_NULLABLE,
+            "on_parse_error": DEFAULT_ON_PARSE_ERROR.value,
+            "audit": DEFAULT_AUDIT,
+        },
+        "string": {"format": DEFAULT_STRING_FORMAT},
+        "numeric": {"zero_is_valid": DEFAULT_ZERO_IS_VALID},
+        "date": {"formats": DEFAULT_DATE_FORMATS},
+        "timestamp": {"formats": DEFAULT_TIMESTAMP_FORMATS},
+        "timestamp_ntz": {"formats": DEFAULT_TIMESTAMP_NTZ_FORMATS},
+        "binary": {"encoding": DEFAULT_BINARY_ENCODING.value},
+        "boolean": {
+            "true_values": DEFAULT_BOOLEAN_TRUE_VALUES,
+            "false_values": DEFAULT_BOOLEAN_FALSE_VALUES,
+            "boolean_case_sensitive": DEFAULT_BOOLEAN_CASE_SENSITIVE,
+            "boolean_values_mode": DEFAULT_BOOLEAN_VALUES_MODE.value,
+        },
+    }
+)
 
 
 def parser_defaults() -> dict[str, dict[str, Any]]:

@@ -6,13 +6,11 @@ in lightweight Python environments.
 """
 
 from spark_parser.compiler_yaml import YamlParserConfigCompiler
-from spark_parser.data_types import SparkDataType, SparkStructField, parse_spark_data_type
+from spark_parser.data_types import SparkDataType, parse_spark_data_type
 from spark_parser.defaults import PARSER_DEFAULTS
 from spark_parser.enums import (
     BinaryEncoding,
     BooleanValuesMode,
-    ChildErrorMode,
-    ComplexInputFormat,
     NullMarkersMode,
     ParseErrorMode,
     ParserType,
@@ -26,11 +24,9 @@ from spark_parser.exceptions import (
 )
 from spark_parser.models import (
     ColumnParser,
-    NestedValueParser,
     ParserConfig,
     ParserGlobals,
     ParserOptions,
-    StructFieldParser,
 )
 from spark_parser.serializer import ParserConfigSerializer
 from spark_parser.service import ConfigReviewReport, SparkParserService, parser
@@ -41,8 +37,6 @@ __all__ = [
     "CompilationError",
     "BinaryEncoding",
     "BooleanValuesMode",
-    "ChildErrorMode",
-    "ComplexInputFormat",
     "NullMarkersMode",
     "PARSER_DEFAULTS",
     "ParseErrorMode",
@@ -51,15 +45,12 @@ __all__ = [
     "ParserGlobals",
     "ParserOptions",
     "ParserType",
-    "NestedValueParser",
     "SchemaValidationError",
     "SchemaWarning",
     "SparkDataFrameParser",
     "SparkParserError",
     "SparkParserService",
     "SparkDataType",
-    "SparkStructField",
-    "StructFieldParser",
     "StringFormat",
     "DataFrameParsing",
     "YamlParserConfigCompiler",
