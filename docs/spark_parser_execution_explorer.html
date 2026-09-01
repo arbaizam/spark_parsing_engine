@@ -1,0 +1,2166 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; style-src 'unsafe-inline' blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; img-src blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; font-src blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; media-src blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; worker-src blob:; connect-src blob: data:; frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Spark Parser execution explorer</title>
+<style>:root{color-scheme:light dark;background:light-dark(rgb(255 255 255), rgb(24 24 24))}html,body{margin:0}body{box-sizing:border-box;padding:1rem;background:inherit}iframe{display:block;width:100%;height:calc(100vh - 2rem);margin:0 auto;border:0}</style>
+</head>
+<body>
+<iframe sandbox="allow-scripts" referrerpolicy="no-referrer" title="Spark Parser execution explorer" srcdoc="&lt;!doctype html&gt;
+&lt;html lang=&quot;en&quot;&gt;
+&lt;head&gt;
+&lt;meta charset=&quot;utf-8&quot;&gt;
+&lt;meta name=&quot;viewport&quot; content=&quot;width=device-width, initial-scale=1&quot;&gt;
+&lt;meta name=&quot;referrer&quot; content=&quot;no-referrer&quot;&gt;
+&lt;meta http-equiv=&quot;Content-Security-Policy&quot; content=&quot;default-src &#x27;none&#x27;; script-src &#x27;unsafe-inline&#x27; &#x27;unsafe-eval&#x27; &#x27;wasm-unsafe-eval&#x27; blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; style-src &#x27;unsafe-inline&#x27; blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; img-src blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; font-src blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; media-src blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; worker-src blob:; connect-src blob: data:; frame-src &#x27;none&#x27;; object-src &#x27;none&#x27;; base-uri &#x27;none&#x27;; form-action &#x27;none&#x27;&quot;&gt;
+&lt;title&gt;Spark Parser execution explorer&lt;/title&gt;
+&lt;style&gt;:root {
+  color-scheme: light dark;
+  background-color: var(
+    --background,
+    var(--color-background-primary, light-dark(rgb(255 255 255), rgb(24 24 24)))
+  ) !important;
+
+  /* Agent-facing contract; keep in sync with SKILL.md. */
+  --background: var(
+    --color-background-primary,
+    light-dark(rgb(255 255 255), rgb(24 24 24))
+  );
+  --foreground: var(
+    --color-text-primary,
+    light-dark(rgb(26 28 31), rgb(255 255 255))
+  );
+  --card: color-mix(in oklab, var(--foreground) 5%, var(--background));
+  --card-foreground: var(
+    --color-text-primary,
+    light-dark(rgb(26 28 31), rgb(255 255 255))
+  );
+  --popover: var(
+    --color-background-secondary,
+    light-dark(rgb(255 255 255), rgb(45 45 45))
+  );
+  --popover-foreground: var(
+    --color-text-primary,
+    light-dark(rgb(26 28 31), rgb(255 255 255))
+  );
+  --primary: var(
+    --color-text-info,
+    light-dark(rgb(51 156 255), rgb(131 195 255))
+  );
+  --primary-foreground: var(
+    --color-text-inverse,
+    light-dark(rgb(255 255 255), rgb(13 13 13))
+  );
+  --secondary: var(
+    --color-background-secondary,
+    light-dark(rgb(255 255 255 / 96%), rgb(54 54 54 / 96%))
+  );
+  --secondary-foreground: var(
+    --color-text-primary,
+    light-dark(rgb(26 28 31), rgb(255 255 255))
+  );
+  --muted: color-mix(in srgb, var(--foreground) 10%, transparent);
+  --muted-foreground: var(
+    --color-text-secondary,
+    light-dark(rgb(26 28 31 / 49.4%), rgb(255 255 255 / 49.8%))
+  );
+  --accent: var(
+    --color-background-info,
+    light-dark(rgb(229 242 255), rgb(13 39 63))
+  );
+  --accent-foreground: var(
+    --color-text-info,
+    light-dark(rgb(51 156 255), rgb(131 195 255))
+  );
+  --destructive: var(
+    --color-text-warning,
+    light-dark(rgb(226 85 7), rgb(255 133 73))
+  );
+  --border: var(
+    --color-border-secondary,
+    light-dark(rgb(26 28 31 / 8%), rgb(255 255 255 / 8.2%))
+  );
+  --input: var(
+    --color-border-primary,
+    light-dark(
+      rgb(26 28 31 / 11.8%),
+      color-mix(in oklab, rgb(0 0 0) 10%, transparent)
+    )
+  );
+  --ring: var(
+    --color-ring-primary,
+    light-dark(rgb(51 156 255), rgb(131 195 255 / 76%))
+  );
+  --font-size-base: var(--font-text-md-size, 14px);
+  --blue: light-dark(rgb(51 156 255), rgb(51 156 255));
+  --orange: light-dark(rgb(226 85 7), rgb(251 106 34));
+  --green: light-dark(rgb(0 162 64), rgb(64 201 119));
+  --red: light-dark(rgb(224 46 42), rgb(255 103 100));
+  --purple: light-dark(rgb(146 79 247), rgb(173 123 249));
+  --yellow: light-dark(rgb(255 195 0), rgb(255 210 64));
+  --viz-series-1: var(--primary);
+  --viz-series-2: light-dark(rgb(243 136 59), rgb(245 154 86));
+  --viz-series-3: light-dark(rgb(93 201 119), rgb(116 213 139));
+  --viz-series-4: light-dark(rgb(235 119 177), rgb(240 143 192));
+  --viz-series-5: light-dark(rgb(155 121 236), rgb(170 145 239));
+  --viz-series-6: light-dark(rgb(58 185 177), rgb(90 203 194));
+
+  /* Internal implementation variables; not part of the agent contract. */
+  --font-sans: -apple-system, system-ui, &quot;Segoe UI&quot;, sans-serif;
+  --font-mono:
+    ui-monospace, SFMono-Regular, &quot;SF Mono&quot;, Menlo, Consolas, &quot;Liberation Mono&quot;,
+    monospace;
+  --font-size-normal: max(11px, var(--font-size-base));
+  --font-size-tooltip: calc(var(--font-size-base) - 1px);
+  --font-size-small: max(11px, calc(var(--font-size-base) - 2px));
+  --font-size-h1: calc(var(--font-size-normal) * 1.7142857143);
+  --font-size-h2: calc(var(--font-size-normal) * 1.4285714286);
+  --font-size-h3: calc(var(--font-size-normal) * 1.2857142857);
+  --font-weight-normal: 430;
+  --font-weight-medium: 500;
+  --line-height-normal: calc(var(--font-size-normal) * 1.5);
+  --line-height-tooltip: calc(var(--font-size-tooltip) * 1.4285714286);
+  --line-height-small: calc(var(--font-size-small) + 4px);
+  --radius: var(--border-radius-lg, 12.5px);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-2xl: calc(var(--radius) * 1.6);
+  --radius-full: 9999px;
+  --shadow-sm: 0 1px 2px -1px rgb(0 0 0 / 8%);
+  --checkmark-image: url(&quot;data:image/svg+xml,%3Csvg xmlns=&#x27;http://www.w3.org/2000/svg&#x27; viewBox=&#x27;0 0 17 17&#x27;%3E%3Cpath d=&#x27;M12.8961 3.64101C13.1297 3.41418 13.4984 3.37523 13.7779 3.56581C14.0571 3.75635 14.1554 4.11331 14.0299 4.41347L13.9615 4.53847L7.71151 13.7045C7.59411 13.8767 7.4063 13.9877 7.19881 14.0072C6.99136 14.0267 6.78564 13.9533 6.63826 13.806L2.88826 10.056L2.79842 9.9457C2.6192 9.67407 2.64927 9.30496 2.88826 9.06581C3.12738 8.82669 3.49647 8.79676 3.76815 8.97597L3.8785 9.06581L7.03084 12.2182L12.8053 3.74941L12.8961 3.64101Z&#x27;/%3E%3C/svg%3E&quot;);
+
+  /* Legacy aliases; not part of the current agent contract. */
+  --viz-bg: transparent;
+  --viz-panel: var(--card);
+  --viz-border: var(--border);
+  --viz-text: var(--foreground);
+  --viz-muted: var(--muted-foreground);
+  --viz-accent: var(--primary);
+  --viz-accent-text: var(--primary-foreground);
+  --viz-accent-bg: var(--accent);
+  --viz-font-size: var(--font-size-base);
+  --viz-warning: var(--destructive);
+}
+
+:root[data-theme=&quot;light&quot;] {
+  color-scheme: light;
+}
+
+:root[data-theme=&quot;dark&quot;] {
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html &gt; body {
+  /* Preserve MCP aliases for older inline renderers without creating :root cycles. */
+  --color-background-primary: var(
+    --background,
+    light-dark(rgb(255 255 255), rgb(24 24 24))
+  );
+  --color-text-primary: var(
+    --foreground,
+    light-dark(rgb(26 28 31), rgb(255 255 255))
+  );
+  --color-border-secondary: var(
+    --border,
+    light-dark(rgb(26 28 31 / 8%), rgb(255 255 255 / 8.2%))
+  );
+
+  margin: 0;
+  padding: 5px;
+  color: var(--foreground);
+  background: transparent !important;
+  font-family: var(--font-sans) !important;
+  font-size: var(--font-size-normal);
+  font-weight: var(--font-weight-normal);
+  line-height: var(--line-height-normal);
+}
+
+a {
+  color: color-mix(in srgb, var(--viz-accent) 80%, var(--viz-text) 20%);
+  cursor: pointer;
+  font-weight: var(--font-weight-medium, 500);
+  text-decoration: none;
+  text-underline-offset: 2px;
+}
+
+a:is(:hover, :focus-visible) {
+  text-decoration-line: underline;
+  text-decoration-style: dashed;
+  text-decoration-thickness: 0.5px;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+p {
+  margin-block: 0;
+}
+
+h1 {
+  font-size: var(--font-size-h1);
+  font-weight: var(--font-weight-medium);
+  line-height: 1.25;
+}
+
+h2 {
+  font-size: var(--font-size-h2);
+  font-weight: var(--font-weight-medium);
+  line-height: 1.25;
+}
+
+h3,
+h4,
+h5,
+h6 {
+  font-size: var(--font-size-h3);
+  font-weight: var(--font-weight-medium);
+  line-height: 1.3;
+}
+
+b,
+strong,
+th {
+  font-weight: var(--font-weight-medium);
+}
+
+code:not(pre code) {
+  display: inline;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  corner-shape: superellipse(1.5);
+  background: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  overflow-wrap: anywhere;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+  word-break: break-word;
+}
+
+.table-responsive {
+  width: 100%;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  color: var(--foreground);
+  font: inherit;
+  text-align: start;
+}
+
+.table :is(th, td) {
+  padding-block: 10px;
+  padding-inline: 0 24px;
+  overflow-wrap: anywhere;
+  border-bottom: 1px solid var(--border);
+  text-align: start;
+  vertical-align: top;
+}
+
+.table-responsive &gt; .table :is(th, td) {
+  overflow-wrap: break-word;
+}
+
+.table :is(th, td):last-child {
+  padding-inline-end: 0;
+}
+
+.table :is(caption, thead th) {
+  font-weight: 600;
+}
+
+.table thead th {
+  padding-block: 8px;
+  border-bottom-color: color-mix(in srgb, var(--foreground) 16%, transparent);
+}
+
+.table tbody tr:last-child :is(th, td) {
+  border-bottom: 0;
+}
+
+.table.table-sm :is(th, td) {
+  padding-block: 6px;
+}
+
+.table.table-sm :is(th, td):not(:last-child) {
+  padding-inline-end: 16px;
+}
+
+.table :is(.text-end, [align=&quot;right&quot;]) {
+  text-align: end;
+  font-variant-numeric: tabular-nums;
+}
+
+.table :is(.text-center, [align=&quot;center&quot;]) {
+  text-align: center;
+}
+
+.table .text-nowrap {
+  white-space: nowrap;
+}
+
+#widget {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  padding: 0;
+  background: transparent !important;
+}
+
+.card {
+  min-width: 0;
+  padding: 12px;
+  overflow: hidden;
+  overflow-wrap: break-word;
+  border-radius: var(--radius-2xl);
+  corner-shape: superellipse(1.5);
+  color: var(--card-foreground);
+  background: var(--card);
+}
+
+#widget &gt; :not(.card, .progress) {
+  width: 100% !important;
+  max-width: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.tooltip {
+  position: fixed;
+  z-index: 50;
+  top: 0;
+  left: 0;
+  width: max-content;
+  max-width: min(
+    20rem,
+    var(--tooltip-available-width, calc(100vw - 10px)),
+    calc(100vw - 10px)
+  );
+  max-height: min(
+    var(--tooltip-available-height, calc(100vh - 10px)),
+    calc(100vh - 10px)
+  );
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  corner-shape: superellipse(1.5);
+  color: var(--popover-foreground);
+  background: var(--popover);
+  box-shadow: none;
+  font-size: var(--font-size-tooltip);
+  line-height: var(--line-height-tooltip);
+  overflow-wrap: break-word;
+  white-space: normal;
+  pointer-events: none;
+  user-select: none;
+}
+
+.viz-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(max(180px, 24%), 1fr));
+  gap: 10px;
+}
+
+.viz-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.viz-stat-value {
+  font-size: var(--font-size-h2);
+  font-weight: var(--font-weight-medium);
+  line-height: 1.25;
+}
+
+.viz-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.progress {
+  display: flex;
+  height: 6px;
+  margin-block: calc((var(--line-height-normal, 1.5em) - 6px) / 2);
+  overflow: hidden;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: var(--muted);
+}
+
+.progress-bar {
+  height: 100%;
+  flex-shrink: 0;
+  border: 0;
+  background: var(--viz-series-1);
+}
+
+.viz-badge {
+  padding: 3px 8px;
+  border-radius: var(--radius-full);
+  color: var(--accent-foreground);
+  background: var(--accent);
+  font-weight: var(--font-weight-medium);
+}
+
+small,
+.text-small,
+.viz-badge {
+  font-size: var(--font-size-small);
+  line-height: var(--line-height-small);
+}
+
+.text-muted {
+  color: var(--muted-foreground);
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.viz-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.viz-controls &gt; .form-label {
+  display: grid;
+  min-width: min(100%, 260px);
+  flex: 1 1 280px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 2px 12px;
+  margin-bottom: 0;
+}
+
+.viz-controls &gt; .form-label &gt; :is(.form-control, .form-range, .form-select) {
+  grid-column: 1 / -1;
+}
+
+.btn,
+.form-check-input,
+.form-control,
+.form-range,
+.form-select {
+  font: inherit;
+}
+
+.btn {
+  appearance: button;
+  display: inline-flex;
+  inline-size: fit-content;
+  max-inline-size: 100%;
+  min-height: 28px;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  margin: 0;
+  padding: 0 8px;
+  -webkit-app-region: no-drag;
+  border: 1px solid var(--input);
+  border-radius: var(--radius-lg);
+  corner-shape: superellipse(1.5);
+  color: var(--secondary-foreground);
+  background: var(--secondary);
+  cursor: var(--cursor-interaction, pointer);
+  text-align: center;
+  text-decoration: none;
+  white-space: nowrap;
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+.btn:is(.btn-block, .viz-tile) {
+  inline-size: 100%;
+}
+
+.btn.viz-tile {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+a.btn {
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.btn:not(:disabled):hover {
+  background: color-mix(in srgb, var(--foreground) 6%, var(--secondary));
+}
+
+.btn-primary {
+  border-color: transparent;
+  color: var(--primary-foreground);
+  background: var(--foreground);
+  background-clip: padding-box;
+}
+
+.btn-primary .text-muted {
+  color: color-mix(in srgb, var(--primary-foreground) 50%, transparent);
+}
+
+.btn-primary:not(:disabled):hover {
+  background: color-mix(in srgb, var(--foreground) 80%, transparent);
+  background-clip: padding-box;
+}
+
+.btn-ghost {
+  border-color: transparent;
+  color: var(--muted-foreground);
+  background: transparent;
+}
+
+.btn-ghost:not(:disabled):hover {
+  color: var(--foreground);
+  background: color-mix(in srgb, var(--foreground) 6%, var(--secondary));
+}
+
+.btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+[data-lucide] {
+  stroke-width: 1.6;
+}
+
+.form-label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--foreground);
+}
+
+.form-control {
+  display: block;
+  width: 100%;
+  min-height: 28px;
+  padding: 0 8px;
+  outline: none;
+  border: 1px solid var(--input);
+  border-radius: var(--radius-lg);
+  corner-shape: superellipse(1.5);
+  color: var(--foreground);
+  background: var(--secondary);
+}
+
+.form-control::placeholder {
+  color: var(--muted-foreground);
+}
+
+.form-control[type=&quot;file&quot;] {
+  padding: 0;
+  overflow: hidden;
+  cursor: var(--cursor-interaction, pointer);
+}
+
+.form-control[type=&quot;file&quot;]::file-selector-button {
+  min-height: 26px;
+  margin-right: 8px;
+  padding: 0 8px;
+  border: 0;
+  border-right: 1px solid var(--input);
+  color: var(--secondary-foreground);
+  background: var(--secondary);
+  cursor: inherit;
+  font: inherit;
+}
+
+.form-control[type=&quot;file&quot;]:not(:disabled):hover::file-selector-button {
+  background: color-mix(in srgb, var(--foreground) 6%, var(--secondary));
+}
+
+.form-control-color[type=&quot;color&quot;] {
+  width: 40px;
+  height: 28px;
+  padding: 3px;
+  cursor: var(--cursor-interaction, pointer);
+}
+
+.form-control-color[type=&quot;color&quot;]::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+.form-control-color[type=&quot;color&quot;]::-webkit-color-swatch {
+  border: 0;
+  border-radius: calc(var(--radius-lg) - 4px);
+  corner-shape: superellipse(1.5);
+}
+
+textarea.form-control {
+  height: auto;
+  min-height: 72px;
+  padding: 8px 10px;
+  resize: vertical;
+}
+
+.form-control:focus-visible {
+  border-color: var(--ring);
+  box-shadow: inset 0 0 0 1px var(--ring);
+}
+
+.form-control:disabled,
+.form-select:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.form-select {
+  appearance: none;
+  display: block;
+  width: 100%;
+  min-height: 28px;
+  margin: 0;
+  padding: 0 32px 0 8px;
+  outline: none;
+  border: 1px solid var(--input);
+  border-radius: var(--radius-lg);
+  corner-shape: superellipse(1.5);
+  color: var(--foreground);
+  background-color: var(--secondary);
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--muted-foreground) 50%),
+    linear-gradient(135deg, var(--muted-foreground) 50%, transparent 50%);
+  background-position:
+    calc(100% - 14px) 50%,
+    calc(100% - 10px) 50%;
+  background-repeat: no-repeat;
+  background-size: 4px 4px;
+  cursor: var(--cursor-interaction, default);
+}
+
+.form-select:not(:disabled):hover {
+  background-color: color-mix(in srgb, var(--foreground) 6%, var(--secondary));
+}
+
+.form-select:focus-visible {
+  border-color: var(--ring);
+  box-shadow: inset 0 0 0 1px var(--ring);
+}
+
+.form-check {
+  display: flex;
+  min-height: 20px;
+  align-items: center;
+  gap: 6px;
+}
+
+.form-check-input {
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  margin: 0;
+  border: 1px solid var(--input);
+  color: var(--primary-foreground);
+  background-color: transparent;
+  cursor: var(--cursor-interaction, default);
+  transition:
+    background-color 150ms,
+    border-color 150ms,
+    box-shadow 150ms;
+}
+
+.form-check:not(.form-switch) .form-check-input[type=&quot;checkbox&quot;] {
+  border-color: var(--input);
+  border-radius: var(--radius-sm);
+  corner-shape: superellipse(1.5);
+  background-color: var(--secondary);
+  box-shadow: var(--shadow-sm);
+}
+
+.form-check:not(.form-switch)
+  .form-check-input:not(:disabled):not(:checked):hover {
+  background-color: var(--card);
+}
+
+.form-check:not(.form-switch) .form-check-input[type=&quot;checkbox&quot;]:checked {
+  border-color: var(--primary);
+  background-color: var(--primary);
+}
+
+.form-check:not(.form-switch)
+  .form-check-input[type=&quot;checkbox&quot;]:checked::before {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: var(--primary-foreground);
+  content: &quot;&quot;;
+  mask: var(--checkmark-image) center / 12px 12px no-repeat;
+}
+
+.form-check-input[type=&quot;radio&quot;] {
+  width: 14px;
+  height: 14px;
+  border-radius: var(--radius-full);
+}
+
+.form-check-input[type=&quot;radio&quot;]:checked {
+  border: 2px solid var(--primary);
+  background:
+    radial-gradient(circle, var(--primary-foreground) 0 2.5px, transparent 3px),
+    var(--primary);
+}
+
+.form-check:not(.form-switch) .form-check-input:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.form-check:not(.form-switch) .form-check-input:disabled {
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.form-check:not(.form-switch) .form-check-input:disabled + .form-check-label {
+  cursor: not-allowed;
+}
+
+.form-switch .form-check-input:disabled,
+.form-switch .form-check-input:disabled + .form-check-label {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.form-check-label {
+  color: var(--foreground);
+  cursor: var(--cursor-interaction, default);
+}
+
+.form-switch .form-check-input {
+  position: relative;
+  width: 32px;
+  height: 20px;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: var(--muted);
+  box-shadow: none;
+  transition: background-color 200ms cubic-bezier(0, 0, 0.2, 1);
+}
+
+.form-switch .form-check-input::before {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 16px;
+  height: 16px;
+  box-sizing: border-box;
+  border: 1px solid light-dark(var(--primary-foreground), var(--foreground));
+  border-radius: var(--radius-full);
+  background: light-dark(var(--primary-foreground), var(--foreground));
+  box-shadow: var(--shadow-sm);
+  content: &quot;&quot;;
+  transform: translate(2px, -50%);
+  transition: transform 200ms cubic-bezier(0, 0, 0.2, 1);
+}
+
+.form-switch .form-check-input:checked {
+  background: var(--primary);
+}
+
+.form-switch .form-check-input:checked::before {
+  transform: translate(14px, -50%);
+}
+
+.form-switch .form-check-input:focus-visible {
+  box-shadow: 0 0 0 2px var(--ring);
+}
+
+.form-range {
+  appearance: none;
+  display: block;
+  width: 100%;
+  height: 28px;
+  flex: 1;
+  margin: 0;
+  padding: 0;
+  outline: none;
+  border: 0;
+  accent-color: var(--primary);
+  background: linear-gradient(
+      color-mix(in srgb, var(--foreground) 7%, transparent),
+      color-mix(in srgb, var(--foreground) 7%, transparent)
+    )
+    center / 100% 2px no-repeat;
+}
+
+.form-range::-webkit-slider-runnable-track {
+  height: 28px;
+  background: transparent;
+}
+
+.form-range::-webkit-slider-thumb {
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  margin-top: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: light-dark(var(--primary-foreground), var(--foreground));
+}
+
+.form-range:focus-visible::-webkit-slider-thumb {
+  border-color: var(--ring);
+  box-shadow: inset 0 0 0 1px var(--ring);
+}
+
+.form-range::-moz-range-track {
+  height: 28px;
+  background: transparent;
+}
+
+.form-range::-moz-range-thumb {
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: light-dark(var(--primary-foreground), var(--foreground));
+}
+
+.form-range:focus-visible::-moz-range-thumb {
+  border-color: var(--ring);
+  box-shadow: inset 0 0 0 1px var(--ring);
+}
+
+.form-range:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.btn:not(.btn-primary, .viz-tile):is(
+  [aria-pressed=&quot;true&quot;],
+  [aria-selected=&quot;true&quot;],
+  .is-selected
+) {
+  border-color: var(--primary);
+  color: var(--primary-foreground);
+  background: var(--primary);
+}
+
+.btn.viz-tile:is([aria-pressed=&quot;true&quot;], [aria-selected=&quot;true&quot;], .is-selected) {
+  border-color: var(--primary);
+  box-shadow: inset 0 0 0 1px var(--primary);
+}
+
+.btn:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+@media (pointer: coarse) {
+  .btn,
+  .form-control,
+  .form-select {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .form-control,
+  .form-select {
+    font-size: max(16px, var(--font-size-normal));
+  }
+
+  .form-control[type=&quot;file&quot;]::file-selector-button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .form-control-color[type=&quot;color&quot;] {
+    width: 44px;
+    height: 44px;
+  }
+
+  .form-control:is(
+    [type=&quot;date&quot;],
+    [type=&quot;datetime-local&quot;],
+    [type=&quot;month&quot;],
+    [type=&quot;time&quot;],
+    [type=&quot;week&quot;]
+  ) {
+    min-width: 0;
+    max-width: 100%;
+    padding-block: 8px;
+  }
+
+  .form-check {
+    min-height: 44px;
+    padding-inline: 15px;
+  }
+
+  .form-check-input {
+    position: relative;
+  }
+
+  .form-check-input::after {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 44px;
+    height: 44px;
+    content: &quot;&quot;;
+    transform: translate(-50%, -50%);
+  }
+
+  .form-check-label {
+    display: inline-flex;
+    min-width: 44px;
+    min-height: 44px;
+    align-items: center;
+  }
+
+  .form-range {
+    height: 44px;
+    touch-action: pan-y;
+  }
+
+  .form-range::-webkit-slider-runnable-track {
+    height: 44px;
+  }
+
+  .form-range::-moz-range-track {
+    height: 44px;
+  }
+
+  .form-range::-webkit-slider-thumb {
+    margin-top: 12px;
+  }
+}
+
+svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+#widget &gt; svg {
+  width: 100%;
+}
+
+/* Model-authored chart rules can otherwise stretch icons after these styles load. */
+svg.lucide {
+  display: block;
+  width: 16px !important;
+  height: 16px !important;
+  flex: none;
+  margin: 0 !important;
+  stroke-width: 1.6;
+}
+
+.text-warning,
+.text-destructive {
+  color: var(--destructive);
+}
+
+html&gt;body{padding:0}&lt;/style&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;div id=&quot;spark-parser-execution-explorer&quot;&gt;
+  &lt;style&gt;
+    #spark-parser-execution-explorer {
+      width: 100%;
+      color: var(--foreground);
+    }
+
+    #spark-parser-execution-explorer .spx-header,
+    #spark-parser-execution-explorer .spx-detail-heading,
+    #spark-parser-execution-explorer .spx-source-row {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    #spark-parser-execution-explorer .spx-header {
+      margin-bottom: 14px;
+    }
+
+    #spark-parser-execution-explorer h1,
+    #spark-parser-execution-explorer h2,
+    #spark-parser-execution-explorer h3,
+    #spark-parser-execution-explorer p {
+      margin-top: 0;
+    }
+
+    #spark-parser-execution-explorer .spx-subtitle {
+      margin-bottom: 0;
+    }
+
+    #spark-parser-execution-explorer .spx-controls {
+      align-items: end;
+      margin-bottom: 14px;
+    }
+
+    #spark-parser-execution-explorer .spx-scenario-field {
+      flex: 1 1 360px;
+      min-width: 0;
+    }
+
+    #spark-parser-execution-explorer .spx-scenario-field select {
+      width: 100%;
+    }
+
+    #spark-parser-execution-explorer .spx-summary {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin-bottom: 16px;
+      padding-block: 10px;
+      border-block: 1px solid var(--border);
+    }
+
+    #spark-parser-execution-explorer .spx-summary-item,
+    #spark-parser-execution-explorer .spx-trace-item {
+      min-width: 0;
+    }
+
+    #spark-parser-execution-explorer .spx-label {
+      display: block;
+      color: var(--muted-foreground);
+      margin-bottom: 4px;
+    }
+
+    #spark-parser-execution-explorer .spx-value,
+    #spark-parser-execution-explorer .spx-trace-value {
+      display: block;
+      overflow-wrap: anywhere;
+    }
+
+    #spark-parser-execution-explorer .spx-stage-nav {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+
+    #spark-parser-execution-explorer .spx-stage-nav .btn {
+      min-width: 0;
+      width: 100%;
+    }
+
+    #spark-parser-execution-explorer .spx-trace {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 0;
+      margin-bottom: 14px;
+      border-block: 1px solid var(--border);
+    }
+
+    #spark-parser-execution-explorer .spx-trace-item {
+      padding: 10px 8px;
+      border-top: 3px solid transparent;
+    }
+
+    #spark-parser-execution-explorer .spx-trace-item + .spx-trace-item {
+      border-left: 1px solid var(--border);
+    }
+
+    #spark-parser-execution-explorer .spx-trace-item.is-current {
+      border-top-color: var(--primary);
+      color: var(--primary);
+    }
+
+    #spark-parser-execution-explorer .spx-detail {
+      margin: 0;
+    }
+
+    #spark-parser-execution-explorer .spx-detail-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+      gap: 18px;
+      margin-top: 14px;
+    }
+
+    #spark-parser-execution-explorer .spx-facts {
+      display: grid;
+      grid-template-columns: max-content minmax(0, 1fr);
+      gap: 8px 12px;
+      margin: 0;
+    }
+
+    #spark-parser-execution-explorer .spx-facts dt {
+      color: var(--muted-foreground);
+    }
+
+    #spark-parser-execution-explorer .spx-facts dd {
+      margin: 0;
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+
+    #spark-parser-execution-explorer pre {
+      margin: 8px 0 0;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+
+    #spark-parser-execution-explorer .spx-contract {
+      margin-bottom: 12px;
+    }
+
+    #spark-parser-execution-explorer .spx-links {
+      margin-top: 14px;
+      padding-top: 10px;
+      border-top: 1px solid var(--border);
+    }
+
+    #spark-parser-execution-explorer .spx-links a {
+      overflow-wrap: anywhere;
+    }
+
+    #spark-parser-execution-explorer .spx-divider {
+      color: var(--muted-foreground);
+      padding-inline: 6px;
+    }
+
+    @media (max-width: 620px) {
+      #spark-parser-execution-explorer .spx-summary {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      #spark-parser-execution-explorer .spx-stage-nav {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      #spark-parser-execution-explorer .spx-trace {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      #spark-parser-execution-explorer .spx-trace-item + .spx-trace-item {
+        border-left: 0;
+      }
+
+      #spark-parser-execution-explorer .spx-trace-item:nth-child(even) {
+        border-left: 1px solid var(--border);
+      }
+
+      #spark-parser-execution-explorer .spx-detail-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 360px) {
+      #spark-parser-execution-explorer .spx-summary {
+        grid-template-columns: 1fr;
+      }
+
+      #spark-parser-execution-explorer .spx-facts {
+        grid-template-columns: 1fr;
+        gap: 3px;
+      }
+
+      #spark-parser-execution-explorer .spx-facts dd + dt {
+        margin-top: 7px;
+      }
+    }
+  &lt;/style&gt;
+
+  &lt;header class=&quot;spx-header&quot;&gt;
+    &lt;div&gt;
+      &lt;h1&gt;Spark Parser execution explorer&lt;/h1&gt;
+      &lt;p class=&quot;spx-subtitle text-muted&quot;&gt;Strict compilation → metadata binding → lazy native Spark expressions → materialized outputs&lt;/p&gt;
+    &lt;/div&gt;
+    &lt;span class=&quot;viz-badge&quot;&gt;Code snapshot 7e5b110&lt;/span&gt;
+  &lt;/header&gt;
+
+  &lt;div class=&quot;viz-controls spx-controls&quot;&gt;
+    &lt;label class=&quot;form-label spx-scenario-field&quot; for=&quot;spx-scenario&quot;&gt;
+      Verified scenario
+      &lt;select class=&quot;form-select&quot; id=&quot;spx-scenario&quot;&gt;&lt;/select&gt;
+    &lt;/label&gt;
+    &lt;button class=&quot;btn btn-ghost&quot; id=&quot;spx-previous&quot; type=&quot;button&quot;&gt;Previous stage&lt;/button&gt;
+    &lt;button class=&quot;btn&quot; id=&quot;spx-next&quot; type=&quot;button&quot;&gt;Next stage&lt;/button&gt;
+  &lt;/div&gt;
+
+  &lt;div class=&quot;spx-summary&quot; id=&quot;spx-summary&quot; aria-live=&quot;polite&quot;&gt;&lt;/div&gt;
+  &lt;nav class=&quot;spx-stage-nav&quot; id=&quot;spx-stage-nav&quot; aria-label=&quot;Execution stages&quot;&gt;&lt;/nav&gt;
+  &lt;section class=&quot;spx-trace&quot; id=&quot;spx-trace&quot; aria-label=&quot;Current row value through the runtime pipeline&quot;&gt;&lt;/section&gt;
+
+  &lt;section class=&quot;card spx-detail&quot; aria-live=&quot;polite&quot;&gt;
+    &lt;div class=&quot;spx-detail-heading&quot;&gt;
+      &lt;div&gt;
+        &lt;span class=&quot;spx-label text-small&quot; id=&quot;spx-phase&quot;&gt;&lt;/span&gt;
+        &lt;h2 id=&quot;spx-stage-title&quot;&gt;&lt;/h2&gt;
+      &lt;/div&gt;
+      &lt;span class=&quot;viz-badge&quot; id=&quot;spx-timing&quot;&gt;&lt;/span&gt;
+    &lt;/div&gt;
+
+    &lt;div class=&quot;spx-detail-grid&quot;&gt;
+      &lt;div&gt;
+        &lt;h3&gt;Current state&lt;/h3&gt;
+        &lt;dl class=&quot;spx-facts&quot; id=&quot;spx-facts&quot;&gt;&lt;/dl&gt;
+      &lt;/div&gt;
+      &lt;div&gt;
+        &lt;h3&gt;Code contract&lt;/h3&gt;
+        &lt;div class=&quot;spx-contract&quot; id=&quot;spx-contract&quot;&gt;&lt;/div&gt;
+        &lt;pre&gt;&lt;code id=&quot;spx-code&quot;&gt;&lt;/code&gt;&lt;/pre&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;div class=&quot;spx-links text-small&quot;&gt;
+      &lt;a id=&quot;spx-source-link&quot; rel=&quot;noopener noreferrer&quot; target=&quot;_blank&quot;&gt;&lt;/a&gt;
+      &lt;span class=&quot;spx-divider&quot; aria-hidden=&quot;true&quot;&gt;·&lt;/span&gt;
+      &lt;a id=&quot;spx-test-link&quot; rel=&quot;noopener noreferrer&quot; target=&quot;_blank&quot;&gt;&lt;/a&gt;
+    &lt;/div&gt;
+  &lt;/section&gt;
+
+  &lt;script&gt;
+    (() =&gt; {
+      const root = document.getElementById(&quot;spark-parser-execution-explorer&quot;);
+      if (!root) return;
+
+      const commit = &quot;7e5b110feaacc678bbbaa11bd52c269372107f1b&quot;;
+      const repo = `https://github.com/arbaizam/spark_parsing_engine/blob/${commit}/`;
+      const source = (path, lines) =&gt; `${repo}${path}#L${lines.replace(&quot;–&quot;, &quot;-L&quot;)}`;
+
+      const stages = [
+        {
+          id: &quot;author&quot;,
+          label: &quot;1 · Author&quot;,
+          phase: &quot;Python · authoring boundary&quot;,
+          timing: &quot;Spark-free&quot;,
+          title: &quot;Author one explicit scalar contract&quot;,
+          contract: &quot;Text, Path, and Mapping entry points converge on the same compiler. A string argument is YAML text, never an inferred filename.&quot;,
+          code: &quot;parser.compile_text(yaml)\nparser.compile_path(path)\nparser.compile_mapping(mapping)&quot;,
+          file: &quot;src/spark_parser/service.py&quot;,
+          lines: &quot;376–403&quot;,
+          linkLabel: &quot;service.py:376–403 · public compile and identity facade&quot;
+        },
+        {
+          id: &quot;compile&quot;,
+          label: &quot;2 · Compile&quot;,
+          phase: &quot;Python · strict validation&quot;,
+          timing: &quot;Spark-free&quot;,
+          title: &quot;Resolve YAML into an immutable ParserConfig&quot;,
+          contract: &quot;Reject unknown keys, canonicalize scalar DDL, prove parser/type compatibility, resolve inheritance and defaults, validate typed defaults, then freeze ParserConfig. Canonical JSON of the resolved config is SHA-256 hashed.&quot;,
+          code: &quot;raw YAML\n  → strict SafeLoader\n  → ParserGlobals + ColumnParser[]\n  → frozen ParserConfig\n  → canonical JSON → SHA-256&quot;,
+          file: &quot;src/spark_parser/compiler_yaml.py&quot;,
+          lines: &quot;221–278&quot;,
+          linkLabel: &quot;compiler_yaml.py:221–278 · converged compilation path&quot;
+        },
+        {
+          id: &quot;bind&quot;,
+          label: &quot;3 · Bind&quot;,
+          phase: &quot;Spark · schema metadata&quot;,
+          timing: &quot;No Spark job&quot;,
+          title: &quot;Bind the compiled contract to a DataFrame schema&quot;,
+          contract: &quot;Require explicit keys; resolve Spark identifiers using the active case-sensitivity rules; require present sources to be top-level strings; reject ambiguities and output collisions. Missing sources are recoverable only through on_missing_source=&#x27;warn&#x27;.&quot;,
+          code: &quot;_validate_schema(df, config, key_columns,\n                 on_missing_source, column_prefix)&quot;,
+          file: &quot;src/spark_parser/spark_runtime.py&quot;,
+          lines: &quot;512–639&quot;,
+          linkLabel: &quot;spark_runtime.py:512–639 · metadata-only schema validation&quot;
+        },
+        {
+          id: &quot;normalize&quot;,
+          label: &quot;4 · Normalize&quot;,
+          phase: &quot;Spark SQL · expression stage 1&quot;,
+          timing: &quot;Lazy&quot;,
+          title: &quot;Normalize source text before type-specific parsing&quot;,
+          contract: &quot;Apply common operations in fixed order: collapse Unicode whitespace, trim Unicode edges, empty-to-null, then configured null-marker replacement. These expressions do not evaluate rows yet.&quot;,
+          code: &quot;source\n  → collapse whitespace\n  → trim edges\n  → empty_is_null\n  → replace_null_markers&quot;,
+          file: &quot;src/spark_parser/spark_runtime.py&quot;,
+          lines: &quot;835–879&quot;,
+          linkLabel: &quot;spark_runtime.py:835–879 · normalization state and value&quot;
+        },
+        {
+          id: &quot;candidate&quot;,
+          label: &quot;5 · Candidate&quot;,
+          phase: &quot;Spark SQL · expression stage 2&quot;,
+          timing: &quot;Lazy&quot;,
+          title: &quot;Build one typed candidate with native Spark expressions&quot;,
+          contract: &quot;Each closed parser family builds a typed Spark Column. Invalid non-null input becomes typed null. parse_failed is exactly normalized IS NOT NULL AND candidate IS NULL; original nulls and null markers are not parse failures.&quot;,
+          code: &quot;candidate = _parse_candidate(normalized, type, options)\nparse_failed = normalized IS NOT NULL\n               AND candidate IS NULL&quot;,
+          file: &quot;src/spark_parser/spark_runtime.py&quot;,
+          lines: &quot;962–1096&quot;,
+          linkLabel: &quot;spark_runtime.py:962–1096 · scalar candidate dispatch&quot;
+        },
+        {
+          id: &quot;policies&quot;,
+          label: &quot;6 · Policies&quot;,
+          phase: &quot;Spark SQL · expression stages 3–5&quot;,
+          timing: &quot;Lazy&quot;,
+          title: &quot;Apply error, zero, and final-null policies in order&quot;,
+          contract: &quot;First resolve a non-null parse failure (fail/null/default/string-only preserve), then invalidate numeric zero when configured, then apply default_on_null for non-nullable output. default_on_error and default_on_null are separate contracts.&quot;,
+          code: &quot;candidate\n  → on_parse_error\n  → zero_is_valid\n  → is_nullable / default_on_null\n  → final value&quot;,
+          file: &quot;src/spark_parser/spark_runtime.py&quot;,
+          lines: &quot;886–935&quot;,
+          linkLabel: &quot;spark_runtime.py:886–935 · failure, zero, and nullability order&quot;
+        },
+        {
+          id: &quot;project&quot;,
+          label: &quot;7 · Project&quot;,
+          phase: &quot;Spark · shared logical plan&quot;,
+          timing: &quot;Lazy&quot;,
+          title: &quot;Expose target and audit projections from one shared plan&quot;,
+          contract: &quot;parsed_df restores configured target names in authored order. results_df contains explicit row keys, audit structs, resolved config identity, and engine version. Audit causes are reconstructed separately from the final value.&quot;,
+          code: &quot;DataFrameParsing(\n  parsed_df  = configured targets,\n  results_df = keys + audit + config + engine\n)&quot;,
+          file: &quot;src/spark_parser/spark_runtime.py&quot;,
+          lines: &quot;406–445&quot;,
+          linkLabel: &quot;spark_runtime.py:406–445 · shared output plan&quot;
+        },
+        {
+          id: &quot;action&quot;,
+          label: &quot;8 · Action&quot;,
+          phase: &quot;Spark · row evaluation&quot;,
+          timing: &quot;Materializes&quot;,
+          title: &quot;Let a Spark action evaluate the expressions&quot;,
+          contract: &quot;Accessing parsed_df or results_df adds only a logical select. collect, write, and other materializing actions evaluate rows. fail mode embeds raise_error lazily; an optimizer-pruned count may not evaluate that target expression.&quot;,
+          code: &quot;parsing.parsed_df.collect()   # evaluates targets\nparsing.results_df.write...     # evaluates audit plan&quot;,
+          file: &quot;src/spark_parser/dataframe_parsing.py&quot;,
+          lines: &quot;18–78&quot;,
+          linkLabel: &quot;dataframe_parsing.py:18–78 · lazy public projections&quot;
+        }
+      ];
+
+      const scenarios = [
+        {
+          group: &quot;String format profiles&quot;,
+          id: &quot;rate-approved&quot;,
+          label: &quot;Approved interest-rate alias&quot;,
+          source: &#x27;&quot;SOFR Term - 12M&quot;&#x27;,
+          expectedType: &quot;string&quot;,
+          policy: &quot;interest_rate_index_v1 · preserve&quot;,
+          config: &quot;expected_data_type: string\nparser:\n  type: string\n  format: interest_rate_index_v1\n  on_parse_error: preserve\n  audit: true&quot;,
+          resolved: &quot;type=string · trim=true · collapse=true\nformat=interest_rate_index_v1\non_parse_error=preserve · nullable=true · audit=true&quot;,
+          bind: &quot;Source resolved once · Spark StringType\nKey resolved · no collisions · no warnings&quot;,
+          normalized: &#x27;&quot;SOFR Term - 12M&quot;&#x27;,
+          candidate: &#x27;&quot;SOFR Term 12-Month&quot;&#x27;,
+          parseFailed: &quot;false&quot;,
+          postError: &#x27;&quot;SOFR Term 12-Month&quot;&#x27;,
+          postZero: &#x27;&quot;SOFR Term 12-Month&quot;&#x27;,
+          final: &#x27;&quot;SOFR Term 12-Month&quot;&#x27;,
+          changed: &quot;true&quot;,
+          actions: &quot;[]&quot;,
+          effective: &quot;true&quot;,
+          error: &quot;null&quot;,
+          warning: &quot;none&quot;,
+          action: &#x27;Returns &quot;SOFR Term 12-Month&quot;&#x27;,
+          testPath: &quot;tests/system/spark_parser_system_tests.py&quot;,
+          testLines: &quot;406–435&quot;,
+          testLabel: &quot;System test ST-003 · canonical rate and audit&quot;
+        },
+        {
+          group: &quot;String format profiles&quot;,
+          id: &quot;rate-preserve&quot;,
+          label: &quot;Unknown interest rate · preserve&quot;,
+          source: &#x27;&quot;Unknown Index 12M&quot;&#x27;,
+          expectedType: &quot;string&quot;,
+          policy: &quot;interest_rate_index_v1 · preserve&quot;,
+          config: &quot;expected_data_type: string\nparser:\n  type: string\n  format: interest_rate_index_v1\n  on_parse_error: preserve\n  audit: true&quot;,
+          resolved: &quot;type=string · trim=true · collapse=true\nformat=interest_rate_index_v1\non_parse_error=preserve · nullable=true · audit=true&quot;,
+          bind: &quot;Source resolved once · Spark StringType\nKey resolved · no collisions · no warnings&quot;,
+          normalized: &#x27;&quot;Unknown Index 12M&quot;&#x27;,
+          candidate: &quot;&lt;typed null string&gt;&quot;,
+          parseFailed: &quot;true&quot;,
+          postError: &#x27;&quot;Unknown Index 12M&quot; · exact original source&#x27;,
+          postZero: &#x27;&quot;Unknown Index 12M&quot;&#x27;,
+          final: &#x27;&quot;Unknown Index 12M&quot;&#x27;,
+          changed: &quot;true&quot;,
+          actions: &#x27;[&quot;parse_error_preserved&quot;]&#x27;,
+          effective: &quot;true&quot;,
+          error: &#x27;&quot;Value could not be parsed as string.&quot;&#x27;,
+          warning: &quot;none&quot;,
+          action: &quot;Returns exact source; audit records handled failure&quot;,
+          testPath: &quot;tests/integration/test_spark_runtime.py&quot;,
+          testLines: &quot;815–914&quot;,
+          testLabel: &quot;Runtime test · fail-closed catalog and preserve policy&quot;
+        },
+        {
+          group: &quot;String format profiles&quot;,
+          id: &quot;zip-spacing&quot;,
+          label: &quot;ZIP list · spacing only&quot;,
+          source: &#x27;&quot;12345,67890&quot;&#x27;,
+          expectedType: &quot;string&quot;,
+          policy: &quot;zip · fail&quot;,
+          config: &quot;expected_data_type: string\nparser:\n  type: string\n  format: zip\n  audit: true&quot;,
+          resolved: &quot;type=string · trim=true · collapse=true\nformat=zip · on_parse_error=fail\nnullable=true · audit=true&quot;,
+          bind: &quot;Source resolved once · Spark StringType\nKey resolved · no collisions · no warnings&quot;,
+          normalized: &#x27;&quot;12345,67890&quot;&#x27;,
+          candidate: &#x27;&quot;12345, 67890&quot;&#x27;,
+          parseFailed: &quot;false&quot;,
+          postError: &#x27;&quot;12345, 67890&quot;&#x27;,
+          postZero: &#x27;&quot;12345, 67890&quot;&#x27;,
+          final: &#x27;&quot;12345, 67890&quot;&#x27;,
+          changed: &quot;true&quot;,
+          actions: &quot;[]&quot;,
+          effective: &quot;true&quot;,
+          error: &quot;null&quot;,
+          warning: &quot;none&quot;,
+          action: &#x27;Returns &quot;12345, 67890&quot;&#x27;,
+          testPath: &quot;tests/integration/test_spark_runtime.py&quot;,
+          testLines: &quot;917–1002&quot;,
+          testLabel: &quot;Runtime test · ZIP spacing changes audit.changed&quot;
+        },
+        {
+          group: &quot;String format profiles&quot;,
+          id: &quot;zip-plus4&quot;,
+          label: &quot;ZIP+4 · pad and format&quot;,
+          source: &#x27;&quot;123-45&quot;&#x27;,
+          expectedType: &quot;string&quot;,
+          policy: &quot;zip · fail&quot;,
+          config: &quot;expected_data_type: string\nparser:\n  type: string\n  format: zip\n  audit: true&quot;,
+          resolved: &quot;type=string · trim=true · collapse=true\nformat=zip · on_parse_error=fail\nnullable=true · audit=true&quot;,
+          bind: &quot;Source resolved once · Spark StringType\nKey resolved · no collisions · no warnings&quot;,
+          normalized: &#x27;&quot;123-45&quot;&#x27;,
+          candidate: &#x27;&quot;00123-0045&quot;&#x27;,
+          parseFailed: &quot;false&quot;,
+          postError: &#x27;&quot;00123-0045&quot;&#x27;,
+          postZero: &#x27;&quot;00123-0045&quot;&#x27;,
+          final: &#x27;&quot;00123-0045&quot;&#x27;,
+          changed: &quot;true&quot;,
+          actions: &#x27;[&quot;zip_padded&quot;, &quot;zip_plus4_formatted&quot;]&#x27;,
+          effective: &quot;true&quot;,
+          error: &quot;null&quot;,
+          warning: &quot;none&quot;,
+          action: &#x27;Returns &quot;00123-0045&quot;&#x27;,
+          testPath: &quot;tests/integration/test_spark_runtime.py&quot;,
+          testLines: &quot;186–254&quot;,
+          testLabel: &quot;Runtime test · ZIP padding and ZIP+4 actions&quot;
+        },
+        {
+          group: &quot;Numeric policy boundaries&quot;,
+          id: &quot;integer-success&quot;,
+          label: &quot;Integer parse · representation only&quot;,
+          source: &#x27;&quot;007&quot;&#x27;,
+          expectedType: &quot;integer&quot;,
+          policy: &quot;fail · zero valid&quot;,
+          config: &quot;expected_data_type: integer\nparser:\n  type: integer\n  audit: true&quot;,
+          resolved: &quot;type=integer · trim=true · collapse=true\non_parse_error=fail · zero_is_valid=true\nnullable=true · audit=true&quot;,
+          bind: &quot;Source resolved once · Spark StringType\nKey resolved · no collisions · no warnings&quot;,
+          normalized: &#x27;&quot;007&quot;&#x27;,
+          candidate: &quot;7 · Spark integer&quot;,
+          parseFailed: &quot;false&quot;,
+          postError: &quot;7&quot;,
+          postZero: &quot;7&quot;,
+          final: &quot;7&quot;,
+          changed: &quot;false&quot;,
+          actions: &quot;[]&quot;,
+          effective: &quot;true&quot;,
+          error: &quot;null&quot;,
+          warning: &quot;none&quot;,
+          action: &quot;Returns integer 7; datatype conversion alone is not changed&quot;,
+          testPath: &quot;tests/integration/test_spark_runtime.py&quot;,
+          testLines: &quot;1460–1554&quot;,
+          testLabel: &quot;Runtime test · one full numeric-token contract&quot;
+        },
+        {
+          group: &quot;Numeric policy boundaries&quot;,
+          id: &quot;float-underflow&quot;,
+          label: &quot;Float nonzero underflow&quot;,
+          source: &#x27;&quot;1e-46&quot;&#x27;,
+          expectedType: &quot;float&quot;,
+          policy: &quot;null · zero invalid&quot;,
+          config: &quot;expected_data_type: float\nparser:\n  type: float\n  on_parse_error: null\n  zero_is_valid: false\n  audit: true&quot;,
+          resolved: &quot;type=float · trim=true · collapse=true\non_parse_error=null · zero_is_valid=false\nnullable=true · audit=true&quot;,
+          bind: &quot;Source resolved once · Spark StringType\nKey resolved · no collisions · no warnings&quot;,
+          normalized: &#x27;&quot;1e-46&quot;&#x27;,
+          candidate: &quot;&lt;typed null float&gt; · nonzero token underflowed&quot;,
+          parseFailed: &quot;true&quot;,
+          postError: &quot;&lt;typed null float&gt;&quot;,
+          postZero: &quot;&lt;typed null float&gt; · not zero-invalidated&quot;,
+          final: &quot;&lt;typed null float&gt;&quot;,
+          changed: &quot;true&quot;,
+          actions: &#x27;[&quot;parse_error_to_null&quot;]&#x27;,
+          effective: &quot;true&quot;,
+          error: &#x27;&quot;Value could not be parsed as float.&quot;&#x27;,
+          warning: &quot;none&quot;,
+          action: &quot;Returns null under ANSI on and off&quot;,
+          testPath: &quot;tests/integration/test_spark_runtime.py&quot;,
+          testLines: &quot;1557–1638&quot;,
+          testLabel: &quot;Runtime test · underflow versus authored zero&quot;
+        },
+        {
+          group: &quot;Numeric policy boundaries&quot;,
+          id: &quot;float-zero&quot;,
+          label: &quot;True numeric zero · invalidate&quot;,
+          source: &#x27;&quot;0&quot;&#x27;,
+          expectedType: &quot;float&quot;,
+          policy: &quot;null · zero invalid&quot;,
+          config: &quot;expected_data_type: float\nparser:\n  type: float\n  on_parse_error: null\n  zero_is_valid: false\n  audit: true&quot;,
+          resolved: &quot;type=float · trim=true · collapse=true\non_parse_error=null · zero_is_valid=false\nnullable=true · audit=true&quot;,
+          bind: &quot;Source resolved once · Spark StringType\nKey resolved · no collisions · no warnings&quot;,
+          normalized: &#x27;&quot;0&quot;&#x27;,
+          candidate: &quot;0.0 · Spark float&quot;,
+          parseFailed: &quot;false&quot;,
+          postError: &quot;0.0&quot;,
+          postZero: &quot;&lt;typed null float&gt;&quot;,
+          final: &quot;&lt;typed null float&gt;&quot;,
+          changed: &quot;true&quot;,
+          actions: &#x27;[&quot;zero_invalidated&quot;]&#x27;,
+          effective: &quot;true&quot;,
+          error: &quot;null&quot;,
+          warning: &quot;none&quot;,
+          action: &quot;Returns null; this is not a parse failure&quot;,
+          testPath: &quot;tests/integration/test_spark_runtime.py&quot;,
+          testLines: &quot;1557–1638&quot;,
+          testLabel: &quot;Runtime test · authored zero follows zero policy&quot;
+        },
+        {
+          group: &quot;Numeric policy boundaries&quot;,
+          id: &quot;parse-default&quot;,
+          label: &quot;Invalid integer · error default&quot;,
+          source: &#x27;&quot;abc&quot;&#x27;,
+          expectedType: &quot;integer&quot;,
+          policy: &quot;default -1&quot;,
+          config: &quot;expected_data_type: integer\nparser:\n  type: integer\n  on_parse_error: default\n  default_on_error: -1\n  audit: true&quot;,
+          resolved: &quot;type=integer · trim=true · collapse=true\non_parse_error=default · default_on_error=-1\nzero_is_valid=true · nullable=true · audit=true&quot;,
+          bind: &quot;Source resolved once · Spark StringType\nKey resolved · no collisions · no warnings&quot;,
+          normalized: &#x27;&quot;abc&quot;&#x27;,
+          candidate: &quot;&lt;typed null integer&gt;&quot;,
+          parseFailed: &quot;true&quot;,
+          postError: &quot;-1 · typed default_on_error&quot;,
+          postZero: &quot;-1&quot;,
+          final: &quot;-1&quot;,
+          changed: &quot;true&quot;,
+          actions: &#x27;[&quot;parse_error_default_applied&quot;]&#x27;,
+          effective: &quot;true&quot;,
+          error: &#x27;&quot;Value could not be parsed as integer.&quot;&#x27;,
+          warning: &quot;none&quot;,
+          action: &quot;Returns integer -1 with handled-failure audit&quot;,
+          testPath: &quot;tests/system/spark_parser_system_tests.py&quot;,
+          testLines: &quot;444–477&quot;,
+          testLabel: &quot;System test ST-004 · handled parse defaults&quot;
+        },
+        {
+          group: &quot;Numeric policy boundaries&quot;,
+          id: &quot;zero-final-default&quot;,
+          label: &quot;Zero invalidation · final default&quot;,
+          source: &#x27;&quot;0&quot;&#x27;,
+          expectedType: &quot;integer&quot;,
+          policy: &quot;zero invalid · non-null -1&quot;,
+          config: &quot;expected_data_type: integer\nparser:\n  type: integer\n  zero_is_valid: false\n  is_nullable: false\n  default_on_null: -1\n  audit: true&quot;,
+          resolved: &quot;type=integer · trim=true · collapse=true\nzero_is_valid=false · is_nullable=false\ndefault_on_null=-1 · on_parse_error=fail · audit=true&quot;,
+          bind: &quot;Source resolved once · Spark StringType\nKey resolved · no collisions · no warnings&quot;,
+          normalized: &#x27;&quot;0&quot;&#x27;,
+          candidate: &quot;0 · Spark integer&quot;,
+          parseFailed: &quot;false&quot;,
+          postError: &quot;0&quot;,
+          postZero: &quot;&lt;typed null integer&gt;&quot;,
+          final: &quot;-1 · typed default_on_null&quot;,
+          changed: &quot;true&quot;,
+          actions: &#x27;[&quot;zero_invalidated&quot;, &quot;default_on_null_applied&quot;]&#x27;,
+          effective: &quot;true&quot;,
+          error: &quot;null&quot;,
+          warning: &quot;none&quot;,
+          action: &quot;Returns integer -1&quot;,
+          testPath: &quot;tests/integration/test_spark_runtime.py&quot;,
+          testLines: &quot;186–254&quot;,
+          testLabel: &quot;Runtime test · zero invalidation before final null default&quot;
+        },
+        {
+          group: &quot;Nulls, schema drift, and laziness&quot;,
+          id: &quot;null-marker&quot;,
+          label: &quot;Configured null marker&quot;,
+          source: &#x27;&quot;NA&quot;&#x27;,
+          expectedType: &quot;decimal(10,2)&quot;,
+          policy: &quot;replace marker · nullable&quot;,
+          config: &quot;expected_data_type: decimal(10,2)\nparser:\n  type: decimal\n  null_markers: [NA]\n  replace_null_markers: true\n  on_parse_error: null\n  audit: true&quot;,
+          resolved: &quot;type=decimal · trim=true · collapse=true\nnull_markers=[NA] · replace=true\non_parse_error=null · nullable=true · audit=true&quot;,
+          bind: &quot;Source resolved once · Spark StringType\nKey resolved · no collisions · no warnings&quot;,
+          normalized: &quot;&lt;typed null string&gt; · marker matched&quot;,
+          candidate: &quot;&lt;typed null decimal(10,2)&gt;&quot;,
+          parseFailed: &quot;false · normalized input is null&quot;,
+          postError: &quot;&lt;typed null decimal(10,2)&gt;&quot;,
+          postZero: &quot;&lt;typed null decimal(10,2)&gt;&quot;,
+          final: &quot;&lt;typed null decimal(10,2)&gt;&quot;,
+          changed: &quot;true&quot;,
+          actions: &#x27;[&quot;null_marker_replaced&quot;]&#x27;,
+          effective: &quot;true&quot;,
+          error: &quot;null&quot;,
+          warning: &quot;none&quot;,
+          action: &quot;Returns null; marker replacement is not a parse failure&quot;,
+          testPath: &quot;tests/integration/test_spark_runtime.py&quot;,
+          testLines: &quot;186–254&quot;,
+          testLabel: &quot;Runtime test · null-marker attribution&quot;
+        },
+        {
+          group: &quot;Nulls, schema drift, and laziness&quot;,
+          id: &quot;missing-warn&quot;,
+          label: &quot;Missing source · warn&quot;,
+          source: &quot;&lt;column absent&gt;&quot;,
+          expectedType: &quot;date&quot;,
+          policy: &quot;on_missing_source=warn&quot;,
+          config: &quot;expected_data_type: date\nparser:\n  type: date\n  audit: true\n\ncall: on_missing_source=\&quot;warn\&quot;&quot;,
+          resolved: &quot;type=date · built-in ordered formats\non_parse_error=fail · nullable=true · audit=true\ncall policy is separate from parser options&quot;,
+          bind: &quot;Source absent · warn accepted\nTyped null source substituted · warning recorded&quot;,
+          normalized: &quot;&lt;typed null string&gt;&quot;,
+          candidate: &quot;&lt;typed null date&gt;&quot;,
+          parseFailed: &quot;false · normalized input is null&quot;,
+          postError: &quot;&lt;typed null date&gt;&quot;,
+          postZero: &quot;&lt;typed null date&gt;&quot;,
+          final: &quot;&lt;typed null date&gt;&quot;,
+          changed: &quot;true&quot;,
+          actions: &#x27;[&quot;source_column_missing&quot;]&#x27;,
+          effective: &quot;false&quot;,
+          error: &#x27;&quot;Source column is missing.&quot;&#x27;,
+          warning: &quot;one schema warning&quot;,
+          action: &quot;Returns typed null plus warning and row-level audit&quot;,
+          testPath: &quot;tests/system/spark_parser_system_tests.py&quot;,
+          testLines: &quot;610–647&quot;,
+          testLabel: &quot;System test ST-007 · recoverable schema drift&quot;
+        },
+        {
+          group: &quot;Nulls, schema drift, and laziness&quot;,
+          id: &quot;lazy-fail&quot;,
+          label: &quot;Unknown rate · lazy fail&quot;,
+          source: &#x27;&quot;Unknown Index 12M&quot;&#x27;,
+          expectedType: &quot;string&quot;,
+          policy: &quot;interest_rate_index_v1 · fail&quot;,
+          config: &quot;expected_data_type: string\nparser:\n  type: string\n  format: interest_rate_index_v1\n  audit: true&quot;,
+          resolved: &quot;type=string · trim=true · collapse=true\nformat=interest_rate_index_v1\non_parse_error=fail · nullable=true · audit=true&quot;,
+          bind: &quot;Source resolved once · Spark StringType\nPlan builds successfully · no row evaluated&quot;,
+          normalized: &#x27;&quot;Unknown Index 12M&quot;&#x27;,
+          candidate: &quot;&lt;typed null string&gt;&quot;,
+          parseFailed: &quot;true&quot;,
+          postError: &quot;&lt;lazy raise_error expression&gt;&quot;,
+          postZero: &quot;&lt;lazy raise_error expression&gt;&quot;,
+          final: &quot;&lt;lazy raise_error expression&gt;&quot;,
+          changed: &quot;not materialized&quot;,
+          actions: &quot;not materialized&quot;,
+          effective: &quot;not materialized&quot;,
+          error: &quot;Spark exception at evaluation&quot;,
+          warning: &quot;none&quot;,
+          action: &quot;collect/write raises; no output or audit row is invented&quot;,
+          testPath: &quot;tests/integration/test_spark_runtime.py&quot;,
+          testLines: &quot;894–914&quot;,
+          testLabel: &quot;Runtime test · fail policy raises only on action&quot;
+        }
+      ];
+
+      const scenarioSelect = root.querySelector(&quot;#spx-scenario&quot;);
+      const stageNav = root.querySelector(&quot;#spx-stage-nav&quot;);
+      const summary = root.querySelector(&quot;#spx-summary&quot;);
+      const trace = root.querySelector(&quot;#spx-trace&quot;);
+      const previous = root.querySelector(&quot;#spx-previous&quot;);
+      const next = root.querySelector(&quot;#spx-next&quot;);
+      const phase = root.querySelector(&quot;#spx-phase&quot;);
+      const stageTitle = root.querySelector(&quot;#spx-stage-title&quot;);
+      const timing = root.querySelector(&quot;#spx-timing&quot;);
+      const facts = root.querySelector(&quot;#spx-facts&quot;);
+      const contract = root.querySelector(&quot;#spx-contract&quot;);
+      const code = root.querySelector(&quot;#spx-code&quot;);
+      const sourceLink = root.querySelector(&quot;#spx-source-link&quot;);
+      const testLink = root.querySelector(&quot;#spx-test-link&quot;);
+
+      let currentStage = 0;
+
+      const valueText = value =&gt; value === undefined ? &quot;—&quot; : String(value);
+
+      const addFact = (label, value) =&gt; {
+        const dt = document.createElement(&quot;dt&quot;);
+        dt.textContent = label;
+        const dd = document.createElement(&quot;dd&quot;);
+        const valueNode = document.createElement(&quot;code&quot;);
+        valueNode.textContent = valueText(value);
+        dd.appendChild(valueNode);
+        facts.append(dt, dd);
+      };
+
+      const selectedScenario = () =&gt; scenarios.find(item =&gt; item.id === scenarioSelect.value) || scenarios[0];
+
+      const stageFacts = (stage, scenario) =&gt; {
+        if (stage.id === &quot;author&quot;) {
+          return [
+            [&quot;Source&quot;, scenario.source],
+            [&quot;Target type&quot;, scenario.expectedType],
+            [&quot;Authored policy&quot;, scenario.policy],
+            [&quot;YAML&quot;, scenario.config]
+          ];
+        }
+        if (stage.id === &quot;compile&quot;) {
+          return [
+            [&quot;Resolved options&quot;, scenario.resolved],
+            [&quot;Model&quot;, &quot;frozen ParserConfig&quot;],
+            [&quot;Identity&quot;, &quot;SHA-256(canonical JSON of resolved config)&quot;],
+            [&quot;Runtime rows touched&quot;, &quot;0&quot;]
+          ];
+        }
+        if (stage.id === &quot;bind&quot;) {
+          return [
+            [&quot;Binding result&quot;, scenario.bind],
+            [&quot;Warning&quot;, scenario.warning],
+            [&quot;Data action&quot;, &quot;none&quot;],
+            [&quot;Source requirement&quot;, &quot;present configured fields must be Spark StringType&quot;]
+          ];
+        }
+        if (stage.id === &quot;normalize&quot;) {
+          return [
+            [&quot;Exact source&quot;, scenario.source],
+            [&quot;Normalized&quot;, scenario.normalized],
+            [&quot;Parse failed&quot;, &quot;not decided until candidate exists&quot;],
+            [&quot;Evaluation&quot;, &quot;expression only&quot;]
+          ];
+        }
+        if (stage.id === &quot;candidate&quot;) {
+          return [
+            [&quot;Normalized&quot;, scenario.normalized],
+            [&quot;Typed candidate&quot;, scenario.candidate],
+            [&quot;parse_failed&quot;, scenario.parseFailed],
+            [&quot;Evaluation&quot;, &quot;expression only&quot;]
+          ];
+        }
+        if (stage.id === &quot;policies&quot;) {
+          return [
+            [&quot;After parse-error policy&quot;, scenario.postError],
+            [&quot;After zero policy&quot;, scenario.postZero],
+            [&quot;Final&quot;, scenario.final],
+            [&quot;Order&quot;, &quot;parse error → zero → final-null default&quot;]
+          ];
+        }
+        if (stage.id === &quot;project&quot;) {
+          return [
+            [&quot;parsed_df target&quot;, scenario.final],
+            [&quot;audit.changed&quot;, scenario.changed],
+            [&quot;audit.actions_applied&quot;, scenario.actions],
+            [&quot;audit.effective / error&quot;, `${scenario.effective} / ${scenario.error}`]
+          ];
+        }
+        return [
+          [&quot;Materializing action&quot;, &quot;collect / write / equivalent&quot;],
+          [&quot;Outcome&quot;, scenario.action],
+          [&quot;Warning&quot;, scenario.warning],
+          [&quot;Execution boundary&quot;, &quot;the first point row expressions must run&quot;]
+        ];
+      };
+
+      const traceItems = scenario =&gt; [
+        [&quot;Source&quot;, scenario.source, [0, 1, 2]],
+        [&quot;Normalized&quot;, scenario.normalized, [3]],
+        [&quot;Candidate&quot;, scenario.candidate, [4]],
+        [&quot;After error&quot;, scenario.postError, [5]],
+        [&quot;After zero&quot;, scenario.postZero, [5]],
+        [&quot;Final&quot;, scenario.final, [5, 6, 7]]
+      ];
+
+      const renderSummary = scenario =&gt; {
+        summary.replaceChildren();
+        const items = [
+          [&quot;Exact source&quot;, scenario.source],
+          [&quot;Target&quot;, scenario.expectedType],
+          [&quot;Final&quot;, scenario.final],
+          [&quot;Audit&quot;, `changed=${scenario.changed} · actions=${scenario.actions}`]
+        ];
+        items.forEach(([label, value]) =&gt; {
+          const item = document.createElement(&quot;div&quot;);
+          item.className = &quot;spx-summary-item&quot;;
+          const labelNode = document.createElement(&quot;span&quot;);
+          labelNode.className = &quot;spx-label text-small&quot;;
+          labelNode.textContent = label;
+          const valueNode = document.createElement(&quot;code&quot;);
+          valueNode.className = &quot;spx-value&quot;;
+          valueNode.textContent = value;
+          item.append(labelNode, valueNode);
+          summary.appendChild(item);
+        });
+      };
+
+      const renderTrace = scenario =&gt; {
+        trace.replaceChildren();
+        traceItems(scenario).forEach(([label, value, activeStages]) =&gt; {
+          const item = document.createElement(&quot;div&quot;);
+          item.className = `spx-trace-item${activeStages.includes(currentStage) ? &quot; is-current&quot; : &quot;&quot;}`;
+          const labelNode = document.createElement(&quot;span&quot;);
+          labelNode.className = &quot;spx-label text-small&quot;;
+          labelNode.textContent = label;
+          const valueNode = document.createElement(&quot;code&quot;);
+          valueNode.className = &quot;spx-trace-value&quot;;
+          valueNode.textContent = value;
+          item.append(labelNode, valueNode);
+          trace.appendChild(item);
+        });
+      };
+
+      const renderStage = () =&gt; {
+        const stage = stages[currentStage];
+        const scenario = selectedScenario();
+        stageNav.querySelectorAll(&quot;button&quot;).forEach((button, index) =&gt; {
+          button.setAttribute(&quot;aria-pressed&quot;, index === currentStage ? &quot;true&quot; : &quot;false&quot;);
+        });
+        previous.disabled = currentStage === 0;
+        next.disabled = currentStage === stages.length - 1;
+        phase.textContent = stage.phase;
+        stageTitle.textContent = stage.title;
+        timing.textContent = stage.timing;
+        facts.replaceChildren();
+        stageFacts(stage, scenario).forEach(([label, value]) =&gt; addFact(label, value));
+        contract.textContent = stage.contract;
+        code.textContent = stage.code;
+        sourceLink.href = source(stage.file, stage.lines);
+        sourceLink.textContent = stage.linkLabel;
+        testLink.href = source(scenario.testPath, scenario.testLines);
+        testLink.textContent = scenario.testLabel;
+        renderTrace(scenario);
+      };
+
+      const renderScenario = () =&gt; {
+        const scenario = selectedScenario();
+        renderSummary(scenario);
+        renderStage();
+      };
+
+      const groups = new Map();
+      scenarios.forEach(scenario =&gt; {
+        if (!groups.has(scenario.group)) {
+          const group = document.createElement(&quot;optgroup&quot;);
+          group.label = scenario.group;
+          groups.set(scenario.group, group);
+          scenarioSelect.appendChild(group);
+        }
+        const option = document.createElement(&quot;option&quot;);
+        option.value = scenario.id;
+        option.textContent = scenario.label;
+        groups.get(scenario.group).appendChild(option);
+      });
+
+      stages.forEach((stage, index) =&gt; {
+        const button = document.createElement(&quot;button&quot;);
+        button.type = &quot;button&quot;;
+        button.className = &quot;btn&quot;;
+        button.textContent = stage.label;
+        button.setAttribute(&quot;aria-pressed&quot;, index === currentStage ? &quot;true&quot; : &quot;false&quot;);
+        button.addEventListener(&quot;click&quot;, () =&gt; {
+          currentStage = index;
+          renderStage();
+        });
+        stageNav.appendChild(button);
+      });
+
+      scenarioSelect.addEventListener(&quot;change&quot;, renderScenario);
+      previous.addEventListener(&quot;click&quot;, () =&gt; {
+        currentStage = Math.max(0, currentStage - 1);
+        renderStage();
+      });
+      next.addEventListener(&quot;click&quot;, () =&gt; {
+        currentStage = Math.min(stages.length - 1, currentStage + 1);
+        renderStage();
+      });
+
+      scenarioSelect.value = &quot;rate-approved&quot;;
+      renderScenario();
+    })();
+  &lt;/script&gt;
+&lt;/div&gt;
+
+&lt;script src=&quot;https://unpkg.com/@floating-ui/core@1.7.3/dist/floating-ui.core.umd.min.js&quot;&gt;&lt;/script&gt;
+&lt;script src=&quot;https://unpkg.com/@floating-ui/dom@1.7.4/dist/floating-ui.dom.umd.min.js&quot;&gt;&lt;/script&gt;
+&lt;script&gt;
+(() =&gt; {
+  if (window.FloatingUIDOM == null) {
+    return;
+  }
+  const { autoUpdate, computePosition, flip, offset, shift, size } =
+    window.FloatingUIDOM;
+  const tooltipPlacements = new Set([&quot;top&quot;, &quot;right&quot;, &quot;bottom&quot;, &quot;left&quot;]);
+  const tooltipId = `codex-visualization-tooltip-${
+    window.crypto?.randomUUID?.() ?? Date.now().toString(36)
+  }`;
+  const tooltipGap = 5;
+  const hoverDelay = 700;
+  const skipDelay = 300;
+  let activeTrigger = null;
+  let pendingTrigger = null;
+  let tooltip = null;
+  let openTimeout = null;
+  let autoUpdateCleanup = null;
+  let positionRequest = 0;
+  let skipDelayUntil = 0;
+  let lastPointerWasTouch = false;
+  let pinnedByTouch = false;
+
+  const getTrigger = (target) =&gt;
+    target?.nodeType === Node.ELEMENT_NODE
+      ? target.closest(&quot;[data-tooltip]&quot;)
+      : null;
+  const containsTarget = (trigger, target) =&gt;
+    target?.nodeType != null &amp;&amp; trigger.contains(target);
+  const getContent = (trigger) =&gt;
+    trigger.getAttribute(&quot;data-tooltip&quot;)?.trim() ?? &quot;&quot;;
+  const getPlacement = (trigger) =&gt; {
+    const placement = trigger.getAttribute(&quot;data-tooltip-placement&quot;);
+    return tooltipPlacements.has(placement) ? placement : &quot;top&quot;;
+  };
+  const getTooltip = () =&gt; {
+    if (tooltip == null) {
+      tooltip = document.createElement(&quot;div&quot;);
+      tooltip.id = tooltipId;
+      tooltip.className = &quot;tooltip&quot;;
+      tooltip.setAttribute(&quot;role&quot;, &quot;tooltip&quot;);
+    }
+    return tooltip;
+  };
+  const setDescribedBy = (trigger, described) =&gt; {
+    const ids = new Set(
+      (trigger.getAttribute(&quot;aria-describedby&quot;) ?? &quot;&quot;)
+        .split(/\s+/)
+        .filter(Boolean),
+    );
+    if (described) {
+      ids.add(tooltipId);
+    } else {
+      ids.delete(tooltipId);
+    }
+    if (ids.size === 0) {
+      trigger.removeAttribute(&quot;aria-describedby&quot;);
+    } else {
+      trigger.setAttribute(&quot;aria-describedby&quot;, [...ids].join(&quot; &quot;));
+    }
+  };
+  const clearOpenTimeout = () =&gt; {
+    if (openTimeout != null) {
+      window.clearTimeout(openTimeout);
+      openTimeout = null;
+    }
+    pendingTrigger = null;
+  };
+  const closeTooltip = (activateSkipDelay = true) =&gt; {
+    clearOpenTimeout();
+    pinnedByTouch = false;
+    positionRequest += 1;
+    autoUpdateCleanup?.();
+    autoUpdateCleanup = null;
+    if (activeTrigger == null) {
+      return;
+    }
+    setDescribedBy(activeTrigger, false);
+    activeTrigger = null;
+    tooltip?.remove();
+    if (activateSkipDelay) {
+      skipDelayUntil = Date.now() + skipDelay;
+    }
+  };
+  const updatePosition = (trigger, floating) =&gt; {
+    const request = ++positionRequest;
+    void computePosition(trigger, floating, {
+      middleware: [
+        offset(tooltipGap),
+        flip({ padding: tooltipGap }),
+        shift({ padding: tooltipGap }),
+        size({
+          padding: tooltipGap,
+          apply({ availableHeight, availableWidth, elements }) {
+            elements.floating.style.setProperty(
+              &quot;--tooltip-available-width&quot;,
+              `${Math.max(0, availableWidth)}px`,
+            );
+            elements.floating.style.setProperty(
+              &quot;--tooltip-available-height&quot;,
+              `${Math.max(0, availableHeight)}px`,
+            );
+          },
+        }),
+      ],
+      placement: getPlacement(trigger),
+      strategy: &quot;fixed&quot;,
+    })
+      .then(({ x, y }) =&gt; {
+        if (activeTrigger !== trigger || request !== positionRequest) {
+          return;
+        }
+        const scale = window.devicePixelRatio || 1;
+        floating.style.transform = `translate(${Math.round(x * scale) / scale}px, ${Math.round(y * scale) / scale}px)`;
+        floating.style.visibility = &quot;visible&quot;;
+      })
+      .catch(() =&gt; {
+        if (activeTrigger === trigger &amp;&amp; request === positionRequest) {
+          closeTooltip(false);
+        }
+      });
+  };
+  const openTooltip = (trigger) =&gt; {
+    const content = getContent(trigger);
+    if (!trigger.isConnected || content.length === 0) {
+      return;
+    }
+    clearOpenTimeout();
+    if (activeTrigger === trigger) {
+      return;
+    }
+    closeTooltip();
+    const floating = getTooltip();
+    floating.textContent = content;
+    floating.style.visibility = &quot;hidden&quot;;
+    floating.style.transform = &quot;translate(0, 0)&quot;;
+    document.body.appendChild(floating);
+    activeTrigger = trigger;
+    setDescribedBy(trigger, true);
+    autoUpdateCleanup = autoUpdate(trigger, floating, () =&gt; {
+      updatePosition(trigger, floating);
+    });
+  };
+  const requestOpen = (trigger, immediate = false) =&gt; {
+    if (
+      getContent(trigger).length === 0 ||
+      activeTrigger === trigger ||
+      pendingTrigger === trigger
+    ) {
+      return;
+    }
+    clearOpenTimeout();
+    pendingTrigger = trigger;
+    const delay =
+      immediate || activeTrigger != null || Date.now() &lt; skipDelayUntil
+        ? 0
+        : hoverDelay;
+    if (delay === 0) {
+      openTooltip(trigger);
+      return;
+    }
+    openTimeout = window.setTimeout(() =&gt; {
+      openTimeout = null;
+      pendingTrigger = null;
+      openTooltip(trigger);
+    }, delay);
+  };
+  const handlePointerOpen = (event) =&gt; {
+    if (event.pointerType === &quot;touch&quot;) {
+      return;
+    }
+    const trigger = getTrigger(event.target);
+    if (trigger == null || containsTarget(trigger, event.relatedTarget)) {
+      return;
+    }
+    requestOpen(trigger);
+  };
+  const handlePointer = (event) =&gt; {
+    lastPointerWasTouch =
+      event.type === &quot;pointerdown&quot; &amp;&amp; event.pointerType === &quot;touch&quot;;
+  };
+  const handleTouchClick = (event) =&gt; {
+    const isTouch = event.pointerType === &quot;touch&quot; || lastPointerWasTouch;
+    lastPointerWasTouch = false;
+    if (!isTouch || event.detail === 0) {
+      return;
+    }
+    const trigger = getTrigger(event.target);
+    if (
+      trigger == null ||
+      !trigger.isConnected ||
+      getContent(trigger).length === 0 ||
+      (pinnedByTouch &amp;&amp; activeTrigger === trigger)
+    ) {
+      if (pinnedByTouch) {
+        closeTooltip();
+      }
+      return;
+    }
+    openTooltip(trigger);
+    pinnedByTouch = activeTrigger === trigger;
+    window.setTimeout(() =&gt; {
+      if (activeTrigger === trigger &amp;&amp; !trigger.isConnected) {
+        closeTooltip(false);
+      }
+    }, 0);
+  };
+  const handleLeave = (event) =&gt; {
+    if (pinnedByTouch) {
+      return;
+    }
+    const trigger = getTrigger(event.target);
+    if (trigger == null || containsTarget(trigger, event.relatedTarget)) {
+      return;
+    }
+    if (activeTrigger === trigger || pendingTrigger === trigger) {
+      closeTooltip();
+    }
+  };
+  const handleFocusIn = (event) =&gt; {
+    const trigger = getTrigger(event.target);
+    if (trigger?.matches(&quot;:focus-visible&quot;)) {
+      requestOpen(trigger, true);
+    }
+  };
+  const handleKeyDown = (event) =&gt; {
+    if (event.key === &quot;Escape&quot;) {
+      closeTooltip();
+    }
+  };
+  const handleContextMenu = (event) =&gt; {
+    lastPointerWasTouch = false;
+    const trigger = getTrigger(event.target);
+    if (activeTrigger === trigger || pendingTrigger === trigger) {
+      closeTooltip();
+    }
+  };
+  const destroy = () =&gt; {
+    closeTooltip(false);
+    lastPointerWasTouch = false;
+    document.removeEventListener(&quot;pointerover&quot;, handlePointerOpen);
+    document.removeEventListener(&quot;pointerdown&quot;, handlePointer);
+    document.removeEventListener(&quot;pointercancel&quot;, handlePointer);
+    document.removeEventListener(&quot;click&quot;, handleTouchClick);
+    document.removeEventListener(&quot;pointerout&quot;, handleLeave);
+    document.removeEventListener(&quot;focusin&quot;, handleFocusIn);
+    document.removeEventListener(&quot;focusout&quot;, handleLeave);
+    document.removeEventListener(&quot;keydown&quot;, handleKeyDown);
+    document.removeEventListener(&quot;contextmenu&quot;, handleContextMenu);
+    tooltip = null;
+  };
+
+  document.addEventListener(&quot;pointerover&quot;, handlePointerOpen);
+  document.addEventListener(&quot;pointerdown&quot;, handlePointer);
+  document.addEventListener(&quot;pointercancel&quot;, handlePointer);
+  document.addEventListener(&quot;click&quot;, handleTouchClick);
+  document.addEventListener(&quot;pointerout&quot;, handleLeave);
+  document.addEventListener(&quot;focusin&quot;, handleFocusIn);
+  document.addEventListener(&quot;focusout&quot;, handleLeave);
+  document.addEventListener(&quot;keydown&quot;, handleKeyDown);
+  document.addEventListener(&quot;contextmenu&quot;, handleContextMenu);
+  window.addEventListener(&quot;pagehide&quot;, destroy, { once: true });
+})();
+&lt;/script&gt;
+&lt;script id=&quot;codex-visualization-lucide&quot; async src=&quot;https://unpkg.com/lucide@1.17.0/dist/umd/lucide.js&quot;&gt;&lt;/script&gt;
+&lt;script&gt;
+(() =&gt; {
+  const initialize = () =&gt; {
+    globalThis.lucide?.createIcons({ attrs: { width: 16, height: 16 } });
+  };
+  if (globalThis.lucide != null) {
+    initialize();
+    return;
+  }
+  document
+    .getElementById(&quot;codex-visualization-lucide&quot;)
+    ?.addEventListener(&quot;load&quot;, initialize, { once: true });
+})();
+&lt;/script&gt;
+
+&lt;/body&gt;
+&lt;/html&gt;
+"></iframe>
+</body>
+</html>

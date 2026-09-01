@@ -96,6 +96,11 @@ For most callers, the package-level `parser` service is the only object needed. 
 walkthrough and [`examples/all_parsers.yaml`](examples/all_parsers.yaml) for every authoring
 option.
 
+For a source-linked step-through of compilation, schema binding, lazy expression stages, policy
+order, and audit output, download the
+[Spark Parser execution explorer](docs/spark_parser_execution_explorer.html) and open it in a
+browser. It is pinned to code snapshot `7e5b110` and uses scenarios asserted by the test suite.
+
 ## Complex source-data boundary
 
 The parser requires every present configured source to be a top-level Spark `string` column. A
