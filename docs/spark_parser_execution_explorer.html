@@ -1009,6 +1009,132 @@ html&gt;body{padding:0}&lt;/style&gt;
       margin-bottom: 14px;
     }
 
+    #spark-parser-execution-explorer .spx-view-controls {
+      align-items: center;
+      margin-bottom: 12px;
+    }
+
+    #spark-parser-execution-explorer .spx-view-label {
+      color: var(--muted-foreground);
+    }
+
+    #spark-parser-execution-explorer .spx-flow {
+      margin-bottom: 16px;
+      padding-block: 12px;
+      border-block: 1px solid var(--border);
+    }
+
+    #spark-parser-execution-explorer .spx-flow-heading,
+    #spark-parser-execution-explorer .spx-phase-heading,
+    #spark-parser-execution-explorer .spx-audit-sidecar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    #spark-parser-execution-explorer .spx-flow-heading {
+      margin-bottom: 12px;
+    }
+
+    #spark-parser-execution-explorer .spx-flow-heading h2,
+    #spark-parser-execution-explorer .spx-phase-heading h3,
+    #spark-parser-execution-explorer .spx-phase-note {
+      margin-bottom: 0;
+    }
+
+    #spark-parser-execution-explorer .spx-phase-flow {
+      display: grid;
+      grid-template-columns:
+        minmax(0, 1fr) max-content minmax(0, 1fr) max-content
+        minmax(0, 1fr) max-content minmax(0, 1fr);
+      gap: 8px;
+      align-items: stretch;
+    }
+
+    #spark-parser-execution-explorer .spx-phase {
+      min-width: 0;
+    }
+
+    #spark-parser-execution-explorer .spx-phase-heading {
+      align-items: flex-start;
+      padding-bottom: 8px;
+      border-bottom: 2px solid var(--border);
+    }
+
+    #spark-parser-execution-explorer .spx-phase-body {
+      display: grid;
+      gap: 7px;
+      margin-top: 9px;
+    }
+
+    #spark-parser-execution-explorer .spx-flow-node {
+      min-width: 0;
+      text-align: center;
+    }
+
+    #spark-parser-execution-explorer .spx-flow-node &gt; code,
+    #spark-parser-execution-explorer .spx-flow-node &gt; .text-small {
+      display: block;
+      margin-top: 4px;
+      overflow-wrap: anywhere;
+    }
+
+    #spark-parser-execution-explorer .spx-node-arrow,
+    #spark-parser-execution-explorer .spx-phase-connector,
+    #spark-parser-execution-explorer .spx-row-connector {
+      color: var(--muted-foreground);
+      text-align: center;
+    }
+
+    #spark-parser-execution-explorer .spx-phase-connector,
+    #spark-parser-execution-explorer .spx-row-connector {
+      display: grid;
+      place-items: center;
+    }
+
+    #spark-parser-execution-explorer .spx-phase-note {
+      color: var(--muted-foreground);
+    }
+
+    #spark-parser-execution-explorer .spx-decision-flow {
+      display: grid;
+      grid-template-columns:
+        minmax(0, 1fr) max-content minmax(0, 1fr) max-content minmax(0, 1fr)
+        max-content minmax(0, 1fr) max-content minmax(0, 1fr) max-content minmax(0, 1fr);
+      gap: 8px;
+      align-items: center;
+    }
+
+    #spark-parser-execution-explorer .spx-row-step-1 { grid-column: 1; }
+    #spark-parser-execution-explorer .spx-row-connector-1 { grid-column: 2; }
+    #spark-parser-execution-explorer .spx-row-step-2 { grid-column: 3; }
+    #spark-parser-execution-explorer .spx-row-connector-2 { grid-column: 4; }
+    #spark-parser-execution-explorer .spx-row-step-3 { grid-column: 5; }
+    #spark-parser-execution-explorer .spx-row-connector-3 { grid-column: 6; }
+    #spark-parser-execution-explorer .spx-row-step-4 { grid-column: 7; }
+    #spark-parser-execution-explorer .spx-row-connector-4 { grid-column: 8; }
+    #spark-parser-execution-explorer .spx-row-step-5 { grid-column: 9; }
+    #spark-parser-execution-explorer .spx-row-connector-5 { grid-column: 10; }
+    #spark-parser-execution-explorer .spx-row-step-6 { grid-column: 11; }
+
+    #spark-parser-execution-explorer .spx-arrow-medium,
+    #spark-parser-execution-explorer .spx-arrow-narrow {
+      display: none;
+    }
+
+    #spark-parser-execution-explorer .spx-audit-sidecar {
+      margin-top: 12px;
+      padding-top: 10px;
+      border-top: 1px dashed var(--border);
+    }
+
+    #spark-parser-execution-explorer .spx-audit-sidecar code {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+
     #spark-parser-execution-explorer h1,
     #spark-parser-execution-explorer h2,
     #spark-parser-execution-explorer h3,
@@ -1148,7 +1274,61 @@ html&gt;body{padding:0}&lt;/style&gt;
       padding-inline: 6px;
     }
 
+    @media (min-width: 621px) and (max-width: 900px) {
+      #spark-parser-execution-explorer .spx-decision-flow {
+        grid-template-columns: minmax(0, 1fr) max-content minmax(0, 1fr) max-content minmax(0, 1fr);
+        grid-template-rows: auto max-content auto;
+      }
+
+      #spark-parser-execution-explorer .spx-row-step-1 { grid-column: 1; grid-row: 1; }
+      #spark-parser-execution-explorer .spx-row-connector-1 { grid-column: 2; grid-row: 1; }
+      #spark-parser-execution-explorer .spx-row-step-2 { grid-column: 3; grid-row: 1; }
+      #spark-parser-execution-explorer .spx-row-connector-2 { grid-column: 4; grid-row: 1; }
+      #spark-parser-execution-explorer .spx-row-step-3 { grid-column: 5; grid-row: 1; }
+      #spark-parser-execution-explorer .spx-row-connector-3 { grid-column: 5; grid-row: 2; }
+      #spark-parser-execution-explorer .spx-row-step-4 { grid-column: 5; grid-row: 3; }
+      #spark-parser-execution-explorer .spx-row-connector-4 { grid-column: 4; grid-row: 3; }
+      #spark-parser-execution-explorer .spx-row-step-5 { grid-column: 3; grid-row: 3; }
+      #spark-parser-execution-explorer .spx-row-connector-5 { grid-column: 2; grid-row: 3; }
+      #spark-parser-execution-explorer .spx-row-step-6 { grid-column: 1; grid-row: 3; }
+
+      #spark-parser-execution-explorer .spx-arrow-wide {
+        display: none;
+      }
+
+      #spark-parser-execution-explorer .spx-arrow-medium {
+        display: inline;
+      }
+    }
+
     @media (max-width: 620px) {
+      #spark-parser-execution-explorer .spx-phase-flow {
+        grid-template-columns: minmax(0, 1fr);
+      }
+
+      #spark-parser-execution-explorer .spx-phase-connector .spx-arrow-wide {
+        display: none;
+      }
+
+      #spark-parser-execution-explorer .spx-phase-connector .spx-arrow-narrow {
+        display: inline;
+      }
+
+      #spark-parser-execution-explorer .spx-decision-flow {
+        display: flex;
+        flex-direction: column;
+        align-items: stretch;
+      }
+
+      #spark-parser-execution-explorer .spx-decision-flow .spx-arrow-wide,
+      #spark-parser-execution-explorer .spx-decision-flow .spx-arrow-medium {
+        display: none;
+      }
+
+      #spark-parser-execution-explorer .spx-decision-flow .spx-arrow-narrow {
+        display: inline;
+      }
+
       #spark-parser-execution-explorer .spx-summary {
         grid-template-columns: repeat(2, minmax(0, 1fr));
       }
@@ -1193,10 +1373,24 @@ html&gt;body{padding:0}&lt;/style&gt;
   &lt;header class=&quot;spx-header&quot;&gt;
     &lt;div&gt;
       &lt;h1&gt;Spark Parser execution explorer&lt;/h1&gt;
-      &lt;p class=&quot;spx-subtitle text-muted&quot;&gt;Strict compilation → metadata binding → lazy native Spark expressions → materialized outputs&lt;/p&gt;
+      &lt;p class=&quot;spx-subtitle text-muted&quot;&gt;Execution boundaries across modules, then one verified row through every policy branch&lt;/p&gt;
     &lt;/div&gt;
     &lt;span class=&quot;viz-badge&quot;&gt;Code snapshot 7e5b110&lt;/span&gt;
   &lt;/header&gt;
+
+  &lt;div class=&quot;viz-controls spx-view-controls&quot; role=&quot;group&quot; aria-label=&quot;Select flow chart&quot;&gt;
+    &lt;span class=&quot;spx-view-label text-small&quot;&gt;Flow chart&lt;/span&gt;
+    &lt;button class=&quot;btn&quot; id=&quot;spx-view-architecture&quot; type=&quot;button&quot; aria-pressed=&quot;true&quot;&gt;Architecture lifecycle&lt;/button&gt;
+    &lt;button class=&quot;btn&quot; id=&quot;spx-view-row&quot; type=&quot;button&quot; aria-pressed=&quot;false&quot;&gt;Row decision flow&lt;/button&gt;
+  &lt;/div&gt;
+
+  &lt;section class=&quot;spx-flow&quot; aria-live=&quot;polite&quot; aria-labelledby=&quot;spx-flow-title&quot;&gt;
+    &lt;div class=&quot;spx-flow-heading&quot;&gt;
+      &lt;h2 id=&quot;spx-flow-title&quot;&gt;&lt;/h2&gt;
+      &lt;span class=&quot;viz-badge&quot; id=&quot;spx-flow-badge&quot;&gt;&lt;/span&gt;
+    &lt;/div&gt;
+    &lt;div id=&quot;spx-flow-content&quot;&gt;&lt;/div&gt;
+  &lt;/section&gt;
 
   &lt;div class=&quot;viz-controls spx-controls&quot;&gt;
     &lt;label class=&quot;form-label spx-scenario-field&quot; for=&quot;spx-scenario&quot;&gt;
@@ -1344,6 +1538,49 @@ html&gt;body{padding:0}&lt;/style&gt;
           file: &quot;src/spark_parser/dataframe_parsing.py&quot;,
           lines: &quot;18–78&quot;,
           linkLabel: &quot;dataframe_parsing.py:18–78 · lazy public projections&quot;
+        }
+      ];
+
+      const architecturePhases = [
+        {
+          title: &quot;Compile&quot;,
+          timing: &quot;Spark-free&quot;,
+          note: &quot;An existing ParserConfig skips the compiler and joins at the immutable contract.&quot;,
+          nodes: [
+            { stage: &quot;author&quot;, title: &quot;Authorable config&quot;, module: &quot;service.py&quot; },
+            { stage: &quot;compile&quot;, title: &quot;Strict compiler&quot;, module: &quot;compiler_yaml.py&quot; },
+            { stage: &quot;compile&quot;, title: &quot;Resolved ParserConfig&quot;, module: &quot;models.py&quot; }
+          ]
+        },
+        {
+          title: &quot;Bind&quot;,
+          timing: &quot;No Spark job&quot;,
+          note: &quot;Invalid or missing+fail stops now. Missing+warn records a warning and supplies synthetic null.&quot;,
+          nodes: [
+            { stage: &quot;bind&quot;, title: &quot;Runtime inputs&quot;, module: &quot;service.py&quot; },
+            { stage: &quot;bind&quot;, title: &quot;Validate schema&quot;, module: &quot;spark_runtime.py&quot; },
+            { stage: &quot;bind&quot;, title: &quot;Binding accepted&quot;, module: &quot;spark_runtime.py&quot; }
+          ]
+        },
+        {
+          title: &quot;Build / expose&quot;,
+          timing: &quot;Lazy&quot;,
+          note: &quot;Audit reconstructs evidence beside the final value; it is not another mutation stage.&quot;,
+          nodes: [
+            { stage: &quot;normalize&quot;, title: &quot;Shared logical plan&quot;, module: &quot;spark_runtime.py&quot; },
+            { stage: &quot;candidate&quot;, title: &quot;Five value stages&quot;, module: &quot;spark_runtime.py&quot; },
+            { stage: &quot;project&quot;, title: &quot;Output wrapper&quot;, module: &quot;dataframe_parsing.py&quot; }
+          ]
+        },
+        {
+          title: &quot;Execute&quot;,
+          timing: &quot;Materializes&quot;,
+          note: &quot;Catalyst returns rows, or a fail-policy expression raises only when that expression is evaluated.&quot;,
+          nodes: [
+            { stage: &quot;project&quot;, title: &quot;Choose projection&quot;, module: &quot;dataframe_parsing.py&quot; },
+            { stage: &quot;action&quot;, title: &quot;Spark action&quot;, module: &quot;collect / write&quot; },
+            { stage: &quot;action&quot;, title: &quot;Rows or value error&quot;, module: &quot;Catalyst&quot; }
+          ]
         }
       ];
 
@@ -1662,6 +1899,11 @@ html&gt;body{padding:0}&lt;/style&gt;
         }
       ];
 
+      const architectureView = root.querySelector(&quot;#spx-view-architecture&quot;);
+      const rowView = root.querySelector(&quot;#spx-view-row&quot;);
+      const flowTitle = root.querySelector(&quot;#spx-flow-title&quot;);
+      const flowBadge = root.querySelector(&quot;#spx-flow-badge&quot;);
+      const flowContent = root.querySelector(&quot;#spx-flow-content&quot;);
       const scenarioSelect = root.querySelector(&quot;#spx-scenario&quot;);
       const stageNav = root.querySelector(&quot;#spx-stage-nav&quot;);
       const summary = root.querySelector(&quot;#spx-summary&quot;);
@@ -1678,6 +1920,7 @@ html&gt;body{padding:0}&lt;/style&gt;
       const testLink = root.querySelector(&quot;#spx-test-link&quot;);
 
       let currentStage = 0;
+      let currentView = &quot;architecture&quot;;
 
       const valueText = value =&gt; value === undefined ? &quot;—&quot; : String(value);
 
@@ -1767,6 +2010,193 @@ html&gt;body{padding:0}&lt;/style&gt;
         [&quot;Final&quot;, scenario.final, [5, 6, 7]]
       ];
 
+      const stageIndexById = new Map(stages.map((stage, index) =&gt; [stage.id, index]));
+
+      const activateStage = stageId =&gt; {
+        const index = stageIndexById.get(stageId);
+        if (index === undefined) return;
+        currentStage = index;
+        renderStage();
+      };
+
+      const createStageNode = ({ stage, title, detail, note }, extraClass = &quot;&quot;) =&gt; {
+        const node = document.createElement(&quot;div&quot;);
+        node.className = `spx-flow-node${extraClass ? ` ${extraClass}` : &quot;&quot;}`;
+        const button = document.createElement(&quot;button&quot;);
+        button.type = &quot;button&quot;;
+        button.className = &quot;btn btn-block&quot;;
+        button.dataset.flowStage = stage;
+        button.setAttribute(&quot;aria-pressed&quot;, stages[currentStage].id === stage ? &quot;true&quot; : &quot;false&quot;);
+        button.setAttribute(&quot;aria-label&quot;, `${title}. ${detail}. ${note || &quot;&quot;} Inspect this stage.`.trim());
+        button.textContent = title;
+        const detailNode = document.createElement(&quot;code&quot;);
+        detailNode.textContent = detail;
+        node.append(button, detailNode);
+        if (note) {
+          const noteNode = document.createElement(&quot;span&quot;);
+          noteNode.className = &quot;text-small&quot;;
+          noteNode.textContent = note;
+          node.appendChild(noteNode);
+        }
+        button.addEventListener(&quot;click&quot;, () =&gt; activateStage(stage));
+        return node;
+      };
+
+      const createFlowArrow = (wide, medium, narrow, className) =&gt; {
+        const arrow = document.createElement(&quot;div&quot;);
+        arrow.className = className;
+        arrow.setAttribute(&quot;aria-hidden&quot;, &quot;true&quot;);
+        [
+          [&quot;spx-arrow-wide&quot;, wide],
+          [&quot;spx-arrow-medium&quot;, medium],
+          [&quot;spx-arrow-narrow&quot;, narrow]
+        ].forEach(([variant, glyph]) =&gt; {
+          const span = document.createElement(&quot;span&quot;);
+          span.className = variant;
+          span.textContent = glyph;
+          arrow.appendChild(span);
+        });
+        return arrow;
+      };
+
+      const renderArchitectureFlow = () =&gt; {
+        const flow = document.createElement(&quot;div&quot;);
+        flow.className = &quot;spx-phase-flow&quot;;
+
+        architecturePhases.forEach((item, phaseIndex) =&gt; {
+          const phaseNode = document.createElement(&quot;section&quot;);
+          phaseNode.className = &quot;spx-phase&quot;;
+
+          const heading = document.createElement(&quot;div&quot;);
+          heading.className = &quot;spx-phase-heading&quot;;
+          const title = document.createElement(&quot;h3&quot;);
+          title.textContent = item.title;
+          const timingBadge = document.createElement(&quot;span&quot;);
+          timingBadge.className = &quot;viz-badge&quot;;
+          timingBadge.textContent = item.timing;
+          heading.append(title, timingBadge);
+
+          const body = document.createElement(&quot;div&quot;);
+          body.className = &quot;spx-phase-body&quot;;
+          item.nodes.forEach((node, nodeIndex) =&gt; {
+            body.appendChild(createStageNode({
+              stage: node.stage,
+              title: node.title,
+              detail: node.module
+            }));
+            if (nodeIndex &lt; item.nodes.length - 1) {
+              const arrow = document.createElement(&quot;div&quot;);
+              arrow.className = &quot;spx-node-arrow&quot;;
+              arrow.setAttribute(&quot;aria-hidden&quot;, &quot;true&quot;);
+              arrow.textContent = &quot;↓&quot;;
+              body.appendChild(arrow);
+            }
+          });
+
+          const note = document.createElement(&quot;p&quot;);
+          note.className = &quot;spx-phase-note text-small&quot;;
+          note.textContent = item.note;
+          phaseNode.append(heading, body, note);
+          flow.appendChild(phaseNode);
+
+          if (phaseIndex &lt; architecturePhases.length - 1) {
+            flow.appendChild(createFlowArrow(&quot;→&quot;, &quot;→&quot;, &quot;↓&quot;, &quot;spx-phase-connector&quot;));
+          }
+        });
+
+        flowContent.appendChild(flow);
+      };
+
+      const rowSteps = scenario =&gt; {
+        const actionIncludes = action =&gt; scenario.actions.includes(`&quot;${action}&quot;`);
+        const sourceMissing = scenario.effective === &quot;false&quot;;
+        const normalizedNull = scenario.normalized.startsWith(&quot;&lt;typed null string&gt;&quot;);
+        const parseFailed = scenario.parseFailed.startsWith(&quot;true&quot;);
+        const lazyFailure = scenario.id === &quot;lazy-fail&quot;;
+
+        let normalizationNote = &quot;Collapse Unicode whitespace → trim → empty and marker rules&quot;;
+        if (sourceMissing) normalizationNote = &quot;Synthetic null from warn; parse_failed remains false&quot;;
+        if (actionIncludes(&quot;null_marker_replaced&quot;)) normalizationNote = &quot;Whitespace first; enabled marker match → null&quot;;
+
+        let candidateNote = &quot;Typed candidate exists; parse_failed=false&quot;;
+        if (normalizedNull) candidateNote = &quot;Normalized null → typed null; parse_failed=false&quot;;
+        if (parseFailed) candidateNote = &quot;Non-null normalized + null candidate → parse_failed=true&quot;;
+
+        let errorPolicyNote = &quot;No parse-error branch&quot;;
+        if (lazyFailure) errorPolicyNote = &quot;fail → latent raise_error expression&quot;;
+        else if (actionIncludes(&quot;parse_error_preserved&quot;)) errorPolicyNote = &quot;preserve → exact original source&quot;;
+        else if (actionIncludes(&quot;parse_error_default_applied&quot;)) errorPolicyNote = &quot;default → typed default_on_error&quot;;
+        else if (actionIncludes(&quot;parse_error_to_null&quot;)) errorPolicyNote = &quot;null → typed null&quot;;
+
+        const zeroInvalidated = actionIncludes(&quot;zero_invalidated&quot;);
+        const finalDefaultApplied = actionIncludes(&quot;default_on_null_applied&quot;);
+        let finalPolicyNote = &quot;No zero or final-null intervention&quot;;
+        if (zeroInvalidated &amp;&amp; finalDefaultApplied) finalPolicyNote = &quot;zero invalidated → default_on_null applied&quot;;
+        else if (zeroInvalidated) finalPolicyNote = &quot;Successful zero invalidated after error policy&quot;;
+        else if (finalDefaultApplied) finalPolicyNote = &quot;Final null → typed default_on_null&quot;;
+        else if (scenario.final.startsWith(&quot;&lt;typed null&quot;)) finalPolicyNote = &quot;Nullable null remains null&quot;;
+
+        const outputNote = lazyFailure
+          ? &quot;Action evaluates the latent error; no output or audit row materializes&quot;
+          : `Audit: effective=${scenario.effective} · changed=${scenario.changed} · actions=${scenario.actions}`;
+
+        return [
+          { stage: &quot;bind&quot;, title: &quot;1. Resolve source&quot;, detail: scenario.source, note: sourceMissing ? &quot;missing + warn&quot; : &quot;present top-level Spark string&quot; },
+          { stage: &quot;normalize&quot;, title: &quot;2. Normalize&quot;, detail: scenario.normalized, note: normalizationNote },
+          { stage: &quot;candidate&quot;, title: &quot;3. Parse candidate&quot;, detail: scenario.candidate, note: candidateNote },
+          { stage: &quot;policies&quot;, title: &quot;4. Error policy&quot;, detail: scenario.postError, note: errorPolicyNote },
+          { stage: &quot;policies&quot;, title: &quot;5. Zero / final null&quot;, detail: scenario.final, note: finalPolicyNote },
+          { stage: &quot;project&quot;, title: &quot;6. Output + evidence&quot;, detail: lazyFailure ? &quot;not materialized&quot; : scenario.final, note: outputNote }
+        ];
+      };
+
+      const renderRowFlow = scenario =&gt; {
+        const flow = document.createElement(&quot;div&quot;);
+        flow.className = &quot;spx-decision-flow&quot;;
+        const mediumArrows = [&quot;→&quot;, &quot;→&quot;, &quot;↓&quot;, &quot;←&quot;, &quot;←&quot;];
+
+        rowSteps(scenario).forEach((step, index) =&gt; {
+          flow.appendChild(createStageNode(step, `spx-row-step spx-row-step-${index + 1}`));
+          if (index &lt; 5) {
+            flow.appendChild(createFlowArrow(
+              &quot;→&quot;,
+              mediumArrows[index],
+              &quot;↓&quot;,
+              `spx-row-connector spx-row-connector-${index + 1}`
+            ));
+          }
+        });
+
+        const sidecar = document.createElement(&quot;div&quot;);
+        sidecar.className = &quot;spx-audit-sidecar&quot;;
+        const label = document.createElement(&quot;span&quot;);
+        label.className = &quot;viz-badge&quot;;
+        label.textContent = &quot;Audit sidecar · no value mutation&quot;;
+        const evidence = document.createElement(&quot;code&quot;);
+        evidence.textContent = `source + normalized + candidate + flags + final → effective=${scenario.effective} · changed=${scenario.changed} · error=${scenario.error}`;
+        sidecar.append(label, evidence);
+
+        flowContent.append(flow, sidecar);
+      };
+
+      const renderFlow = () =&gt; {
+        const scenario = selectedScenario();
+        architectureView.setAttribute(&quot;aria-pressed&quot;, currentView === &quot;architecture&quot; ? &quot;true&quot; : &quot;false&quot;);
+        rowView.setAttribute(&quot;aria-pressed&quot;, currentView === &quot;row&quot; ? &quot;true&quot; : &quot;false&quot;);
+        flowContent.replaceChildren();
+
+        if (currentView === &quot;architecture&quot;) {
+          flowTitle.textContent = &quot;Where work happens&quot;;
+          flowBadge.textContent = &quot;Only a Spark action evaluates rows&quot;;
+          renderArchitectureFlow();
+          return;
+        }
+
+        flowTitle.textContent = &quot;Why this row becomes its final value&quot;;
+        flowBadge.textContent = `parse_failed=${scenario.parseFailed.startsWith(&quot;true&quot;)} · changed=${scenario.changed}`;
+        renderRowFlow(scenario);
+      };
+
       const renderSummary = scenario =&gt; {
         summary.replaceChildren();
         const items = [
@@ -1825,6 +2255,7 @@ html&gt;body{padding:0}&lt;/style&gt;
         testLink.href = source(scenario.testPath, scenario.testLines);
         testLink.textContent = scenario.testLabel;
         renderTrace(scenario);
+        renderFlow();
       };
 
       const renderScenario = () =&gt; {
@@ -1861,6 +2292,14 @@ html&gt;body{padding:0}&lt;/style&gt;
       });
 
       scenarioSelect.addEventListener(&quot;change&quot;, renderScenario);
+      architectureView.addEventListener(&quot;click&quot;, () =&gt; {
+        currentView = &quot;architecture&quot;;
+        renderFlow();
+      });
+      rowView.addEventListener(&quot;click&quot;, () =&gt; {
+        currentView = &quot;row&quot;;
+        renderFlow();
+      });
       previous.addEventListener(&quot;click&quot;, () =&gt; {
         currentStage = Math.max(0, currentStage - 1);
         renderStage();
