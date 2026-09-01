@@ -214,7 +214,7 @@ class YamlParserConfigCompiler:
             raise CompilationError(
                 f"Unable to decode parser config {path!s} as well-formed UTF-8: {exc}"
             ) from exc
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             raise CompilationError(f"Unable to read parser config {path!s}: {exc}") from exc
         return self.compile_text(text)
 
@@ -237,7 +237,7 @@ class YamlParserConfigCompiler:
         """Validate and fully resolve an already-loaded YAML-compatible mapping.
 
         Validation proceeds from the outside inward: top-level keys, inherited globals, each
-        column/parser tree, and finally cross-column uniqueness. The returned object therefore
+        column/parser binding, and finally cross-column uniqueness. The returned object therefore
         represents a complete runtime contract rather than partially validated authoring data.
         """
         payload = self._ensure_mapping(payload, "parser config")
@@ -529,8 +529,9 @@ class YamlParserConfigCompiler:
             target_column_name,
             globals_config,
         )
-        # Construct one fully resolved immutable node only after every conditional relationship has
-        # passed. Runtime code may safely branch on parser_type without looking back at raw YAML.
+        # Construct one fully resolved immutable options object only after every conditional
+        # relationship has passed. Runtime code may safely branch on parser_type without looking
+        # back at raw YAML.
         compiled_options = ParserOptions(
             parser_type=parser_type,
             trim_whitespace=self._bool(
@@ -651,7 +652,7 @@ class YamlParserConfigCompiler:
         if parser_type is not ParserType.STRING:
             return None
         value = payload.get("format")
-        if value is None or value == "none":
+        if value is None or (isinstance(value, str) and value.lower() in {"none", "null"}):
             return None
         return self._enum_value(StringFormat, value, "format")
 

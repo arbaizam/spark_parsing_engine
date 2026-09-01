@@ -44,8 +44,8 @@ def _argument(
     }
 
 
-# Arguments shared by every parser node. Parser-specific lists below are appended to a deep copy so
-# callers can safely modify returned metadata without mutating these module constants.
+# Arguments shared by every scalar parser. Parser-specific lists below are appended to a deep copy
+# so callers can safely modify returned metadata without mutating these module constants.
 _COMMON_ARGUMENTS = [
     _argument(
         "type",
@@ -275,8 +275,16 @@ _SPECIFIC_GOTCHAS = {
         "Spark rounds source values with excess scale to the configured decimal scale.",
         "String defaults use an ASCII decimal/scientific grammar; underscores and surrounding whitespace are rejected.",
     ],
-    ParserType.DOUBLE: ["Use decimal(p,s) when exact base-10 representation matters."],
-    ParserType.FLOAT: ["Use double or decimal(p,s) when additional precision is required."],
+    ParserType.DOUBLE: [
+        "Use decimal(p,s) when exact base-10 representation matters.",
+        "Finite nonzero source values that underflow Spark binary64 to zero follow "
+        "on_parse_error; authored zero remains governed by zero_is_valid.",
+    ],
+    ParserType.FLOAT: [
+        "Use double or decimal(p,s) when additional precision is required.",
+        "Finite nonzero source values that underflow Spark binary32 to zero follow "
+        "on_parse_error; authored zero remains governed by zero_is_valid.",
+    ],
     ParserType.BINARY: [
         "parsed_value audit output is canonical base64 regardless of input encoding."
     ],

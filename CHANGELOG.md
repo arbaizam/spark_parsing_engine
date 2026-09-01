@@ -11,6 +11,13 @@
   alias plus bounded `decimal(p,s)` validation.
 - Simplify the runtime and audit contract without changing scalar normalization, display formats,
   typed defaults, error policies, schema checks, or deterministic configuration identity.
+- Reject nonzero floating-point source tokens that underflow to zero so they follow
+  `on_parse_error`, matching compiler validation of floating-point defaults.
+- Mark audit `changed` when any string parser changes the source representation, including ZIP
+  normalization, while retaining the existing material-action vocabulary.
+- Accept case-insensitive quoted `null` and `none` as disabled string-format aliases and serialize
+  both to canonical null.
+- Report platform path-value failures through the compiler's public `CompilationError` contract.
 - Update the reference YAML, Databricks guide, system tests, and package documentation around the
   explicit scalar processing boundary.
 

@@ -334,6 +334,14 @@ assert handled_audit["PostalCode"].actions_applied == ["parse_error_to_null"]
 assert handled_audit["Balance"].actions_applied == ["parse_error_to_null"]
 assert handled_audit["Quantity"].actions_applied == ["parse_error_default_applied"]
 
+good_audit = audit_rows["good-1"]
+assert good_audit["BusinessLabel"].changed is True
+assert good_audit["BusinessLabel"].actions_applied == []
+assert good_audit["RateIndex"].changed is True
+assert good_audit["RateIndex"].actions_applied == []
+assert good_audit["PostalCode"].changed is True
+assert good_audit["PostalCode"].actions_applied == ["zip_padded"]
+
 audit_fields = parsing.results_df.schema[
     "guide_parser_parse_results"
 ].dataType.elementType.fieldNames()

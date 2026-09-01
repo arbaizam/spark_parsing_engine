@@ -298,9 +298,10 @@ target. A raw invalid string cannot inhabit a numeric, date, Boolean, timestamp,
 | `timestamp` | `timestamp`; ordered formats, including offset-aware patterns. |
 | `timestamp_ntz` | `timestamp_ntz`; ordered timezone-free formats. |
 
-Numeric text is validated before conversion so malformed or non-finite tokens follow the configured
-error policy under both ANSI and permissive Spark modes. Use `decimal(p,s)` when exact base-10
-representation matters. Binary audit output is canonical base64 regardless of source encoding.
+Numeric text is validated before conversion so malformed or non-finite tokens, and nonzero
+floating-point tokens that underflow to zero, follow the configured error policy under both ANSI
+and permissive Spark modes. Use `decimal(p,s)` when exact base-10 representation matters. Binary
+audit output is canonical base64 regardless of source encoding.
 
 Datetime formats are Spark patterns, not Python `strptime` patterns. Formats cascade in list order.
 The built-in defaults cover ISO and the known US month-first 12-hour export; `timestamp_ntz`
@@ -310,7 +311,7 @@ rejects offset-bearing inputs rather than silently discarding timezone meaning.
 
 | Format | Behavior | Example |
 | --- | --- | --- |
-| `null` / omitted | Keep the normalized string. | `"  loan   status "` → `"loan status"` |
+| YAML `null`, a case-insensitive `"null"` / `"none"`, or omitted | Keep the normalized string. | `"  loan   status "` → `"loan status"` |
 | `lower` | Lowercase. | `"ACTIVE"` → `"active"` |
 | `upper` | Uppercase. | `"active"` → `"ACTIVE"` |
 | `title` | Spark title casing with normalized spaces. | `"loan STATUS"` → `"Loan Status"` |
@@ -322,19 +323,104 @@ rejects offset-bearing inputs rather than silently discarding timezone meaning.
 | `zip` | Validate/pad ZIP5 and format ZIP+4. | `"1234"` → `"01234"` |
 | `interest_rate_index_v1` | Canonicalize the approved interest-rate catalog. | `"SOFR Term - 12M"` → `"SOFR Term 12-Month"` |
 
+#### Business title profile
+
 `title` remains the strict general formatter. `title_business_v1` starts with the same title
-pipeline, then restores only `FHLB`, `P&I`, `UST`, `RCF`, and `CMT` as complete tokens and changes a
-bounded integer-hyphen suffix such as `12-month` to `12-Month`. It does not infer unknown acronyms.
+pipeline and adds only two versioned rules:
 
-`interest_rate_index_v1` is fail-closed. It accepts only its canonical catalog, safe tenor
-normalizations, and explicit source aliases. Generic SOFR labels stay generic; cosmetic
-family/value separator hyphens are removed while tenor hyphens remain. For example,
-`SOFR - 30-Day` becomes `SOFR 30-Day` and `Treasury - 1 yr` becomes `Treasury 1-Year`. Configure
-`on_parse_error: preserve` when an unknown value such as `NAP` should remain unchanged.
+- restore the complete, case-insensitive tokens `FHLB`, `P&I`, `UST`, `RCF`, and `CMT`; and
+- capitalize the first lowercase letter after a hyphen whose preceding component is a bounded
+  ASCII integer (`12-month` → `12-Month`, `1-year` → `1-Year`).
 
-Address, county, state, ZIP, business-title, and interest-rate profiles are deterministic display
-normalizers, not external validation services. State and ZIP also accept multiple comma-separated
-property values and fail the full value if one component is invalid.
+Letters, numbers, and underscores count as part of an identifier for exception matching. Thus
+`cmt-backed` becomes `CMT-backed`, while `RCF6M` and `fhlb_code` receive only ordinary title casing.
+The numeric rule does not rewrite `abc12-month`, `12.5-month`, `1,200-month`, non-ASCII dashes, or
+ordinary compounds such as `state-of-the-art`. This profile does not infer acronyms, repair
+spelling, or validate business terminology.
+
+#### Interest-rate index profile
+
+`interest_rate_index_v1` is a closed, case-insensitive canonicalization profile. It normalizes only
+an approved complete value; an unsupported tenor, unknown family, or partial opaque-code match is
+a parse error. Canonical labels omit a cosmetic family/value separator hyphen while retaining the
+hyphen inside a tenor:
+
+| Canonical family | Approved canonical values |
+| --- | --- |
+| `SOFR Term` and `BSBY` | `Overnight`; 1-, 3-, 6-, and 12-Month |
+| `Ameribor` | `Overnight`; 1-Week; 1-, 3-, and 6-Month; 1- and 2-Year; 30- and 90-Day Average; `Derived 30T`; `Derived 90T` |
+| Constant Maturity Treasury | `N-Year Constant Maturity Treasury (CMT)`, where N is 1, 2, 3, 5, 7, 10, or 30 |
+| `LIBOR` | `N-Month LIBOR`, where N is 1, 2, 3, 6, 9, or 12; `LIBOR 1-Year (Daily)` |
+| `Treasury` and `Treasury Avg` | `Treasury N-Month` for 3 or 6; `Treasury N-Year` for 1, 2, 3, 5, 7, 10, or 30; `Treasury Avg 12-Month` |
+| `USD Swap` | 1-, 5-, and 10-Year |
+| `Freddie Mac` | 1-, 3-, 6-, and 12-Month |
+| `FHLB` | 1-, 2-, 3-, 5-, 7-, and 10-Year |
+| Generic `SOFR` | `SOFR`; 1- and 12-Month; 30-Day; 30- and 180-Day Average |
+| `RCF` | 6- and 12-Month |
+| Other | `Prime` |
+
+Month aliases are `M`, `mo`, `mos`, `month`, and `months`; year aliases are `Y`, `Yr`, `yrs`,
+`year`, and `years`. Spelled `day`/`days` and `week`/`weeks` are normalized only where the catalog
+allows them. Units are always singular in canonical output, and equivalent durations are not
+converted: `12-Month` stays `12-Month`, not `1-Year`. Former `Family - Value` spellings remain
+accepted inputs, so `SOFR - 30-Day` becomes `SOFR 30-Day` and `Treasury - 1 yr` becomes
+`Treasury 1-Year`.
+
+The catalog also recognizes these complete-value source/vendor aliases case-insensitively:
+
+| Source alias | Canonical output |
+| --- | --- |
+| `TSFR6M` | `SOFR Term 6-Month` |
+| `SOFR30` | `SOFR 30-Day` |
+| `SOFR30A` or `SOFR Avg - 30 days` | `SOFR 30-Day Average` |
+| `SOFR180A` | `SOFR 180-Day Average` |
+| `RCF6M` | `RCF 6-Month` |
+| `RCF12M` | `RCF 12-Month` |
+
+Approved CMT tenors also accept shorthand such as `10Y CMT`. Generic SOFR labels stay generic;
+`Term` is not inferred. Opaque aliases must match the complete normalized value, so `XSOFR30` does
+not partially rewrite. `NAP` and the text `null` are ordinary unknown values unless configured as
+null markers with `replace_null_markers: true`. Use `on_parse_error: preserve` when an unknown
+value should survive exactly as received.
+
+#### US address and county profiles
+
+`address_us_v1` is deterministic display normalization built from Spark expressions. It collapses
+whitespace, removes commas and periods from tokens, canonicalizes common USPS suffixes,
+directionals, and secondary-unit designators, and smart-cases `Mc`, apostrophe, and hyphen names.
+Alphanumeric values after a unit designator, including hash-prefixed values, are uppercased
+(`Apt #4b` → `Apt #4B`). Only the last suffix-like token is treated as a street suffix, so
+`123 Center Street` becomes `123 Center St`, not `123 Ctr St`. The output uses punctuation-free
+suffixes such as `St`, not `St.`. This is display cleanup, not geocoding, postal validation, or a
+deliverability check.
+
+`county` removes one existing trailing `County`, smart-cases the remaining name, and adds one
+canonical ` County` suffix. A value containing only `County` is a parse error. The profile does not
+infer that a parish, borough, municipality, or census area is a county.
+
+#### US state and ZIP profiles
+
+`state_us` recognizes the 50 states, Washington DC, and USPS territories `AS`, `GU`, `MP`, `PR`,
+and `VI` by full name or two-letter code. It also accepts an explicit set of conventional state
+abbreviations such as `Ill.`, `Calif.`, and `Wash.`. Matching is case-insensitive after whitespace
+normalization, and periods and commas are ignored during scalar lookup. Output is always the
+uppercase two-letter code; arbitrary abbreviation-like values are not inferred.
+
+ZIP values remain strings so leading zeroes survive:
+
+| Normalized ZIP input | Output |
+| --- | --- |
+| 1–5 digits | Left-pad to five digits (`1234` → `01234`). |
+| 9 digits | Insert the ZIP+4 separator (`123456789` → `12345-6789`). |
+| 1–5 digits, hyphen, then 1–4 digits | Pad each component (`123-45` → `00123-0045`). |
+| 6–8 compact digits, non-digits, malformed hyphens, or an empty component | Parse error handled by `on_parse_error`. |
+
+State and ZIP profiles also accept comma-separated property values. Components are normalized
+independently, kept in source order, and rejoined with canonical `, ` spacing; for example,
+`Illinois, tx` becomes `IL, TX` and `1234, 67890` becomes `01234, 67890`. `Washington, D.C.` is
+recognized as one DC value rather than split. If any component is empty or invalid, the entire
+field follows `on_parse_error`; partial lists are never returned. ZIP padding records
+`zip_padded`, while inserting or changing ZIP+4 formatting records `zip_plus4_formatted`.
 
 ## Compile-time and DataFrame validation
 
@@ -347,7 +433,8 @@ When binding a DataFrame, Spark Parser also checks that:
 - every present configured source is a top-level string;
 - source and target names are unambiguous under Spark's active case-sensitivity resolver;
 - missing sources fail unless `on_missing_source="warn"` explicitly allows substitution;
-- result-column names do not collide with sources, targets, or row keys; and
+- generated result-column names do not collide with existing input fields, including present
+  sources and row keys; and
 - row keys are existing, unique, unambiguous names.
 
 `on_parse_error: fail` is lazy: it raises only when Spark evaluates the failing target expression.
@@ -379,12 +466,16 @@ The result columns are:
 Each audit struct has `source_column_name`, `target_column_name`, `parser_type`,
 `expected_data_type`, `original_value`, `parsed_value`, `changed`, `effective`, `actions_applied`,
 `options`, and `error`. `parsed_value` is text, except binary values are represented as canonical
-base64. The audit schema intentionally has no nested child-path fields.
+base64. `changed` is true when a material null, default, error, missing-source, zero, or ZIP action
+occurs, or when a string parser's final text differs from its source. The audit schema intentionally
+has no nested child-path fields.
 
 Possible actions are `source_column_missing`, `empty_string_to_null`, `null_marker_replaced`,
 `parse_error_to_null`, `parse_error_default_applied`, `parse_error_preserved`, `zero_invalidated`,
-`default_on_null_applied`, `zip_padded`, and `zip_plus4_formatted`. Routine normalization and
-successful formatting are visible by comparing original and parsed values but do not add actions.
+`default_on_null_applied`, `zip_padded`, and `zip_plus4_formatted`. Routine string normalization and
+successful formatting do not add action entries, but they set `changed` when the final text differs;
+ZIP formatting follows the same comparison while retaining its specific ZIP actions. Successful
+non-string conversion does not set `changed` on its own.
 
 ## Testing
 

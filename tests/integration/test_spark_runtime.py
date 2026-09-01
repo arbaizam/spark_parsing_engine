@@ -236,7 +236,8 @@ SELECT
         "zip_code",
         "source_not_delivered",
     ]
-    assert audit[0].changed is False
+    assert audit[0].changed is True
+    assert audit[0].actions_applied == []
     assert audit[1].parsed_value is None
     assert audit[1].actions_applied == ["empty_string_to_null"]
     assert audit[2].parsed_value == "-1"
@@ -244,6 +245,9 @@ SELECT
     assert audit[3].parsed_value is None
     assert audit[3].actions_applied == ["null_marker_replaced"]
     assert audit[4].target_column_name == "Address"
+    assert audit[4].changed is True
+    assert audit[4].actions_applied == []
+    assert audit[5].changed is True
     assert audit[5].actions_applied == ["zip_padded", "zip_plus4_formatted"]
     assert audit[6].effective is False
     assert audit[6].actions_applied == ["source_column_missing"]
@@ -938,6 +942,14 @@ columns:
     target_column_name: PropertyZips
     expected_data_type: string
     parser: {type: string, format: zip, audit: true}
+  - source_column_name: spaced_property_zips
+    target_column_name: SpacedPropertyZips
+    expected_data_type: string
+    parser: {type: string, format: zip, audit: true}
+  - source_column_name: canonical_property_zips
+    target_column_name: CanonicalPropertyZips
+    expected_data_type: string
+    parser: {type: string, format: zip, audit: true}
   - source_column_name: invalid_states
     target_column_name: InvalidStates
     expected_data_type: string
@@ -956,6 +968,8 @@ columns:
         F.lit("Washington, D.C., Illinois").alias("dc_and_state"),
         F.lit("1234").alias("single_zip"),
         F.lit("1234, 67890").alias("property_zips"),
+        F.lit("12345,67890").alias("spaced_property_zips"),
+        F.lit("12345, 67890").alias("canonical_property_zips"),
         F.lit("IL, Mul").alias("invalid_states"),
         F.lit("12345, nope").alias("invalid_zips"),
     )
@@ -970,15 +984,22 @@ columns:
     assert row.DcAndState == "DC, IL"
     assert row.SingleZip == "01234"
     assert row.PropertyZips == "01234, 67890"
+    assert row.SpacedPropertyZips == "12345, 67890"
+    assert row.CanonicalPropertyZips == "12345, 67890"
     assert row.InvalidStates is None
     assert row.InvalidZips is None
-    audit = (
+    audits = (
         SparkDataFrameParser()
         .parse_dataframe(bronze_df, config, key_columns=["single_state"])
         .results_df.first()
-        .spark_parser_parse_results[0]
+        .spark_parser_parse_results
     )
-    assert audit.actions_applied == ["zip_padded"]
+    assert audits[0].changed is True
+    assert audits[0].actions_applied == ["zip_padded"]
+    assert audits[1].changed is True
+    assert audits[1].actions_applied == []
+    assert audits[2].changed is False
+    assert audits[2].actions_applied == []
 
 
 def test_location_formats_recognize_the_complete_unicode_whitespace_set(
@@ -1531,6 +1552,90 @@ columns:
         7.0,
     ]
     assert [row.Scalar for row in rows] == expected
+
+
+def test_floating_underflow_is_a_parse_error_without_reclassifying_zero(
+    spark: SparkSession,
+) -> None:
+    """Reject width underflow while preserving true zero and the smallest subnormal values."""
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: floating_underflow
+parser_config_name: Floating Underflow
+version: "1"
+columns:
+  - source_column_name: float_value
+    target_column_name: FloatValue
+    expected_data_type: float
+    parser: {type: float, on_parse_error: null, zero_is_valid: false, audit: true}
+  - source_column_name: double_value
+    target_column_name: DoubleValue
+    expected_data_type: double
+    parser: {type: double, on_parse_error: null, zero_is_valid: false, audit: true}
+"""
+    )
+    float_tokens = ["1e-100", "1e-46", "1e-45", "0", "-0.0", "0e-10000", "-00.000e+999"]
+    double_tokens = [
+        "1e-10000",
+        "1e-325",
+        "4.9406564584124654e-324",
+        "0",
+        "-0.0",
+        "0e-10000",
+        "-00.000e+999",
+    ]
+    bronze_df = spark.range(len(float_tokens)).select(
+        F.col("id").alias("row_id"),
+        F.element_at(
+            F.array(*(F.lit(token) for token in float_tokens)),
+            (F.col("id") + 1).cast("integer"),
+        ).alias("float_value"),
+        F.element_at(
+            F.array(*(F.lit(token) for token in double_tokens)),
+            (F.col("id") + 1).cast("integer"),
+        ).alias("double_value"),
+    )
+
+    previous_ansi = spark.conf.get("spark.sql.ansi.enabled")
+    try:
+        for ansi_value in ("true", "false"):
+            spark.conf.set("spark.sql.ansi.enabled", ansi_value)
+            parsing = SparkDataFrameParser().parse_dataframe(
+                bronze_df,
+                config,
+                key_columns=["row_id"],
+            )
+            rows = parsing.parsed_df.orderBy("row_id").collect()
+            assert [(row.FloatValue, row.DoubleValue) for row in rows[:2]] == [
+                (None, None),
+                (None, None),
+            ]
+            assert rows[2].FloatValue > 0
+            assert rows[2].DoubleValue > 0
+            assert [(row.FloatValue, row.DoubleValue) for row in rows[3:]] == [
+                (None, None),
+                (None, None),
+                (None, None),
+                (None, None),
+            ]
+
+            audits = parsing.results_df.orderBy("row_id").collect()
+            for row in audits[:2]:
+                assert [item.actions_applied for item in row.spark_parser_parse_results] == [
+                    ["parse_error_to_null"],
+                    ["parse_error_to_null"],
+                ]
+            assert [item.actions_applied for item in audits[2].spark_parser_parse_results] == [
+                [],
+                [],
+            ]
+            for row in audits[3:]:
+                assert [item.actions_applied for item in row.spark_parser_parse_results] == [
+                    ["zero_invalidated"],
+                    ["zero_invalidated"],
+                ]
+    finally:
+        spark.conf.set("spark.sql.ansi.enabled", previous_ansi)
 
 
 def test_numeric_full_token_guards_reject_final_line_terminators(spark: SparkSession) -> None:

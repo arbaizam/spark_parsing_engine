@@ -83,14 +83,41 @@ columns:
         )
 
 
-def test_unknown_datatypes_fail_compilation() -> None:
+@pytest.mark.parametrize("expected_data_type", ["variant", "integer(10,2)"])
+def test_unknown_datatypes_fail_compilation(expected_data_type: str) -> None:
     with pytest.raises(CompilationError, match="Unsupported datatype"):
-        _compile_default("variant", "value")
+        _compile_default(expected_data_type, "value")
+
+
+@pytest.mark.parametrize("parser_type", ["array", "struct", "map"])
+def test_complex_parser_names_are_not_supported(parser_type: str) -> None:
+    with pytest.raises(CompilationError, match=rf"Invalid parser type '{parser_type}'"):
+        YamlParserConfigCompiler().compile_text(
+            f"""
+parser_config_id: scalar_only
+parser_config_name: Scalar Only
+version: "1"
+columns:
+  - source_column_name: value
+    target_column_name: Value
+    expected_data_type: string
+    parser: {parser_type}
+"""
+        )
 
 
 def test_expected_data_type_rejects_malformed_unicode() -> None:
     with pytest.raises(CompilationError, match="well-formed Unicode"):
         parse_spark_data_type("\ud800")
+
+
+def test_datatype_entrypoint_rejects_empty_values_and_bare_decimal() -> None:
+    for value in (None, "", "   "):
+        with pytest.raises(CompilationError, match="non-empty string"):
+            parse_spark_data_type(value)  # type: ignore[arg-type]
+
+    with pytest.raises(CompilationError, match="requires precision and scale"):
+        parse_spark_data_type("decimal")
 
 
 @pytest.mark.parametrize(
@@ -192,6 +219,29 @@ columns:
     assert PARSER_DEFAULTS["date"]["formats"] == DEFAULT_DATE_FORMATS
     assert PARSER_DEFAULTS["timestamp"]["formats"] == DEFAULT_TIMESTAMP_FORMATS
     assert PARSER_DEFAULTS["timestamp_ntz"]["formats"] == DEFAULT_TIMESTAMP_NTZ_FORMATS
+
+
+def test_disabled_string_format_aliases_serialize_as_canonical_null() -> None:
+    compiler = YamlParserConfigCompiler()
+    serializer = ParserConfigSerializer()
+    for value in (None, "none", "NONE", "null", "NULL"):
+        config = compiler.compile_mapping(
+            {
+                "parser_config_id": "disabled_string_format",
+                "parser_config_name": "Disabled String Format",
+                "version": "1",
+                "columns": [
+                    {
+                        "source_column_name": "value",
+                        "target_column_name": "Value",
+                        "expected_data_type": "string",
+                        "parser": {"type": "string", "format": value},
+                    }
+                ],
+            }
+        )
+        assert config.columns[0].parser.string_format is None
+        assert serializer.to_mapping(config)["columns"][0]["parser"]["format"] is None
 
 
 @pytest.mark.parametrize("value", ["1.0e+300", "1.0e-100"])
@@ -786,6 +836,11 @@ def test_compile_path_reports_malformed_utf8(tmp_path: Path) -> None:
 
     with pytest.raises(CompilationError, match="well-formed UTF-8"):
         YamlParserConfigCompiler().compile_path(config_path)
+
+
+def test_compile_path_wraps_platform_path_value_errors() -> None:
+    with pytest.raises(CompilationError, match="Unable to read parser config"):
+        YamlParserConfigCompiler().compile_path("invalid\0path.yaml")
 
 
 def test_decimal_defaults_are_canonical_at_the_declared_scale() -> None:

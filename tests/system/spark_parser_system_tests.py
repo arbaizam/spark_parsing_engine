@@ -424,6 +424,10 @@ with _spark_conf_scope(STRICT_SQL_SETTINGS):
 
 assert profile_rows["good-1"]["BusinessLabel"] == "FHLB 12-Month Advance"
 assert profile_rows["good-1"]["RateIndex"] == "SOFR Term 12-Month"
+assert profile_audit_rows["good-1"]["BusinessLabel"].changed is True
+assert profile_audit_rows["good-1"]["BusinessLabel"].actions_applied == []
+assert profile_audit_rows["good-1"]["RateIndex"].changed is True
+assert profile_audit_rows["good-1"]["RateIndex"].actions_applied == []
 assert profile_rows["handled-errors-1"]["BusinessLabel"] == "UST RCF CMT"
 assert profile_rows["handled-errors-1"]["RateIndex"] == "NAP"
 assert profile_audit_rows["handled-errors-1"]["RateIndex"].actions_applied == [

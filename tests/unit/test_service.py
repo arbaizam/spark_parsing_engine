@@ -93,6 +93,8 @@ def test_parser_metadata_is_discoverable_and_detached() -> None:
     )
     assert "preserve" in string_error_modes
     assert "preserve" not in integer_error_modes
+    for floating_parser in (parser.float, parser.double):
+        assert any("underflow" in gotcha for gotcha in floating_parser.describe()["gotchas"])
     description["arguments"].clear()
     assert parser.string.describe()["arguments"]
     assert parser.config.describe()["column_arguments"][1]["name"] == "target_column_name"
@@ -150,17 +152,20 @@ def test_config_review_contains_validation_resolved_options_and_markdown(tmp_pat
     assert report.is_valid is True
     assert report.errors == ()
     assert report.summary["column_count"] == 4
+    # Both fields remain available in the published report shape. Scalar-only configs have one
+    # parser per column, so their counts are necessarily identical.
+    assert report.summary["parser_node_count"] == report.summary["column_count"]
     assert len(report.summary["content_hash"]) == 64
     assert report.column_reviews[0]["resolved_parser_options"]["collapse_whitespace"] is True
     assert report.column_reviews[0]["resolved_parser_options"]["default_on_error"] is None
     assert report.validation_checks[-1]["status"] == "N/A"
-    assert "No Boolean parser nodes" in report.validation_checks[-1]["detail"]
+    assert "No Boolean columns" in report.validation_checks[-1]["detail"]
     assert report.resolved_config is not None
     markdown = report.to_markdown()
     assert "Validation status:** PASS" in markdown
     assert "## Resolved parser options" in markdown
     assert "## Resolved globals" in markdown
-    assert "## Resolved schema and parser tree" in markdown
+    assert "## Resolved column bindings" in markdown
     assert "## Canonical resolved configuration" in markdown
     assert "ColumnName1" in markdown
     recompiled = service.compile_mapping(report.resolved_config)
@@ -282,7 +287,7 @@ columns:
     )
     boolean_check = boolean_report.validation_checks[-1]
     assert boolean_check["status"] == "PASS"
-    assert "1 Boolean parser node" in boolean_check["detail"]
+    assert "1 Boolean column" in boolean_check["detail"]
 
     unicode_report = parser.review_yaml(
         """

@@ -82,6 +82,10 @@ _JSON_NUMBER_PATTERN = r"\A-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?\z"
 # decimal point. Requiring at least one digit prevents punctuation-only values such as ``.`` and
 # ``-.e2`` from being rewritten into a valid zero.
 _BRONZE_NUMBER_PATTERN = r"\A[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?\z"
+# A decoded floating-point zero is valid only when the source mantissa was also zero. Exponent
+# digits are deliberately unrestricted: ``0e-10000`` is true zero, while ``1e-10000`` silently
+# underflows in Spark's JSON decoder and must follow the configured parse-error policy.
+_BRONZE_ZERO_PATTERN = r"\A[+-]?(?:0+(?:\.0*)?|\.0+)(?:[eE][+-]?\d+)?\z"
 # Match the same padded standard alphabet accepted by ``base64.b64decode(validate=True)`` during
 # compilation. Spark's native decoder deliberately ignores whitespace and missing padding, so it
 # needs this lexical guard to keep runtime values on the same contract.
@@ -995,8 +999,11 @@ class SparkDataFrameParser:
                     parsed.cast("byte"),
                 ).otherwise(F.lit(None).cast("byte"))
             if parser_type in {ParserType.FLOAT, ParserType.DOUBLE}:
+                nonzero_underflow = (
+                    parsed == F.lit(0).cast(data_type.canonical)
+                ) & ~normalized.rlike(_BRONZE_ZERO_PATTERN)
                 return F.when(
-                    F.isnan(parsed) | (F.abs(parsed) == F.lit(float("inf"))),
+                    F.isnan(parsed) | (F.abs(parsed) == F.lit(float("inf"))) | nonzero_underflow,
                     F.lit(None).cast(data_type.canonical),
                 ).otherwise(parsed)
             return parsed
@@ -1242,8 +1249,9 @@ class SparkDataFrameParser:
         else:
             zip_plus4 = F.lit(False)
             zip_padded = F.lit(False)
-        # Action order is intentional. Null placeholders are filtered in Spark so each
-        # row receives only the transformations that actually occurred.
+        # Action order is intentional. Null placeholders are filtered in Spark so each row receives
+        # only material interventions. Routine string representation changes are reflected by the
+        # ``changed`` comparison below without expanding the action vocabulary.
         actions = F.filter(
             F.array(
                 F.when(source_missing, F.lit("source_column_missing")),
@@ -1259,6 +1267,9 @@ class SparkDataFrameParser:
             ),
             lambda item: item.isNotNull(),
         )
+        string_value_changed = (
+            ~source.eqNullSafe(parsed) if options.parser_type is ParserType.STRING else F.lit(False)
+        )
         changed = F.coalesce(
             (
                 source_missing
@@ -1271,6 +1282,7 @@ class SparkDataFrameParser:
                 | default_on_null_applied
                 | zip_padded
                 | zip_plus4
+                | string_value_changed
             ),
             F.lit(False),
         )

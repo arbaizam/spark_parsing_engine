@@ -71,8 +71,8 @@ def _markdown_text(value: Any) -> str:
     return _visible_text(rendered).translate(_MARKDOWN_PUNCTUATION_ENTITIES)
 
 
-def _schema_name(value: str) -> str:
-    """Quote an authored schema name without allowing it to add tree lines."""
+def _quoted_schema_name(value: str) -> str:
+    """Quote an authored schema name for safe display in one binding line."""
     return _visible_text(json.dumps(value, ensure_ascii=False))
 
 
@@ -91,11 +91,12 @@ def _fenced_code(content: str, language: str) -> str:
     return f"{fence}{language}\n{content}\n{fence}"
 
 
-def _schema_tree(column: ColumnParser) -> str:
+def _schema_binding(column: ColumnParser) -> str:
     """Render one column's source-to-target parser binding as plain text."""
     return (
-        f"{_schema_name(column.target_column_name)}: {column.expected_data_type} "
-        f"[{column.parser.parser_type.value}] <- {_schema_name(column.source_column_name)}"
+        f"{_quoted_schema_name(column.target_column_name)}: {column.expected_data_type} "
+        f"[{column.parser.parser_type.value}] <- "
+        f"{_quoted_schema_name(column.source_column_name)}"
     )
 
 
@@ -152,8 +153,8 @@ class ConfigReviewReport:
         """Render a standalone human-readable Markdown review document.
 
         Invalid reports stop after errors/warnings because there is no trustworthy resolved
-        configuration to describe. Valid reports include summaries, evidence-based checks, parser
-        trees, effective options, behavioral guidance, and copy-ready canonical YAML.
+        configuration to describe. Valid reports include summaries, evidence-based checks, column
+        bindings, effective options, behavioral guidance, and copy-ready canonical YAML.
         """
         status = "PASS" if self.is_valid else "FAIL"
         lines = [
@@ -225,7 +226,7 @@ class ConfigReviewReport:
                     for column in self.column_reviews
                 ),
                 "",
-                "## Resolved schema and parser tree",
+                "## Resolved column bindings",
                 "",
                 *(
                     f"### {_markdown_text(column['target_column_name'])}\n\n"
@@ -490,22 +491,24 @@ class SparkParserService:
                     "on_parse_error": column.parser.on_parse_error.value,
                     "audit": column.parser.audit,
                     "resolved_parser_options": parser_options,
-                    "schema_tree": _schema_tree(column),
+                    # Retain the published report key even though scalar columns now have one
+                    # source-to-target binding rather than a recursive parser tree.
+                    "schema_tree": _schema_binding(column),
                     "key_behaviors": description["key_behaviors"],
                     "gotchas": description["gotchas"],
                 }
             )
 
-        all_options = [column.parser for column in config.columns]
+        column_parsers = [column.parser for column in config.columns]
         if config.globals.null_markers and not any(
-            options.replace_null_markers for options in all_options
+            options.replace_null_markers for options in column_parsers
         ):
             report_warnings.append(
-                "Global null_markers are configured, but no parser node enables "
+                "Global null_markers are configured, but no column parser enables "
                 "replace_null_markers; the configured markers are inert."
             )
         boolean_columns = [
-            options for options in all_options if options.parser_type is ParserType.BOOLEAN
+            options for options in column_parsers if options.parser_type is ParserType.BOOLEAN
         ]
         spark_overlap_columns = [
             options
@@ -516,9 +519,9 @@ class SparkParserService:
                 options.boolean_case_sensitive,
             )
         ]
-        nonnullable_count = sum(not options.is_nullable for options in all_options)
+        nonnullable_count = sum(not options.is_nullable for options in column_parsers)
         error_default_count = sum(
-            options.on_parse_error.value == "default" for options in all_options
+            options.on_parse_error.value == "default" for options in column_parsers
         )
         type_pairs = sorted(
             {
@@ -555,8 +558,8 @@ class SparkParserService:
                 "status": "PASS",
                 "detail": (
                     "Resolved every optional value; "
-                    f"{nonnullable_count} non-nullable parser node(s) have typed null defaults and "
-                    f"{error_default_count} parser node(s) use typed parse-error defaults."
+                    f"{nonnullable_count} non-nullable column(s) have typed null defaults and "
+                    f"{error_default_count} column(s) use typed parse-error defaults."
                 ),
             },
             {
@@ -566,14 +569,14 @@ class SparkParserService:
                 ),
                 "detail": (
                     f"Validated non-empty effective token sets and exact/ASCII overlap for "
-                    f"{len(boolean_columns)} Boolean parser node(s); Spark will validate "
-                    f"non-ASCII case-insensitive overlap for {len(spark_overlap_columns)} node(s) "
+                    f"{len(boolean_columns)} Boolean column(s); Spark will validate "
+                    f"non-ASCII case-insensitive overlap for {len(spark_overlap_columns)} column(s) "
                     "with its runtime Unicode tables."
                     if spark_overlap_columns
                     else f"Validated non-empty, non-overlapping effective token sets for "
-                    f"{len(boolean_columns)} Boolean parser node(s)."
+                    f"{len(boolean_columns)} Boolean column(s)."
                     if boolean_columns
-                    else "No Boolean parser nodes are configured."
+                    else "No Boolean columns are configured."
                 ),
             },
         )
@@ -584,7 +587,9 @@ class SparkParserService:
             "content_hash": self._serializer.content_hash(config),
             "minimum_spark_version": "3.5",
             "column_count": len(config.columns),
-            "parser_node_count": len(all_options),
+            # Retain the published report field. In the scalar-only design this always equals the
+            # column count because each column has exactly one parser.
+            "parser_node_count": len(column_parsers),
             "audited_column_count": audited_count,
             "repeated_source_columns": repeated_sources,
             "description": config.description,
