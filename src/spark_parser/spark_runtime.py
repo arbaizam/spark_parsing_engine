@@ -127,6 +127,15 @@ class _ColumnRuntimePlan:
     final_name: str
 
 
+@dataclass(frozen=True)
+class _KeyBinding:
+    """Bind one requested input key to its public audit projection."""
+
+    input_name: str
+    output_name: str
+    target_name: str | None
+
+
 def _is_well_formed_unicode(value: str) -> bool:
     """Return whether a public name can cross Py4J's UTF-8 boundary safely."""
     try:
@@ -335,7 +344,7 @@ class SparkDataFrameParser:
             raise ValueError("column_prefix must be a non-empty string.")
         if not _is_well_formed_unicode(column_prefix):
             raise ValueError("column_prefix must contain well-formed Unicode.")
-        normalized_keys, schema_warnings, missing_sources = self._validate_schema(
+        key_bindings, schema_warnings, missing_sources = self._validate_schema(
             df,
             config,
             key_columns,
@@ -403,6 +412,18 @@ class SparkDataFrameParser:
             {plan.final_name: self._final_value(plan) for plan in plans},
             config,
         )
+        plans_by_target = {plan.config.target_column_name: plan for plan in plans}
+        result_key_columns = tuple(
+            (
+                binding.output_name,
+                (
+                    plans_by_target[binding.target_name].final_name
+                    if binding.target_name is not None
+                    else binding.input_name
+                ),
+            )
+            for binding in key_bindings
+        )
         parsed_columns = [(plan.config.target_column_name, plan.final_name) for plan in plans]
         audit_structs = [self._audit_for_plan(plan) for plan in plans if plan.config.parser.audit]
 
@@ -427,10 +448,14 @@ class SparkDataFrameParser:
             },
             config,
         )
-        # Drop bronze and temporary staging columns from the shared plan. Row keys are retained only
-        # for results_df; parsed_df later selects the target internal names and restores aliases.
+        # Drop bronze and temporary staging columns from the shared plan. Configured row keys use
+        # their parsed target values and names so results_df can join directly to parsed_df;
+        # unconfigured and source-fan-out keys remain pass-through input fields.
         working = working.select(
-            *[_column(name) for name in normalized_keys],
+            *[
+                _column(internal_name).alias(output_name)
+                for output_name, internal_name in result_key_columns
+            ],
             *[_column(plan.final_name) for plan in plans],
             _column(parse_results_name),
             _column(config_name),
@@ -439,7 +464,7 @@ class SparkDataFrameParser:
         return DataFrameParsing(
             working,
             parsed_columns=parsed_columns,
-            key_columns=normalized_keys,
+            key_columns=tuple(output_name for output_name, _ in result_key_columns),
             result_columns=(parse_results_name, config_name, engine_version_name),
             warnings=schema_warnings,
         )
@@ -516,12 +541,14 @@ class SparkDataFrameParser:
         key_columns: Sequence[str],
         on_missing_source: str,
         column_prefix: str,
-    ) -> tuple[tuple[str, ...], tuple[str, ...], frozenset[str]]:
-        """Validate the bronze schema and return normalized result keys plus recoverable warnings.
+    ) -> tuple[tuple[_KeyBinding, ...], tuple[str, ...], frozenset[str]]:
+        """Validate the bronze schema and bind input row keys to public audit keys.
 
         Schema inspection is metadata-only and does not trigger a Spark action. Missing configured
         sources are recoverable only through an explicit warn policy; ambiguous or non-string
-        sources are not recoverable and fail immediately.
+        sources are not recoverable and fail immediately. A key that is also a uniquely configured
+        source is projected through that column's parsed target. Unconfigured keys and keys whose
+        source intentionally fans out to multiple targets pass through unchanged.
         """
         if not isinstance(on_missing_source, str):
             raise TypeError("on_missing_source must be 'fail' or 'warn'.")
@@ -617,7 +644,7 @@ class SparkDataFrameParser:
         )
         if duplicate_keys:
             raise SchemaValidationError(f"key_columns contains duplicates: {duplicate_keys}.")
-        _, ambiguous_keys, missing_keys = _resolve_input_fields(
+        resolved_keys, ambiguous_keys, missing_keys = _resolve_input_fields(
             df,
             normalized_keys,
             case_sensitive=case_sensitive,
@@ -626,17 +653,73 @@ class SparkDataFrameParser:
             raise SchemaValidationError(f"key_columns are missing: {missing_keys}.")
         if ambiguous_keys:
             raise SchemaValidationError(f"key_columns are ambiguous: {ambiguous_keys}.")
-        result_key_conflicts = _resolver_duplicates(
+
+        key_bindings = self._bind_result_keys(
             df,
-            (*normalized_keys, *output_names),
+            config,
+            normalized_keys,
+            resolved_sources,
+            resolved_keys,
+            output_names,
             case_sensitive=case_sensitive,
         )
-        result_key_conflicts = sorted(set(normalized_keys) & set(result_key_conflicts))
+        return key_bindings, tuple(schema_warnings), frozenset(missing)
+
+    @staticmethod
+    def _bind_result_keys(
+        df: DataFrame,
+        config: ParserConfig,
+        input_names: Sequence[str],
+        resolved_sources: Mapping[str, T.StructField],
+        resolved_keys: Mapping[str, T.StructField],
+        result_columns: Sequence[str],
+        *,
+        case_sensitive: bool,
+    ) -> tuple[_KeyBinding, ...]:
+        """Map uniquely configured input keys and validate the final results namespace."""
+        targets_by_input_name: dict[str, list[str]] = {}
+        for column in config.columns:
+            resolved_source = resolved_sources.get(column.source_column_name)
+            if resolved_source is not None:
+                targets_by_input_name.setdefault(resolved_source.name, []).append(
+                    column.target_column_name
+                )
+        key_bindings: list[_KeyBinding] = []
+        for input_name in input_names:
+            target_names = targets_by_input_name.get(resolved_keys[input_name].name, [])
+            target_name = target_names[0] if len(target_names) == 1 else None
+            key_bindings.append(
+                _KeyBinding(
+                    input_name=input_name,
+                    output_name=target_name or input_name,
+                    target_name=target_name,
+                )
+            )
+
+        result_key_names = tuple(binding.output_name for binding in key_bindings)
+        duplicate_result_keys = _resolver_duplicates(
+            df,
+            result_key_names,
+            case_sensitive=case_sensitive,
+        )
+        if duplicate_result_keys:
+            raise SchemaValidationError(
+                "Mapped key columns collide under Spark's active identifier resolver: "
+                f"{duplicate_result_keys}."
+            )
+        all_result_conflicts = _resolver_duplicates(
+            df,
+            (*result_key_names, *result_columns),
+            case_sensitive=case_sensitive,
+        )
+        result_key_conflicts = sorted(
+            name for name in result_key_names if name in all_result_conflicts
+        )
         if result_key_conflicts:
             raise SchemaValidationError(
                 f"key_columns conflict with parser result columns: {result_key_conflicts}."
             )
-        return normalized_keys, tuple(schema_warnings), frozenset(missing)
+        return tuple(key_bindings)
 
     @classmethod
     def _validate_custom_datetime_policy(cls, df: DataFrame, config: ParserConfig) -> None:

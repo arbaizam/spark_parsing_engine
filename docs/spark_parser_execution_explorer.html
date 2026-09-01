@@ -1521,10 +1521,10 @@ html&gt;body{padding:0}&lt;/style&gt;
           phase: &quot;Spark · shared logical plan&quot;,
           timing: &quot;Lazy&quot;,
           title: &quot;Expose target and audit projections from one shared plan&quot;,
-          contract: &quot;parsed_df restores configured target names in authored order. results_df contains explicit row keys, audit structs, resolved config identity, and engine version. Audit causes are reconstructed separately from the final value.&quot;,
+          contract: &quot;parsed_df restores configured target names in authored order. results_df maps uniquely configured row keys to their parsed targets, then includes audit structs, resolved config identity, and engine version. Audit causes are reconstructed separately from the final value.&quot;,
           code: &quot;DataFrameParsing(\n  parsed_df  = configured targets,\n  results_df = keys + audit + config + engine\n)&quot;,
           file: &quot;src/spark_parser/spark_runtime.py&quot;,
-          lines: &quot;406–445&quot;,
+          lines: &quot;415–470&quot;,
           linkLabel: &quot;spark_runtime.py:406–445 · shared output plan&quot;
         },
         {

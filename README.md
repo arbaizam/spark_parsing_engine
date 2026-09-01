@@ -320,7 +320,7 @@ rejects offset-bearing inputs rather than silently discarding timezone meaning.
 | `lower` | Lowercase. | `"ACTIVE"` → `"active"` |
 | `upper` | Uppercase. | `"active"` → `"ACTIVE"` |
 | `title` | Spark title casing with normalized spaces. | `"loan STATUS"` → `"Loan Status"` |
-| `title_business_v1` | Title casing plus exact business exceptions and bounded numeric-hyphen casing. | `"fhlb 12-month advance"` → `"FHLB 12-Month Advance"` |
+| `title_business_v1` | Title casing plus exact business exceptions and business hyphen rules. | `"fhlb semi-annual 2 yrs"` → `"FHLB Semi-Annual 2-Years"` |
 | `pascal` | Init-capitalize and remove spaces for identifiers. | `"loan status"` → `"LoanStatus"` |
 | `address_us_v1` | Deterministic US address display normalization. | `"123 n main st apt 4b"` → `"123 N Main St Apt 4B"` |
 | `county` | Smart-case and ensure one trailing `County`. | `"mcclain COUNTY"` → `"McClain County"` |
@@ -331,17 +331,26 @@ rejects offset-bearing inputs rather than silently discarding timezone meaning.
 #### Business title profile
 
 `title` remains the strict general formatter. `title_business_v1` starts with the same title
-pipeline and adds only two versioned rules:
+pipeline and adds five versioned rules:
 
-- restore the complete, case-insensitive tokens `FHLB`, `P&I`, `UST`, `RCF`, and `CMT`; and
-- capitalize the first lowercase letter after a hyphen whose preceding component is a bounded
-  ASCII integer (`12-month` → `12-Month`, `1-year` → `1-Year`).
+- restore the complete, case-insensitive tokens `FHLB`, `P&I`, `UST`, `RCF`, and `CMT`;
+- expand the complete, case-insensitive token `Yrs` to `Years`;
+- canonicalize the complete frequency aliases `semiannual`, `semiannually`, `semi-annually`,
+  `biannual`, `biannually`, `bi-annually`, `biweekly`, and `bimonthly` to `Semi-Annual`,
+  `Bi-Annual`, `Bi-Weekly`, or `Bi-Monthly` as appropriate;
+- capitalize the first lowercase letter in every non-empty component after an ASCII hyphen
+  (`semi-annual` → `Semi-Annual`, `bi-weekly` → `Bi-Weekly`, and `12-month` → `12-Month`);
+- replace one or more ASCII spaces between a bounded ASCII integer and the complete plural word
+  `Years` or `Months` with an ASCII hyphen (`2 years` → `2-Years`, `18 months` → `18-Months`).
 
 Letters, numbers, and underscores count as part of an identifier for exception matching. Thus
-`cmt-backed` becomes `CMT-backed`, while `RCF6M` and `fhlb_code` receive only ordinary title casing.
-The numeric rule does not rewrite `abc12-month`, `12.5-month`, `1,200-month`, non-ASCII dashes, or
-ordinary compounds such as `state-of-the-art`. This profile does not infer acronyms, repair
-spelling, or validate business terminology.
+`cmt-backed` becomes `CMT-Backed`, while `RCF6M` and `fhlb_code` receive only ordinary title casing.
+The hyphen rule applies to ordinary compounds (`state-of-the-art` → `State-Of-The-Art`) but does
+not treat non-ASCII dashes or a hyphen followed by whitespace as component boundaries. This profile
+does not hyphenate singular `Year`/`Month`, embedded integers, decimals, or comma-formatted numbers.
+Aliases and acronym exceptions require complete tokens, so identifier text such as
+`biannually_code` or `yrs_code` remains ordinary title casing. The profile does not otherwise infer
+acronyms, repair spelling, or validate business terminology.
 
 #### Interest-rate index profile
 
@@ -440,7 +449,8 @@ When binding a DataFrame, Spark Parser also checks that:
 - missing sources fail unless `on_missing_source="warn"` explicitly allows substitution;
 - generated result-column names do not collide with existing input fields, including present
   sources and row keys; and
-- row keys are existing, unique, unambiguous names.
+- row keys are existing, unique, unambiguous input names whose projected result names do not
+  collide.
 
 `on_parse_error: fail` is lazy: it raises only when Spark evaluates the failing target expression.
 An optimizer-pruned `count()` may not materialize every target. A full target write or explicit
@@ -453,12 +463,16 @@ projection does.
 | Property/method | Behavior |
 | --- | --- |
 | `parsed_df` | Target scalar columns, in configuration order. |
-| `results_df` | Explicit row keys followed by audit and configuration identity columns. |
+| `results_df` | Target-mapped row keys followed by audit and configuration identity columns. |
 | `warnings` | Recoverable schema warnings such as an explicitly allowed missing source. |
 | `persist()` / `unpersist()` | Optional shared-plan caching on runtimes that support it. |
 
-Databricks serverless may reject DataFrame cache APIs; omit persistence there. Row keys belong to
-`results_df` and are not copied into `parsed_df` unless configured as target columns too.
+Databricks serverless may reject DataFrame cache APIs; omit persistence there. A row key that is a
+configured source appears in `results_df` under its target name with its parsed target value and
+type, allowing direct joins to `parsed_df`. Unconfigured row keys pass through unchanged. A source
+that feeds multiple targets also remains a pass-through key because it has no unique target mapping.
+Row keys belong to `results_df` and are not copied into `parsed_df` unless configured as target
+columns too. Materializing a mapped key applies that target's null, default, and fail policies.
 
 The result columns are:
 

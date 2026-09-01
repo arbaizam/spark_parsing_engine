@@ -415,6 +415,8 @@ class SparkParserService:
 
         Importing the runtime inside this method preserves the package's Spark-free compiler and
         metadata use cases. Passing an already compiled config avoids redundant authoring work.
+        ``key_columns`` names input fields; uniquely configured keys are returned by the audit
+        projection under their parsed target columns.
         """
         resolved = config if isinstance(config, ParserConfig) else self.compile_yaml(config)
         from spark_parser.spark_runtime import SparkDataFrameParser

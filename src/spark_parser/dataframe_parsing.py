@@ -2,7 +2,8 @@
 
 The runtime builds expensive normalization/parsing expressions once. This wrapper exposes a clean
 target projection and a separate audit projection without duplicating the expression-building
-logic or forcing an action. Callers choose when Spark materializes either view.
+logic or forcing an action. Configured audit keys share their final parsed target values with the
+target projection. Callers choose when Spark materializes either view.
 """
 
 from __future__ import annotations
@@ -43,7 +44,7 @@ class DataFrameParsing:
 
     @property
     def key_columns(self) -> tuple[str, ...]:
-        """Return row-identity fields used by :attr:`results_df`."""
+        """Return public row-identity fields used by :attr:`results_df`."""
         return self._key_columns
 
     @property
@@ -72,7 +73,7 @@ class DataFrameParsing:
 
     @property
     def results_df(self) -> DataFrame:
-        """Return row keys followed by parser audit and configuration identity metadata."""
+        """Return target-mapped row keys followed by audit and configuration identity metadata."""
         return self._evaluated.select(
             *[_column(name) for name in (*self._key_columns, *self._result_columns)]
         )

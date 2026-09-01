@@ -283,6 +283,78 @@ def test_public_parser_facade_builds_shared_lazy_projections(spark: SparkSession
     assert parsing.results_df.first().row_id == 0
 
 
+def test_results_df_maps_configured_keys_to_parsed_target_columns(
+    spark: SparkSession,
+) -> None:
+    """Expose configured keys with target names/values while preserving pass-through keys."""
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: mapped_result_keys
+parser_config_name: Mapped Result Keys
+version: "1"
+columns:
+  - source_column_name: record_id
+    target_column_name: RecordId
+    expected_data_type: integer
+    parser: integer
+  - source_column_name: value
+    target_column_name: Value
+    expected_data_type: string
+    parser: {type: string, audit: true}
+"""
+    )
+    parsing = SparkDataFrameParser().parse_dataframe(
+        spark.sql("SELECT '007' AS record_id, 'load-1' AS load_id, 'ok' AS value"),
+        config,
+        key_columns=["record_id", "load_id"],
+    )
+
+    result = parsing.results_df.first()
+    assert parsing.key_columns == ("RecordId", "load_id")
+    assert parsing.results_df.columns == [
+        "RecordId",
+        "load_id",
+        "spark_parser_parse_results",
+        "spark_parser_config",
+        "spark_parser_engine_version",
+    ]
+    assert result.RecordId == parsing.parsed_df.first().RecordId == 7
+    assert result.load_id == "load-1"
+    assert "record_id" not in result.asDict()
+
+
+def test_results_df_preserves_a_key_with_multiple_target_mappings(
+    spark: SparkSession,
+) -> None:
+    """Keep a fan-out source key unchanged because it has no unique target mapping."""
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: ambiguous_result_key
+parser_config_name: Ambiguous Result Key
+version: "1"
+columns:
+  - source_column_name: record_id
+    target_column_name: StringRecordId
+    expected_data_type: string
+    parser: string
+  - source_column_name: record_id
+    target_column_name: NumericRecordId
+    expected_data_type: integer
+    parser: integer
+"""
+    )
+
+    parsing = SparkDataFrameParser().parse_dataframe(
+        spark.sql("SELECT '007' AS record_id"),
+        config,
+        key_columns=["record_id"],
+    )
+
+    assert parsing.key_columns == ("record_id",)
+    assert parsing.results_df.first().record_id == "007"
+    assert parsing.parsed_df.first().NumericRecordId == 7
+
+
 def test_dataframe_parsing_persistence_delegates_without_requiring_cache_support() -> None:
     """Verify the adapter contract without invoking cache APIs forbidden by serverless Spark."""
     evaluated = Mock()
@@ -736,40 +808,68 @@ columns:
     ]
 
 
-def test_title_business_v1_adds_only_bounded_business_title_rules(
+def test_title_business_v1_capitalizes_hyphens_and_hyphenates_plural_time_units(
     spark: SparkSession,
 ) -> None:
-    """Retain strict title behavior separately from frozen acronyms and numeric hyphens."""
+    """Apply the versioned business-title rules without changing strict title behavior."""
     cases = [
         ("fhlb   advance", "Fhlb   Advance", "FHLB   Advance"),
         ("p&i payment", "P&i Payment", "P&I Payment"),
         ("ust rcf cmt", "Ust Rcf Cmt", "UST RCF CMT"),
+        (
+            "semi-annual bi-annual bi-weekly bi-monthly",
+            "Semi-annual Bi-annual Bi-weekly Bi-monthly",
+            "Semi-Annual Bi-Annual Bi-Weekly Bi-Monthly",
+        ),
+        (
+            "semiannual semiannually semi-annually biannual biannually bi-annually",
+            "Semiannual Semiannually Semi-annually Biannual Biannually Bi-annually",
+            "Semi-Annual Semi-Annual Semi-Annual Bi-Annual Bi-Annual Bi-Annual",
+        ),
+        ("biweekly bimonthly", "Biweekly Bimonthly", "Bi-Weekly Bi-Monthly"),
+        (
+            "biannually_code antibiannually yrs_code",
+            "Biannually_code Antibiannually Yrs_code",
+            "Biannually_code Antibiannually Yrs_code",
+        ),
+        ("2 years 18 months", "2 Years 18 Months", "2-Years 18-Months"),
+        ("yrs 2 yrs", "Yrs 2 Yrs", "Years 2-Years"),
+        ("1 year 1 month", "1 Year 1 Month", "1 Year 1 Month"),
+        (
+            "abc12 years 12.5 years 1,200 months",
+            "Abc12 Years 12.5 Years 1,200 Months",
+            "Abc12 Years 12.5 Years 1,200 Months",
+        ),
         ("12-month rate", "12-month Rate", "12-Month Rate"),
         ("term 30-day", "Term 30-day", "Term 30-Day"),
         ("2-factor authentication", "2-factor Authentication", "2-Factor Authentication"),
         ("3-month/6-month rates", "3-month/6-month Rates", "3-Month/6-Month Rates"),
         ("12-month-1-year", "12-month-1-year", "12-Month-1-Year"),
-        ("state-of-the-art", "State-of-the-art", "State-of-the-art"),
+        ("state-of-the-art", "State-of-the-art", "State-Of-The-Art"),
         (
             "12- month 12--month 12/month",
             "12- Month 12--month 12/month",
-            "12- Month 12--month 12/month",
+            "12- Month 12--Month 12/month",
         ),
-        ("12–month section_12-month", "12–month Section_12-month", "12–month Section_12-month"),
+        ("12–month section_12-month", "12–month Section_12-month", "12–month Section_12-Month"),
         ("trust account", "Trust Account", "Trust Account"),
         ("rcf6m cmt2 p&ix fhlb_code", "Rcf6m Cmt2 P&ix Fhlb_code", "Rcf6m Cmt2 P&ix Fhlb_code"),
         (
             "abc12-month 12.5-month 1,200-month",
             "Abc12-month 12.5-month 1,200-month",
-            "Abc12-month 12.5-month 1,200-month",
+            "Abc12-Month 12.5-Month 1,200-Month",
         ),
-        ("cmt-backed fhlb's", "Cmt-backed Fhlb's", "CMT-backed FHLB's"),
+        ("cmt-backed fhlb's", "Cmt-backed Fhlb's", "CMT-Backed FHLB's"),
         (
             "(fhlb), p&i; ust/rcf cmt.",
             "(fhlb), P&i; Ust/rcf Cmt.",
             "(FHLB), P&I; UST/RCF CMT.",
         ),
-        ("FHLB 12-Month RCF", "Fhlb 12-month Rcf", "FHLB 12-Month RCF"),
+        (
+            "FHLB Semi-Annual 12-Month 2-Years RCF",
+            "Fhlb Semi-annual 12-month 2-years Rcf",
+            "FHLB Semi-Annual 12-Month 2-Years RCF",
+        ),
         ("sofr libor usd", "Sofr Libor Usd", "Sofr Libor Usd"),
         (None, None, None),
     ]

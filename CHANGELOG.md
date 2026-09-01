@@ -15,6 +15,12 @@
   `on_parse_error`, matching compiler validation of floating-point defaults.
 - Mark audit `changed` when any string parser changes the source representation, including ZIP
   normalization, while retaining the existing material-action vocabulary.
+- Return configured audit row keys under their parsed target names, values, and types while keeping
+  unconfigured and source-fan-out keys as pass-through fields.
+- Extend `title_business_v1` to capitalize every non-empty component after an ASCII hyphen, including
+  periodic terms such as `Semi-Annual`, `Bi-Weekly`, and `Bi-Monthly`, and hyphenate bounded plural
+  integer time units such as `2-Years` and `18-Months`; canonicalize complete frequency aliases such
+  as `biannually` and `bi-annually` to `Bi-Annual`, and expand complete `Yrs` tokens to `Years`.
 - Accept case-insensitive quoted `null` and `none` as disabled string-format aliases and serialize
   both to canonical null.
 - Report platform path-value failures through the compiler's public `CompilationError` contract.

@@ -113,7 +113,8 @@ assert {column.parser.parser_type.value for column in reference_config.columns} 
 # MAGIC ## 2. Author a representative configuration
 # MAGIC
 # MAGIC The existing `title` formatter is unchanged. `title_business_v1` adds only the frozen
-# MAGIC `FHLB`, `P&I`, `UST`, `RCF`, and `CMT` tokens plus bounded numeric-hyphen capitalization.
+# MAGIC `FHLB`, `P&I`, `UST`, `RCF`, and `CMT` tokens, ASCII-hyphen component capitalization, and
+# MAGIC bounded integer `Years`/`Months` hyphenation, plus its closed `Yrs` and frequency aliases.
 # MAGIC `interest_rate_index_v1` is a closed, fail-closed catalog. Here an unknown rate is preserved
 # MAGIC explicitly rather than inferred.
 
@@ -250,7 +251,7 @@ encoded_value string
 bronze_rows = [
     (
         "good-1",
-        "fhlb 12-month advance",
+        "fhlb semi-annual 2 yrs 12-month advance",
         "SOFR Term - 12M",
         "123 n main st apt 4b",
         "mcclain COUNTY",
@@ -265,7 +266,7 @@ bronze_rows = [
     ),
     (
         "handled-1",
-        "ust rcf cmt",
+        "biannually ust rcf cmt",
         "NAP",
         "500 w oak rd",
         "cook",
@@ -293,7 +294,7 @@ target_rows = {
     for row in parsing.parsed_df.orderBy("RecordId").collect()
 }
 
-assert target_rows["good-1"]["BusinessLabel"] == "FHLB 12-Month Advance"
+assert target_rows["good-1"]["BusinessLabel"] == "FHLB Semi-Annual 2-Years 12-Month Advance"
 assert target_rows["good-1"]["RateIndex"] == "SOFR Term 12-Month"
 assert target_rows["good-1"]["StateCode"] == "IL"
 assert target_rows["good-1"]["PostalCode"] == "01234"
@@ -302,7 +303,7 @@ assert target_rows["good-1"]["Quantity"] == 7
 assert target_rows["good-1"]["IsActive"] is True
 assert target_rows["good-1"]["EncodedValue"] == b"Hello"
 
-assert target_rows["handled-1"]["BusinessLabel"] == "UST RCF CMT"
+assert target_rows["handled-1"]["BusinessLabel"] == "Bi-Annual UST RCF CMT"
 assert target_rows["handled-1"]["RateIndex"] == "NAP"
 assert target_rows["handled-1"]["StateCode"] == "Mul"
 assert target_rows["handled-1"]["PostalCode"] is None
@@ -323,7 +324,7 @@ display(parsing.parsed_df)
 # COMMAND ----------
 
 audit_rows = {
-    row.record_id: {result.target_column_name: result for result in row.guide_parser_parse_results}
+    row.RecordId: {result.target_column_name: result for result in row.guide_parser_parse_results}
     for row in parsing.results_df.collect()
 }
 

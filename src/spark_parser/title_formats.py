@@ -5,8 +5,8 @@ from __future__ import annotations
 from pyspark.sql import Column
 from pyspark.sql import functions as F
 
-# This is an intentionally closed vocabulary. Expanding it changes canonical output for existing
-# inputs, so additions belong in a new versioned business-title profile.
+# These closed vocabularies are part of the versioned output contract. Any addition changes
+# canonical output for existing inputs and requires explicit regression coverage and release notes.
 _TITLE_BUSINESS_V1_EXCEPTIONS = (
     ("fhlb", "FHLB"),
     ("p&i", "P&I"),
@@ -14,25 +14,43 @@ _TITLE_BUSINESS_V1_EXCEPTIONS = (
     ("rcf", "RCF"),
     ("cmt", "CMT"),
 )
+_TITLE_BUSINESS_V1_FREQUENCY_ALIASES = (
+    ("semiannual", "Semi-Annual"),
+    ("semiannually", "Semi-Annual"),
+    ("semi-annually", "Semi-Annual"),
+    ("biannual", "Bi-Annual"),
+    ("biannually", "Bi-Annual"),
+    ("bi-annually", "Bi-Annual"),
+    ("biweekly", "Bi-Weekly"),
+    ("bimonthly", "Bi-Monthly"),
+)
+_TITLE_BUSINESS_V1_PRE_HYPHEN_ALIASES = (("yrs", "Years"),)
 
 # Letters, numbers, and underscores keep an exception embedded in an identifier from being
 # mistaken for a standalone business term. Punctuation such as parentheses, slashes, apostrophes,
 # and hyphens remains a valid display-text boundary.
 _TITLE_TOKEN_CHARACTER_CLASS = r"[\p{L}\p{N}_]"
-_BOUNDED_INTEGER_COMPONENT_PATTERN = r"(?<![\p{L}\p{N}_.,])[0-9]+$"
+_INTEGER_TIME_UNIT_PATTERN = (
+    rf"(?i)(?<![\p{{L}}\p{{N}}_.,])([0-9]+) +(years|months)"
+    rf"(?!{_TITLE_TOKEN_CHARACTER_CLASS})"
+)
 
 
-def _capitalize_numeric_hyphen_suffixes(value: Column) -> Column:
-    """Capitalize a letter after a hyphen whose preceding component is an integer."""
+def _complete_token_pattern(value: str) -> str:
+    """Return a case-insensitive pattern for one complete business-title token."""
+    return (
+        rf"(?i)(?<!{_TITLE_TOKEN_CHARACTER_CLASS})"
+        rf"{value}(?!{_TITLE_TOKEN_CHARACTER_CLASS})"
+    )
+
+
+def _capitalize_hyphen_suffixes(value: Column) -> Column:
+    """Capitalize the first lowercase letter in every component after an ASCII hyphen."""
     parts = F.split(value, "-", -1)
-    # Spark array positions are one-based while transform indices are zero-based. Padding with an
-    # empty component lets every part inspect its predecessor without ever requesting index zero.
-    padded_parts = F.concat(F.array(F.lit("")), parts)
     formatted_parts = F.transform(
         parts,
         lambda part, index: F.when(
-            F.element_at(padded_parts, index + F.lit(1)).rlike(_BOUNDED_INTEGER_COMPONENT_PATTERN)
-            & part.rlike(r"^\p{Ll}"),
+            (index > F.lit(0)) & part.rlike(r"^\p{Ll}"),
             F.concat(
                 F.upper(F.substring(part, 1, 1)),
                 F.substring(part, 2, 2_147_483_647),
@@ -45,12 +63,19 @@ def _capitalize_numeric_hyphen_suffixes(value: Column) -> Column:
 
 
 def format_title_business_v1(value: Column) -> Column:
-    """Apply ordinary title casing, bounded numeric hyphens, and frozen business exceptions."""
-    formatted = _capitalize_numeric_hyphen_suffixes(F.initcap(F.lower(value)))
-    for source, target in _TITLE_BUSINESS_V1_EXCEPTIONS:
-        pattern = (
-            rf"(?i)(?<!{_TITLE_TOKEN_CHARACTER_CLASS})"
-            rf"{source}(?!{_TITLE_TOKEN_CHARACTER_CLASS})"
-        )
-        formatted = F.regexp_replace(formatted, pattern, target)
+    """Apply title casing, business hyphen rules, and frozen complete-token replacements."""
+    formatted = F.initcap(F.lower(value))
+    for source, target in _TITLE_BUSINESS_V1_PRE_HYPHEN_ALIASES:
+        formatted = F.regexp_replace(formatted, _complete_token_pattern(source), target)
+    formatted = F.regexp_replace(
+        formatted,
+        _INTEGER_TIME_UNIT_PATTERN,
+        "$1-$2",
+    )
+    formatted = _capitalize_hyphen_suffixes(formatted)
+    for source, target in (
+        *_TITLE_BUSINESS_V1_FREQUENCY_ALIASES,
+        *_TITLE_BUSINESS_V1_EXCEPTIONS,
+    ):
+        formatted = F.regexp_replace(formatted, _complete_token_pattern(source), target)
     return formatted

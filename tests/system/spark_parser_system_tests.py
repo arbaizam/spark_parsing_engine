@@ -269,7 +269,7 @@ BRONZE_ROWS = [
         "good-1",
         "  Alice   Smith  ",
         "  ACTIVE   loan ",
-        "fhlb 12-month advance",
+        "fhlb semi-annual 2 yrs 12-month advance",
         "SOFR Term - 12M",
         "Illinois",
         "12.345",
@@ -281,7 +281,7 @@ BRONZE_ROWS = [
         "handled-errors-1",
         "n/a",
         "charged OFF",
-        "ust rcf cmt",
+        "biannually ust rcf cmt",
         "NAP",
         "Mul",
         "not-a-decimal",
@@ -390,7 +390,7 @@ assert scalar_schema == {
 good = scalar_rows["good-1"]
 assert good["CustomerName"] == "ALICE SMITH"
 assert good["LoanStatus"] == "Active Loan"
-assert good["BusinessLabel"] == "FHLB 12-Month Advance"
+assert good["BusinessLabel"] == "FHLB Semi-Annual 2-Years 12-Month Advance"
 assert good["RateIndex"] == "SOFR Term 12-Month"
 assert good["StateCode"] == "IL"
 assert good["Amount"] == Decimal("12.35")
@@ -403,7 +403,7 @@ _pass("ST-002", "Native scalar expressions retain their expected Databricks valu
 
 # COMMAND ----------
 
-_start("ST-003", "Apply bounded business-title and interest-rate display profiles")
+_start("ST-003", "Apply business-title and interest-rate display profiles")
 
 with _spark_conf_scope(STRICT_SQL_SETTINGS):
     profile_parsing = parser.parse_dataframe(
@@ -418,17 +418,19 @@ with _spark_conf_scope(STRICT_SQL_SETTINGS):
     )
     profile_audit_rows = _audit_by_key(
         profile_parsing.results_df,
-        "record_id",
+        "RecordId",
         "system_parser_parse_results",
     )
 
-assert profile_rows["good-1"]["BusinessLabel"] == "FHLB 12-Month Advance"
+assert profile_rows["good-1"]["BusinessLabel"] == (
+    "FHLB Semi-Annual 2-Years 12-Month Advance"
+)
 assert profile_rows["good-1"]["RateIndex"] == "SOFR Term 12-Month"
 assert profile_audit_rows["good-1"]["BusinessLabel"].changed is True
 assert profile_audit_rows["good-1"]["BusinessLabel"].actions_applied == []
 assert profile_audit_rows["good-1"]["RateIndex"].changed is True
 assert profile_audit_rows["good-1"]["RateIndex"].actions_applied == []
-assert profile_rows["handled-errors-1"]["BusinessLabel"] == "UST RCF CMT"
+assert profile_rows["handled-errors-1"]["BusinessLabel"] == "Bi-Annual UST RCF CMT"
 assert profile_rows["handled-errors-1"]["RateIndex"] == "NAP"
 assert profile_audit_rows["handled-errors-1"]["RateIndex"].actions_applied == [
     "parse_error_preserved"
@@ -436,7 +438,7 @@ assert profile_audit_rows["handled-errors-1"]["RateIndex"].actions_applied == [
 
 _pass(
     "ST-003",
-    "Business exceptions, tenor casing, approved indexes, and preserved unknowns are stable.",
+    "Business exceptions, hyphen rules, approved indexes, and preserved unknowns are stable.",
 )
 
 # COMMAND ----------
@@ -456,7 +458,7 @@ with _spark_conf_scope(STRICT_SQL_SETTINGS):
         .asDict(recursive=True)
     )
     handled_result = handled_parsing.results_df.where(
-        F.col("record_id") == "handled-errors-1"
+        F.col("RecordId") == "handled-errors-1"
     ).first()
 
 assert handled["CustomerName"] is None
@@ -518,7 +520,7 @@ with _spark_conf_scope(STRICT_SQL_SETTINGS):
         column_prefix="system_parser",
     )
     strict_target_rows = _rows_by_key(strict_mode_parsing.parsed_df, "RecordId")
-    strict_result_rows = _rows_by_key(strict_mode_parsing.results_df, "record_id")
+    strict_result_rows = _rows_by_key(strict_mode_parsing.results_df, "RecordId")
 
 with _spark_conf_scope(
     {
@@ -533,7 +535,7 @@ with _spark_conf_scope(
         column_prefix="system_parser",
     )
     permissive_target_rows = _rows_by_key(permissive_parsing.parsed_df, "RecordId")
-    permissive_result_rows = _rows_by_key(permissive_parsing.results_df, "record_id")
+    permissive_result_rows = _rows_by_key(permissive_parsing.results_df, "RecordId")
     assert permissive_target_rows == strict_target_rows
     assert permissive_result_rows == strict_result_rows
 
@@ -568,18 +570,19 @@ assert contract_parsing.parsed_df.columns == [
     "EventTimestamp",
     "EventTimestampNtz",
 ]
-assert contract_parsing.key_columns == ("record_id",)
+assert contract_parsing.key_columns == ("RecordId",)
 assert contract_parsing.result_columns == (
     "system_parser_parse_results",
     "system_parser_config",
     "system_parser_engine_version",
 )
 assert contract_parsing.results_df.columns == [
-    "record_id",
+    "RecordId",
     "system_parser_parse_results",
     "system_parser_config",
     "system_parser_engine_version",
 ]
+assert identity.RecordId in {row[0] for row in BRONZE_ROWS}
 
 assert identity.system_parser_config.id == config.parser_config_id
 assert identity.system_parser_config.version == config.version
