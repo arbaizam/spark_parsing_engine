@@ -13,7 +13,6 @@ from spark_parser import (
     SchemaValidationError,
     SparkDataFrameParser,
     YamlParserConfigCompiler,
-    parser,
 )
 
 if (
@@ -256,11 +255,17 @@ SELECT
 
 def test_public_parser_facade_builds_shared_lazy_projections(spark: SparkSession) -> None:
     """Exercise the documented high-level entry point without optional cache APIs."""
+    # Databricks keeps one Python process alive across notebook runs. The system-test and user-guide
+    # setup cells deliberately reload spark_parser from the source checkout, so a test module cached
+    # by an earlier ``pytest.main()`` call can otherwise retain a facade from the previous module
+    # generation. Bind the active public module for this facade-specific contract.
+    import spark_parser as active_spark_parser
+
     df = spark.range(1).select(
         F.col("id").alias("row_id"),
         F.lit("42").alias("value"),
     )
-    parsing = parser.parse_dataframe(
+    parsing = active_spark_parser.parser.parse_dataframe(
         df,
         {
             "parser_config_id": "public_facade",
@@ -278,7 +283,7 @@ def test_public_parser_facade_builds_shared_lazy_projections(spark: SparkSession
         key_columns=["row_id"],
     )
 
-    assert isinstance(parsing, DataFrameParsing)
+    assert isinstance(parsing, active_spark_parser.DataFrameParsing)
     assert parsing.parsed_df.first().Value == 42
     assert parsing.results_df.first().row_id == 0
 

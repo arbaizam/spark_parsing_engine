@@ -513,7 +513,7 @@ with _spark_conf_scope(STRICT_SQL_SETTINGS):
 
 assert handled["CustomerName"] is None
 assert handled["LoanStatus"] == "Charged Off"
-assert handled["BusinessLabel"] == "UST RCF CMT"
+assert handled["BusinessLabel"] == "Bi-Annual UST RCF CMT"
 assert handled["RateIndex"] == "NAP"
 assert handled["StateCode"] == "Mul"
 assert handled["Amount"] is None
