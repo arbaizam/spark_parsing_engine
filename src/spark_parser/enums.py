@@ -61,6 +61,7 @@ class StringFormat(str, Enum):
     STATE_US = "state_us"
     ZIP = "zip"
     INTEREST_RATE_INDEX_V1 = "interest_rate_index_v1"
+    PROPERTY_TYPE_V1 = "property_type_v1"
 
 
 class BinaryEncoding(str, Enum):

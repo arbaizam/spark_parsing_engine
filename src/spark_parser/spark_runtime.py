@@ -51,6 +51,7 @@ from spark_parser.models import (
     ParserOptions,
     needs_spark_boolean_overlap_check,
 )
+from spark_parser.property_type_formats import format_property_type_v1
 from spark_parser.serializer import ParserConfigSerializer
 from spark_parser.title_formats import format_title_business_v1
 from spark_parser.version import __version__
@@ -1162,6 +1163,8 @@ class SparkDataFrameParser:
             return format_title_business_v1(normalized)
         if string_format is StringFormat.INTEREST_RATE_INDEX_V1:
             return format_interest_rate_index_v1(normalized)
+        if string_format is StringFormat.PROPERTY_TYPE_V1:
+            return format_property_type_v1(normalized)
         if string_format is StringFormat.PASCAL:
             return F.regexp_replace(
                 F.initcap(F.lower(normalized)),

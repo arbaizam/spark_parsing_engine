@@ -403,7 +403,7 @@ _pass("ST-002", "Native scalar expressions retain their expected Databricks valu
 
 # COMMAND ----------
 
-_start("ST-003", "Apply business-title and interest-rate display profiles")
+_start("ST-003", "Apply versioned business display and property-type profiles")
 
 with _spark_conf_scope(STRICT_SQL_SETTINGS):
     profile_parsing = parser.parse_dataframe(
@@ -421,6 +421,44 @@ with _spark_conf_scope(STRICT_SQL_SETTINGS):
         "RecordId",
         "system_parser_parse_results",
     )
+    property_config = parser.compile_text(
+        """
+parser_config_id: system_property_types
+parser_config_name: System Property Types
+version: "1"
+columns:
+  - source_column_name: property_type
+    target_column_name: PropertyType
+    expected_data_type: string
+    parser:
+      type: string
+      format: property_type_v1
+      on_parse_error: preserve
+      audit: true
+"""
+    )
+    property_parsing = parser.parse_dataframe(
+        spark.createDataFrame(
+            [
+                ("condo", "Condominimum"),
+                ("four", "4 Family Home"),
+                ("lihtc", "Multifamily-LIHTC"),
+                ("mixed", "Warehouse-Mixed use"),
+                ("compound", "Mixed Use-MULTIFAMILY-Over 20"),
+                ("unknown", "Storage"),
+            ],
+            "row_id string, property_type string",
+        ),
+        property_config,
+        key_columns=["row_id"],
+        column_prefix="system_property",
+    )
+    property_rows = _rows_by_key(property_parsing.parsed_df, "PropertyType")
+    property_audit_rows = _audit_by_key(
+        property_parsing.results_df,
+        "row_id",
+        "system_property_parse_results",
+    )
 
 assert profile_rows["good-1"]["BusinessLabel"] == (
     "FHLB Semi-Annual 2-Years 12-Month Advance"
@@ -435,10 +473,22 @@ assert profile_rows["handled-errors-1"]["RateIndex"] == "NAP"
 assert profile_audit_rows["handled-errors-1"]["RateIndex"].actions_applied == [
     "parse_error_preserved"
 ]
+assert set(property_rows) == {
+    "Condominium",
+    "Four-Unit",
+    "Multifamily - LIHTC",
+    "Mixed Use - Warehouse",
+    "Mixed Use - Multifamily - Over 20",
+    "Storage",
+}
+assert property_audit_rows["unknown"]["PropertyType"].actions_applied == [
+    "parse_error_preserved"
+]
 
 _pass(
     "ST-003",
-    "Business exceptions, hyphen rules, approved indexes, and preserved unknowns are stable.",
+    "Business titles, approved indexes, property aliases, retained mixed-use descriptors, and "
+    "preserved unknowns are stable.",
 )
 
 # COMMAND ----------

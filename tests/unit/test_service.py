@@ -69,11 +69,17 @@ def test_parser_metadata_is_discoverable_and_detached() -> None:
         for argument in description["arguments"]
         if argument["name"] == "format"
     )
-    assert {"title", "title_business_v1", "interest_rate_index_v1", "state_us"} <= set(
-        format_values
-    )
+    assert {
+        "title",
+        "title_business_v1",
+        "interest_rate_index_v1",
+        "property_type_v1",
+        "state_us",
+    } <= set(format_values)
     assert any("interest_rate_index_v1" in behavior for behavior in description["key_behaviors"])
     assert any("interest_rate_index_v1" in gotcha for gotcha in description["gotchas"])
+    assert any("property_type_v1" in behavior for behavior in description["key_behaviors"])
+    assert any("property_type_v1" in gotcha for gotcha in description["gotchas"])
     assert any("title_business_v1" in behavior for behavior in description["key_behaviors"])
     assert any("title_business_v1" in gotcha for gotcha in description["gotchas"])
     assert "null" in next(

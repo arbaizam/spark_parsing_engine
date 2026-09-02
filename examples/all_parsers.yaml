@@ -46,7 +46,7 @@ columns:                                   # [required] Non-empty ordered list.
       on_parse_error: fail                 # [optional; default: fail; fail|null|default|preserve]
       # default_on_error: UNKNOWN          # [conditionally required for on_parse_error: default]
       audit: false                         # [optional; default: false]
-      # Allowed: null|lower|upper|title|title_business_v1|interest_rate_index_v1|pascal|address_us_v1|county|state_us|zip
+      # Allowed: null|lower|upper|title|title_business_v1|interest_rate_index_v1|property_type_v1|pascal|address_us_v1|county|state_us|zip
       format: null                         # [optional; default: null]
 
   # Byte parser (`tinyint` is an accepted alias).

@@ -16,7 +16,7 @@ flattened into top-level strings before parsing and may be reconstructed downstr
 | --- | --- | --- |
 | ST-001 | Repository configuration and compiler | The notebook proves it imported `spark_parser` from the current repository checkout, rejects Spark older than 3.5, compiles the complete parser reference and representative system configuration, represents every public parser type, and hashes resolved configuration deterministically. |
 | ST-002 | Native scalar Spark expressions | String formats, state normalization, decimal rounding, integers, dates, timestamps, and timestamp-without-timezone values materialize with their expected Databricks values and exact Spark types. Date/time expectations are rendered by Spark before collection so Python's process timezone cannot change the assertion. |
-| ST-003 | Domain display profiles | Bounded `title_business_v1` exceptions, `Yrs` and frequency aliases, ASCII-hyphen component casing, and integer `Years`/`Months` hyphenation, plus approved interest-rate canonicalization, action-free string changes in audit, and explicit preservation of an unknown interest-rate value materialize correctly. |
+| ST-003 | Domain display profiles | Bounded `title_business_v1` rules, approved interest-rate canonicalization, and `property_type_v1` aliases materialize correctly. Property coverage includes corrected `Condominium`, `Four-Unit`, retained `LIHTC`, mixed-use restructuring with retained descriptors, action-free canonical changes, and explicit preservation of unknown non-mixed values. |
 | ST-004 | Error policies and lazy execution | Null, default, and string-only preserve policies produce their configured scalar values and actions, while `fail` raises a supported Spark exception containing the exact source, target, and datatype context only when the parsed value is materialized. |
 | ST-005 | Spark SQL mode | Fully materialized handled target and audit outputs are identical with ANSI mode enabled and disabled. |
 | ST-006 | DataFrame output contract | Scalar target order, target-mapped result keys, prefixed result columns, parser identity, content hash, engine version, and the fixed scalar audit fields match the public contract. |
@@ -36,7 +36,7 @@ Requirements:
 - permission to attach the notebook to compute; and
 - the complete repository checkout, including `examples/all_parsers.yaml`.
 
-No widgets or other parameters are required. The notebook creates two fixed in-memory source rows,
+No widgets or other parameters are required. The notebook creates fixed in-memory source rows,
 writes no files or tables, and does not modify the workspace. Each test that changes Spark SQL
 settings applies its own temporary values and restores the originals in a `finally` path, including
 when that test fails.

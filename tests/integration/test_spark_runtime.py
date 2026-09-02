@@ -808,6 +808,261 @@ columns:
     ]
 
 
+def test_property_type_v1_canonicalizes_approved_aliases_and_mixed_use_structure(
+    spark: SparkSession,
+) -> None:
+    """Canonicalize approved aliases while retaining every Mixed Use descriptor component."""
+    cases = [
+        ("SFR", "Single Family"),
+        ("Self Storage", "Self Storage"),
+        ("Multi-Family", "Multifamily"),
+        ("Other", "Other"),
+        ("Retail-Anchored", "Retail"),
+        ("INDUSTRIAL- Warehouse", "Industrial - Warehouse"),
+        ("CO-OP", "Coop"),
+        ("Condominimum", "Condominium"),
+        ("Multi Family", "Multifamily"),
+        ("Four-Unit", "Four-Unit"),
+        ("MH", "Manufactured Housing"),
+        ("RETAIL-Unanchored", "Retail"),
+        ("Retail - Other", "Retail"),
+        ("Multi-Tenant Flex", "Industrial"),
+        ("Oth_Comm", "Other"),
+        ("Office-Single Tenant", "Office"),
+        ("Industrial", "Industrial"),
+        ("Multi-tenant Office", "Office"),
+        ("Multifamily", "Multifamily"),
+        ("Condo Low Rise (<= 4 Stories;\u00a0 Single Unit)", "Condominium"),
+        ("Single Family", "Single Family"),
+        ("Multifamily-Over 20", "Multifamily"),
+        ("Non-Warrantable Condo", "Condominium"),
+        ("Apartment", "Apartment"),
+        ("Industrial-Flex", "Industrial"),
+        ("24 Unit", "Multifamily"),
+        ("MULTIFAMLY", "Multifamily"),
+        ("Multi Family LIHTC", "Multifamily - LIHTC"),
+        ("Multifamily-LIHTC", "Multifamily - LIHTC"),
+        ("INDUSTRIAL Office-Warehouse", "Industrial - Warehouse"),
+        ("Other-Parking Garage", "Parking"),
+        ("Townhome", "Townhouse"),
+        ("INDUSTRIAL - FLEX", "Industrial"),
+        ("Mobile Home", "Manufactured Housing"),
+        ("Town House/Row House", "Townhouse"),
+        ("Townhouse", "Townhouse"),
+        ("Apartments", "Apartment"),
+        ("Medical Office", "Office - Medical Office"),
+        ("Condo (Stories Unknown)", "Condominium"),
+        ("Health Care - Independent Living", "Senior Housing"),
+        ("Condo", "Condominium"),
+        ("Retail-Regional Mall", "Retail - Regional Mall"),
+        ("Warehouse", "Industrial - Warehouse"),
+        ("Retail - Mall", "Retail"),
+        ("Office", "Office"),
+        ("Three-Unit", "Three-Unit"),
+        ("Multifamily - Student", "Student Housing"),
+        ("Office - Single Tenant", "Office"),
+        ("NonWarrantable Condo", "Condominium"),
+        ("OFFMIDRISE", "Office"),
+        ("PUD", "PUD"),
+        ("Manufactured Home", "Manufactured Housing"),
+        ("Industrial/Warehouse", "Industrial - Warehouse"),
+        ("Restaurant", "Restaurant"),
+        ("Two-Unit", "Two-Unit"),
+        ("Condo High Rise (> 4 Stories; single unit)", "Condominium"),
+        ("Duplex", "Duplex"),
+        ("dPUD", "PUD"),
+        ("AG RE", "Farm Land"),
+        ("Crops & Livestock", "Crops or Livestock"),
+        ("Ag Real Estate", "Farm Land"),
+        ("Grocery Store", "Retail"),
+        ("Condominium", "Condominium"),
+        ("2 Family Home", "Two-Unit"),
+        ("Single Family Detached", "Single Family"),
+        ("Planned Unit Development", "PUD"),
+        ("Manufactured Housing", "Manufactured Housing"),
+        ("Single Family Attached", "Single Family"),
+        ("PUD-Attached", "PUD"),
+        ("PUD-Detached", "PUD"),
+        ("3 Family Home", "Three-Unit"),
+        ("Single Family Residential", "Single Family"),
+        ("Single-Family Attached", "Single Family"),
+        ("4 Family Home", "Four-Unit"),
+        ("Single-Family Detached", "Single Family"),
+        ("Single Family SemiDetached", "Single Family"),
+        ("Four\u2013Unit", "Four-Unit"),
+        ("100 Units", "Multifamily"),
+        # Mixed Use is structural: retain descriptors, move the marker first, and space hyphens.
+        ("Mixed-Use", "Mixed Use"),
+        ("Residential-Mixed Use", "Mixed Use - Residential"),
+        ("Mixed-Use Office", "Mixed Use - Office"),
+        ("Mixed Use-RETAIL", "Mixed Use - Retail"),
+        ("Mixed Use - Multifamily", "Mixed Use - Multifamily"),
+        ("Mixed-Use Retail", "Mixed Use - Retail"),
+        ("Mixed Use - Office", "Mixed Use - Office"),
+        (
+            "Mixed Use- MULTIFAMILY-Over 20",
+            "Mixed Use - Multifamily - Over 20",
+        ),
+        ("Mixed Use-Industrial", "Mixed Use - Industrial"),
+        ("Mixed Use - Other", "Mixed Use - Other"),
+        ("Warehouse-Mixed use", "Mixed Use - Warehouse"),
+        (
+            "MIXED USE - MULTI FAMILY LIHTC",
+            "Mixed Use - Multifamily - LIHTC",
+        ),
+        ("retail-MIXED USE-office", "Mixed Use - Retail - Office"),
+        ("Mixed Use - 24 UNIT", "Mixed Use - 24 Unit"),
+        ("Mixed Use - 24", "Mixed Use - 24"),
+        ("Mixed Use - (OFFICE)", "Mixed Use - Office"),
+        (
+            "Mixed Use - Condo (STORIES UNKNOWN)",
+            "Mixed Use - Condo (stories unknown)",
+        ),
+    ]
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: property_types
+parser_config_name: Property Types
+version: "1"
+columns:
+  - source_column_name: property_type
+    target_column_name: PropertyType
+    expected_data_type: string
+    parser:
+      type: string
+      format: property_type_v1
+"""
+    )
+    source_df = spark.range(len(cases)).select(
+        (F.col("id") + 1).alias("row_id"),
+        F.element_at(
+            F.array(*(F.lit(source) for source, _ in cases)),
+            (F.col("id") + 1).cast("integer"),
+        ).alias("property_type"),
+    )
+    parsed = SparkDataFrameParser().parse_dataframe(
+        source_df,
+        config,
+        key_columns=["row_id"],
+    )
+    assert [row.PropertyType for row in parsed.parsed_df.orderBy("row_id").collect()] == [
+        expected for _, expected in cases
+    ]
+
+    # Every fixed canonical and generated Mixed Use output is idempotent.
+    from spark_parser.property_type_formats import _CANONICAL_PROPERTY_TYPES
+
+    canonical_values = [
+        *_CANONICAL_PROPERTY_TYPES,
+        *sorted({expected for _, expected in cases if expected.startswith("Mixed Use - ")}),
+    ]
+    canonical_df = spark.range(len(canonical_values)).select(
+        (F.col("id") + 1).alias("row_id"),
+        F.element_at(
+            F.array(*(F.lit(value) for value in canonical_values)),
+            (F.col("id") + 1).cast("integer"),
+        ).alias("property_type"),
+    )
+    reparsed = SparkDataFrameParser().parse_dataframe(
+        canonical_df,
+        config,
+        key_columns=["row_id"],
+    )
+    assert [row.PropertyType for row in reparsed.parsed_df.orderBy("row_id").collect()] == [
+        *canonical_values
+    ]
+
+
+def test_property_type_v1_preserves_ambiguous_values_and_audits_parse_errors(
+    spark: SparkSession,
+) -> None:
+    """Leave meaningfully ambiguous non-mixed values to downstream rules without guessing."""
+    values = [
+        "2 to 4 Family",
+        "2-4 Unit",
+        "1-4 family",
+        "Multi",
+        "Storage",
+        "Ground Lease",
+        "Various",
+        "Retail, Office",
+        "Multi-Property",
+        "Multiple",
+        "Mixed",
+        "Church",
+        "Ag",
+        "Crops, Livestock, & Ag Real Estate",
+        "RE/Equipment",
+        "Modular Housing",
+        "1",
+        "Unknown Property",
+        None,
+        "  warehouse\u2013mixed USE  ",
+    ]
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: property_type_boundaries
+parser_config_name: Property Type Boundaries
+version: "1"
+columns:
+  - source_column_name: property_type
+    target_column_name: PropertyType
+    expected_data_type: string
+    parser:
+      type: string
+      format: property_type_v1
+      on_parse_error: preserve
+      audit: true
+"""
+    )
+    source_df = spark.range(len(values)).select(
+        (F.col("id") + 1).alias("row_id"),
+        F.element_at(
+            F.array(*(F.lit(value).cast("string") for value in values)),
+            (F.col("id") + 1).cast("integer"),
+        ).alias("property_type"),
+    )
+    parsed = SparkDataFrameParser().parse_dataframe(
+        source_df,
+        config,
+        key_columns=["row_id"],
+    )
+    rows = parsed.parsed_df.orderBy("row_id").collect()
+    assert [row.PropertyType for row in rows] == [
+        *values[:-1],
+        "Mixed Use - Warehouse",
+    ]
+
+    audits = parsed.results_df.orderBy("row_id").collect()
+    assert all(
+        row.spark_parser_parse_results[0].actions_applied == ["parse_error_preserved"]
+        for row in audits[:-2]
+    )
+    assert audits[-2].spark_parser_parse_results[0].actions_applied == []
+    assert audits[-1].spark_parser_parse_results[0].actions_applied == []
+    assert audits[-1].spark_parser_parse_results[0].changed is True
+
+    fail_config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: property_type_fail
+parser_config_name: Property Type Fail
+version: "1"
+columns:
+  - source_column_name: property_type
+    target_column_name: PropertyType
+    expected_data_type: string
+    parser: {type: string, format: property_type_v1}
+"""
+    )
+    failing = SparkDataFrameParser().parse_dataframe(
+        spark.sql("SELECT 'Storage' AS property_type"),
+        fail_config,
+        key_columns=["property_type"],
+    )
+    with pytest.raises((Py4JJavaError, PySparkException)):
+        failing.parsed_df.collect()
+
+
 def test_title_business_v1_capitalizes_hyphens_and_hyphenates_plural_time_units(
     spark: SparkSession,
 ) -> None:

@@ -21,6 +21,10 @@
   periodic terms such as `Semi-Annual`, `Bi-Weekly`, and `Bi-Monthly`, and hyphenate bounded plural
   integer time units such as `2-Years` and `18-Months`; canonicalize complete frequency aliases such
   as `biannually` and `bi-annually` to `Bi-Annual`, and expand complete `Yrs` tokens to `Years`.
+- Add the fail-closed `property_type_v1` string profile for approved loan-property aliases,
+  corrected `Condominium`, the distinct `Four-Unit` category, retained `LIHTC` qualifiers, and
+  structural mixed-use normalization that moves `Mixed Use` to the front without dropping the
+  remaining components.
 - Accept case-insensitive quoted `null` and `none` as disabled string-format aliases and serialize
   both to canonical null.
 - Report platform path-value failures through the compiler's public `CompilationError` contract.

@@ -169,9 +169,10 @@ The normal flow is:
 - [`spark_runtime.py`](src/spark_parser/spark_runtime.py) validates input schemas and builds the
   native scalar Spark expressions and audit records.
 - [`address_formats.py`](src/spark_parser/address_formats.py),
-  [`interest_rate_formats.py`](src/spark_parser/interest_rate_formats.py), and
-  [`title_formats.py`](src/spark_parser/title_formats.py) keep domain formatting rules outside the
-  runtime orchestration code.
+  [`interest_rate_formats.py`](src/spark_parser/interest_rate_formats.py),
+  [`property_type_formats.py`](src/spark_parser/property_type_formats.py), and
+  [`title_formats.py`](src/spark_parser/title_formats.py) keep domain formatting rules outside
+  the runtime orchestration code.
 - [`dataframe_parsing.py`](src/spark_parser/dataframe_parsing.py) exposes the lazy `parsed_df` and
   `results_df` projections.
 
@@ -327,6 +328,7 @@ rejects offset-bearing inputs rather than silently discarding timezone meaning.
 | `state_us` | Canonicalize supported US state/territory values to postal codes. | `"Illinois"` → `"IL"` |
 | `zip` | Validate/pad ZIP5 and format ZIP+4. | `"1234"` → `"01234"` |
 | `interest_rate_index_v1` | Canonicalize the approved interest-rate catalog. | `"SOFR Term - 12M"` → `"SOFR Term 12-Month"` |
+| `property_type_v1` | Canonicalize approved loan property types and restructure mixed-use values. | `"Warehouse-Mixed use"` → `"Mixed Use - Warehouse"` |
 
 #### Business title profile
 
@@ -396,6 +398,33 @@ Approved CMT tenors also accept shorthand such as `10Y CMT`. Generic SOFR labels
 not partially rewrite. `NAP` and the text `null` are ordinary unknown values unless configured as
 null markers with `replace_null_markers: true`. Use `on_parse_error: preserve` when an unknown
 value should survive exactly as received.
+
+#### Property-type profile
+
+`property_type_v1` is a case-insensitive, versioned loan-property profile. A supported non-mixed
+value must match a complete canonical value or approved alias. `Condominium` is the canonical
+spelling; the source misspelling `Condominimum` remains accepted. `Four-Unit` remains distinct from
+`Duplex`, `Two-Unit`, `Three-Unit`, and `Multifamily`. LIHTC is business-significant, so supported
+spellings produce `Multifamily - LIHTC`, not plain `Multifamily`.
+
+Mixed-use values follow a structural rule instead of being collapsed into another property type.
+The complete phrase `mixed use` or `mixed-use` is moved to the front as `Mixed Use`, and every
+remaining hyphen component is retained behind it with canonical ` - ` separators. Known tokens
+such as `Multifamily` and `LIHTC` use their catalog spelling; any unmatched component is trimmed,
+lowercased, and given an uppercase first letter. Parentheses wrapping an entire component are
+cosmetic and removed, while parentheses inside a longer component remain. For example:
+
+- `Warehouse-Mixed use` becomes `Mixed Use - Warehouse`;
+- `Residential-Mixed Use` becomes `Mixed Use - Residential`; and
+- `Mixed Use-MULTIFAMILY-Over 20` becomes `Mixed Use - Multifamily - Over 20`.
+
+The fixed catalog covers the supplied residential, multifamily, agricultural, equipment,
+industrial, office, retail, and specialty categories. An unknown non-mixed value is a parse error:
+the profile never partially matches it or treats `Other` as a fallback. Only explicitly approved
+full-value aliases may collapse a source-specific qualifier. Existing `on_parse_error` behavior
+applies; use `preserve` to retain an unresolved source token exactly for downstream rules. Ranges
+such as `1-4 family`, combined values such as `RE/Equipment`, and the distinct construction category
+`Modular Housing` therefore remain unresolved.
 
 #### US address and county profiles
 

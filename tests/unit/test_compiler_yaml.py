@@ -353,6 +353,7 @@ columns:
         ("title", StringFormat.TITLE),
         ("title_business_v1", StringFormat.TITLE_BUSINESS_V1),
         ("interest_rate_index_v1", StringFormat.INTEREST_RATE_INDEX_V1),
+        ("property_type_v1", StringFormat.PROPERTY_TYPE_V1),
         ("state_us", StringFormat.STATE_US),
     ],
 )

@@ -90,6 +90,7 @@ assert {
     "state_us",
     "zip",
     "interest_rate_index_v1",
+    "property_type_v1",
 } <= set(format_values)
 
 assert parser.normalize_data_type(" NUMERIC ( 18, 2 ) ") == "decimal(18,2)"
@@ -117,6 +118,8 @@ assert {column.parser.parser_type.value for column in reference_config.columns} 
 # MAGIC bounded integer `Years`/`Months` hyphenation, plus its closed `Yrs` and frequency aliases.
 # MAGIC `interest_rate_index_v1` is a closed, fail-closed catalog. Here an unknown rate is preserved
 # MAGIC explicitly rather than inferred.
+# MAGIC `property_type_v1` similarly uses approved full-value aliases for ordinary property types,
+# MAGIC retains LIHTC, and restructures mixed-use components instead of discarding them.
 
 # COMMAND ----------
 
@@ -476,7 +479,8 @@ assert identity.guide_parser_engine_version == __version__
 # MAGIC 2. Keep each present configured source as a top-level string.
 # MAGIC 3. Declare an exact supported scalar target datatype.
 # MAGIC 4. Choose every error policy deliberately; `fail` is the default.
-# MAGIC 5. Use `title_business_v1` and `interest_rate_index_v1` only for their documented domains.
+# MAGIC 5. Use `title_business_v1`, `interest_rate_index_v1`, and `property_type_v1` only for their
+# MAGIC documented domains.
 # MAGIC 6. Enable audit where its diagnostic value justifies the size.
 # MAGIC 7. Supply stable row keys for audit joins.
 # MAGIC 8. Review and compile YAML before binding a DataFrame.
