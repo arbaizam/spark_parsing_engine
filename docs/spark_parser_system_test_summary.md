@@ -4,7 +4,7 @@ Source: `tests/system/spark_parser_system_tests.py`.
 
 The Databricks notebook covers behavior that requires a real Spark session. It imports the package
 directly from the repository checkout and does not build, install, hash, publish, or verify a wheel.
-Compiler-only permutations remain in the pytest suite. The notebook contains eight focused system
+Compiler-only permutations remain in the pytest suite. The notebook contains nine focused system
 tests and does not run pytest itself.
 
 The notebook exercises the 0.5.0 scalar-only boundary. Complex source data must be decoded or
@@ -22,6 +22,7 @@ flattened into top-level strings before parsing and may be reconstructed downstr
 | ST-006 | DataFrame output contract | Scalar target order, target-mapped result keys, prefixed result columns, parser identity, content hash, engine version, and the fixed scalar audit fields match the public contract. |
 | ST-007 | Explicitly recoverable input-schema drift | With `on_missing_source="warn"`, a missing configured source produces an explicitly asserted nullable Spark `string` field containing null, plus both a DataFrame warning and row-level audit evidence. |
 | ST-008 | Input-schema safety | Non-string configured sources, reserved result-column collisions, and omitted explicit row keys fail before parser expressions are constructed. |
+| ST-009 | Error collection and configured-mode compatibility | Both projections fully materialize multiple ordered conversion errors, including a column with auditing disabled. Required null defaults, explicit null/default/preserve policies, original values, string-format diagnostics, and audit actions match the resulting values. Valid and null-input rows have empty error arrays. A custom prefix, mapped keys, diagnostic schema, execution metadata, and unchanged configuration hash retain their contracts, while default configured mode still raises when an invalid target is explicitly materialized. |
 
 ## Execution Contract
 
@@ -46,11 +47,11 @@ when that test fails.
 Open `tests/system/spark_parser_system_tests.py` in the Databricks Git folder, attach compute, and
 select **Run all**.
 
-Every test records its ID in an ordered pass registry. The run succeeds only when all eight IDs
+Every test records its ID in an ordered pass registry. The run succeeds only when all nine IDs
 have been recorded exactly once, in order, and execution reaches:
 
 ```text
-PASS: All 8 current-contract Spark Parser system tests completed.
+PASS: All 9 current-contract Spark Parser system tests completed.
 ```
 
 Any failed assertion or unexpected exception stops the notebook at the responsible test ID.

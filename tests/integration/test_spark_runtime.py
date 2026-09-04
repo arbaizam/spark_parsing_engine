@@ -4,6 +4,7 @@ import importlib.util
 import os
 import shutil
 import sys
+import warnings
 from unittest.mock import Mock
 
 import pytest
@@ -11,9 +12,11 @@ import pytest
 from spark_parser import (
     DataFrameParsing,
     SchemaValidationError,
+    SchemaWarning,
     SparkDataFrameParser,
     YamlParserConfigCompiler,
 )
+from spark_parser import parser as public_parser
 
 if (
     importlib.util.find_spec("pyspark") is None
@@ -30,6 +33,8 @@ from pyspark.errors import PySparkException, PySparkNotImplementedError  # noqa:
 from pyspark.sql import SparkSession  # noqa: E402
 from pyspark.sql import functions as F  # noqa: E402
 from pyspark.sql.utils import is_remote  # noqa: E402
+
+from spark_parser.spark_runtime import _is_invalid_datetime_pattern_error  # noqa: E402
 
 pytestmark = pytest.mark.spark
 
@@ -288,8 +293,10 @@ def test_public_parser_facade_builds_shared_lazy_projections(spark: SparkSession
     assert parsing.results_df.first().row_id == 0
 
 
+@pytest.mark.parametrize("error_mode", ["configured", "collect"])
 def test_results_df_maps_configured_keys_to_parsed_target_columns(
     spark: SparkSession,
+    error_mode: str,
 ) -> None:
     """Expose configured keys with target names/values while preserving pass-through keys."""
     config = YamlParserConfigCompiler().compile_text(
@@ -312,6 +319,7 @@ columns:
         spark.sql("SELECT '007' AS record_id, 'load-1' AS load_id, 'ok' AS value"),
         config,
         key_columns=["record_id", "load_id"],
+        error_mode=error_mode,
     )
 
     result = parsing.results_df.first()
@@ -322,14 +330,18 @@ columns:
         "spark_parser_parse_results",
         "spark_parser_config",
         "spark_parser_engine_version",
-    ]
+    ] + (
+        ["spark_parser_parse_errors", "spark_parser_error_mode"] if error_mode == "collect" else []
+    )
     assert result.RecordId == parsing.parsed_df.first().RecordId == 7
     assert result.load_id == "load-1"
     assert "record_id" not in result.asDict()
 
 
+@pytest.mark.parametrize("error_mode", ["configured", "collect"])
 def test_results_df_preserves_a_key_with_multiple_target_mappings(
     spark: SparkSession,
+    error_mode: str,
 ) -> None:
     """Keep a fan-out source key unchanged because it has no unique target mapping."""
     config = YamlParserConfigCompiler().compile_text(
@@ -353,11 +365,108 @@ columns:
         spark.sql("SELECT '007' AS record_id"),
         config,
         key_columns=["record_id"],
+        error_mode=error_mode,
     )
 
     assert parsing.key_columns == ("record_id",)
     assert parsing.results_df.first().record_id == "007"
     assert parsing.parsed_df.first().NumericRecordId == 7
+
+
+@pytest.mark.parametrize("error_mode", ["configured", "collect"])
+@pytest.mark.parametrize("fan_out_key", [False, True])
+def test_results_df_rejects_passthrough_key_colliding_with_a_parsed_target(
+    spark: SparkSession,
+    error_mode: str,
+    fan_out_key: bool,
+) -> None:
+    """Reject conflicting key identity before results can expose an unrelated value or type."""
+    columns = [
+        {
+            "source_column_name": "RecordId" if fan_out_key else "value",
+            "target_column_name": "RecordId",
+            "expected_data_type": "integer",
+            "parser": "integer",
+        }
+    ]
+    if fan_out_key:
+        columns.append(
+            {
+                "source_column_name": "RecordId",
+                "target_column_name": "OriginalRecordId",
+                "expected_data_type": "string",
+                "parser": "string",
+            }
+        )
+    config = YamlParserConfigCompiler().compile_mapping(
+        {
+            "parser_config_id": "passthrough_key_collision",
+            "parser_config_name": "Pass-through Key Collision",
+            "version": "1",
+            "columns": columns,
+        }
+    )
+
+    with pytest.raises(SchemaValidationError) as raised:
+        SparkDataFrameParser().parse_dataframe(
+            spark.sql("SELECT '007' AS RecordId, '42' AS value"),
+            config,
+            key_columns=["RecordId"],
+            error_mode=error_mode,
+        )
+
+    assert raised.value.errors == (
+        "Pass-through key columns conflict with configured target columns: ['RecordId'].",
+    )
+
+
+@pytest.mark.classic_spark
+@pytest.mark.parametrize("error_mode", ["configured", "collect"])
+def test_results_df_passthrough_key_target_conflicts_follow_active_resolver(
+    classic_spark: SparkSession,
+    error_mode: str,
+) -> None:
+    """Only distinguish a pass-through key from a target when Spark distinguishes their names."""
+    spark = classic_spark
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: passthrough_key_resolver
+parser_config_name: Pass-through Key Resolver
+version: "1"
+columns:
+  - source_column_name: value
+    target_column_name: RecordId
+    expected_data_type: integer
+    parser: integer
+"""
+    )
+    source = spark.sql("SELECT '007' AS RECORDID, '42' AS value")
+    previous_case_sensitive = spark.conf.get("spark.sql.caseSensitive")
+    try:
+        spark.conf.set("spark.sql.caseSensitive", "false")
+        with pytest.raises(SchemaValidationError) as raised:
+            SparkDataFrameParser().parse_dataframe(
+                source,
+                config,
+                key_columns=["RECORDID"],
+                error_mode=error_mode,
+            )
+        assert raised.value.errors == (
+            "Pass-through key columns conflict with configured target columns: ['RECORDID'].",
+        )
+
+        spark.conf.set("spark.sql.caseSensitive", "true")
+        parsing = SparkDataFrameParser().parse_dataframe(
+            source,
+            config,
+            key_columns=["RECORDID"],
+            error_mode=error_mode,
+        )
+        assert parsing.parsed_df.first().RecordId == 42
+        assert parsing.results_df.first().RECORDID == "007"
+        assert parsing.key_columns == ("RECORDID",)
+    finally:
+        spark.conf.set("spark.sql.caseSensitive", previous_case_sensitive)
 
 
 def test_dataframe_parsing_persistence_delegates_without_requiring_cache_support() -> None:
@@ -2167,6 +2276,164 @@ columns:
         SparkDataFrameParser().parse_dataframe(df, config, key_columns=["duplicate"])
 
 
+def test_schema_preflight_collects_independent_errors_without_emitting_warnings(
+    spark: SparkSession,
+) -> None:
+    """Return every safe metadata finding and suppress recoverable warnings on failure."""
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: aggregate_schema_errors
+parser_config_name: Aggregate Schema Errors
+version: "1"
+columns:
+  - source_column_name: numeric_source
+    target_column_name: NumericSource
+    expected_data_type: string
+    parser: string
+  - source_column_name: absent_source
+    target_column_name: AbsentSource
+    expected_data_type: string
+    parser: string
+"""
+    )
+    df = spark.sql(
+        """
+SELECT
+  1 AS numeric_source,
+  'occupied' AS spark_parser_config,
+  'one' AS duplicate_key,
+  'two' AS duplicate_key
+"""
+    )
+    key_columns = [None, "duplicate_key", "missing_key", "duplicate_key"]
+    key_error = "key_columns must contain only non-empty strings."
+    common_errors = (
+        "Configured bronze columns must have Spark string type; found {'numeric_source': 'int'}.",
+        "Input contains reserved parser output columns: ['spark_parser_config'].",
+        "key_columns contains duplicates: ['duplicate_key'].",
+        "key_columns are missing: ['missing_key'].",
+        "key_columns are ambiguous: ['duplicate_key'].",
+    )
+
+    with pytest.raises(SchemaValidationError) as failed_missing:
+        SparkDataFrameParser().parse_dataframe(
+            df,
+            config,
+            key_columns=key_columns,  # type: ignore[arg-type]
+        )
+    assert failed_missing.value.errors == (
+        key_error,
+        "Configured source columns are missing: ['absent_source']. Pass "
+        "on_missing_source='warn' only when typed null/default substitution is intentional.",
+        *common_errors,
+    )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(SchemaValidationError) as raised:
+            SparkDataFrameParser().parse_dataframe(
+                df,
+                config,
+                key_columns=key_columns,  # type: ignore[arg-type]
+                on_missing_source="warn",
+            )
+
+    assert raised.value.errors == (key_error, *common_errors)
+    assert not any(issubclass(item.category, SchemaWarning) for item in caught)
+
+
+def test_schema_preflight_checks_valid_key_bindings_with_invalid_siblings(
+    spark: SparkSession,
+) -> None:
+    """Report namespace conflicts proven by valid keys without constructing partial bindings."""
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: partial_key_diagnostics
+parser_config_name: Partial Key Diagnostics
+version: "1"
+columns:
+  - source_column_name: value
+    target_column_name: spark_parser_config
+    expected_data_type: string
+    parser: string
+  - source_column_name: ambiguous_key
+    target_column_name: AmbiguousValue
+    expected_data_type: string
+    parser: string
+"""
+    )
+    df = spark.sql("SELECT 'ok' AS value, 'one' AS ambiguous_key, 'two' AS ambiguous_key")
+
+    with pytest.raises(SchemaValidationError) as raised:
+        SparkDataFrameParser().parse_dataframe(
+            df,
+            config,
+            key_columns=[  # type: ignore[list-item]
+                None,
+                "value",
+                "value",
+                "missing_key",
+                "ambiguous_key",
+            ],
+        )
+
+    assert raised.value.errors == (
+        "key_columns must contain only non-empty strings.",
+        "Configured input columns are ambiguous: ['ambiguous_key'].",
+        "key_columns contains duplicates: ['value'].",
+        "key_columns are missing: ['missing_key'].",
+        "key_columns are ambiguous: ['ambiguous_key'].",
+        "key_columns conflict with parser result columns: ['spark_parser_config'].",
+    )
+
+
+def test_schema_preflight_collects_mapped_key_and_result_namespace_conflicts(
+    spark: SparkSession,
+) -> None:
+    """Keep checking reserved results after finding a separate mapped-key collision."""
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: multiple_binding_conflicts
+parser_config_name: Multiple Binding Conflicts
+version: "1"
+columns:
+  - source_column_name: first
+    target_column_name: Same
+    expected_data_type: string
+    parser: string
+  - source_column_name: second
+    target_column_name: same
+    expected_data_type: string
+    parser: string
+  - source_column_name: third
+    target_column_name: spark_parser_config
+    expected_data_type: string
+    parser: string
+"""
+    )
+    previous_case_sensitive = spark.conf.get("spark.sql.caseSensitive")
+    try:
+        spark.conf.set("spark.sql.caseSensitive", "false")
+        df = spark.sql("SELECT 'a' AS first, 'b' AS second, 'c' AS third")
+
+        with pytest.raises(SchemaValidationError) as raised:
+            SparkDataFrameParser().parse_dataframe(
+                df,
+                config,
+                key_columns=["first", "second", "third"],
+            )
+
+        assert raised.value.errors == (
+            "Configured target columns collide under Spark's active identifier resolver: "
+            "['Same', 'same'].",
+            "Mapped key columns collide under Spark's active identifier resolver: "
+            "['Same', 'same'].",
+            "key_columns conflict with parser result columns: ['spark_parser_config'].",
+        )
+    finally:
+        spark.conf.set("spark.sql.caseSensitive", previous_case_sensitive)
+
+
 def test_schema_preflight_does_not_read_restricted_case_setting(
     spark: SparkSession,
     monkeypatch: pytest.MonkeyPatch,
@@ -2494,6 +2761,10 @@ columns:
     target_column_name: BooleanValue
     expected_data_type: boolean
     parser: {type: boolean, on_parse_error: null}
+  - source_column_name: second_boolean_value
+    target_column_name: SecondBooleanValue
+    expected_data_type: boolean
+    parser: {type: boolean, on_parse_error: null}
 """
     )
     SparkDataFrameParser().parse_dataframe(
@@ -2501,12 +2772,23 @@ columns:
         distinct_config,
         key_columns=["boolean_value"],
     )
-    with pytest.raises(SchemaValidationError, match="overlap.*BooleanValue"):
+    with pytest.raises(SchemaValidationError) as raised:
         SparkDataFrameParser().parse_dataframe(
-            spark.range(0).select(F.lit("Ä").alias("boolean_value")),
+            spark.range(0).select(
+                F.lit("Ä").alias("boolean_value"),
+                F.lit("ä").alias("second_boolean_value"),
+            ),
             overlap_config,
             key_columns=["boolean_value"],
         )
+    assert raised.value.errors == (
+        "Boolean true_values and false_values overlap under the active Spark runtime's "
+        "case-insensitive Unicode normalization for target column 'BooleanValue'. Use "
+        "disjoint token sets or enable boolean_case_sensitive. No Spark data action was started.",
+        "Boolean true_values and false_values overlap under the active Spark runtime's "
+        "case-insensitive Unicode normalization for target column 'SecondBooleanValue'. Use "
+        "disjoint token sets or enable boolean_case_sensitive. No Spark data action was started.",
+    )
 
 
 @pytest.mark.classic_spark
@@ -3143,6 +3425,71 @@ def test_invalid_custom_datetime_pattern_fails_during_dataframe_binding(
         spark.conf.set("spark.sql.legacy.timeParserPolicy", previous_policy)
 
 
+@pytest.mark.parametrize(
+    ("condition", "is_invalid_pattern"),
+    [
+        ("INCONSISTENT_BEHAVIOR_CROSS_VERSION.DATETIME_PATTERN_RECOGNITION", True),
+        ("INVALID_DATETIME_PATTERN.ILLEGAL_CHARACTER", True),
+        ("_LEGACY_ERROR_TEMP_2130", True),
+        ("CONNECTION_FAILED", False),
+    ],
+)
+def test_datetime_pattern_error_classification_supports_the_spark_version_floor(
+    condition: str,
+    is_invalid_pattern: bool,
+) -> None:
+    """Recognize both supported structured pattern failures without swallowing other errors."""
+    error = Mock(spec=PySparkException)
+    get_condition = getattr(error, "getCondition", None)
+    if get_condition is not None:
+        get_condition.return_value = condition
+    else:
+        error.getErrorClass.return_value = condition
+
+    assert _is_invalid_datetime_pattern_error(error) is is_invalid_pattern
+
+
+def test_custom_datetime_probe_reraises_unrelated_spark_failures(
+    spark: SparkSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Do not misreport transport or analyzer failures as invalid datetime formats."""
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: unrelated_datetime_probe_failure
+parser_config_name: Unrelated Datetime Probe Failure
+version: "1"
+columns:
+  - source_column_name: occurred_on
+    target_column_name: OccurredOn
+    expected_data_type: date
+    parser:
+      type: date
+      formats: ['yyyy/MM/dd']
+"""
+    )
+    probe_error = PySparkException("metadata transport failed")
+    probe = Mock()
+    probe.select.return_value = probe
+    probe.inputFiles.side_effect = probe_error
+    probe_session = Mock()
+    probe_session.range.return_value = probe
+    monkeypatch.setattr(
+        SparkDataFrameParser,
+        "_metadata_probe_session",
+        Mock(return_value=probe_session),
+    )
+
+    with pytest.raises(PySparkException, match="metadata transport failed") as raised:
+        SparkDataFrameParser().parse_dataframe(
+            spark.sql("SELECT '2026/09/03' AS occurred_on"),
+            config,
+            key_columns=["occurred_on"],
+        )
+
+    assert raised.value is probe_error
+
+
 @pytest.mark.classic_spark
 def test_invalid_datetime_probe_preserves_classic_optimizer_configuration(
     classic_spark: SparkSession,
@@ -3175,3 +3522,516 @@ def test_invalid_datetime_probe_preserves_classic_optimizer_configuration(
     finally:
         spark.conf.set(policy_setting, previous_policy)
         spark.conf.set(excluded_rules_setting, previous_excluded_rules)
+
+
+def _error_collection_config():
+    """Use several strict conversions to prove collection is independent of audit selection."""
+    return YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: error_collection
+parser_config_name: Error Collection
+version: "1"
+columns:
+  - source_column_name: number
+    target_column_name: Number
+    expected_data_type: integer
+    parser: integer
+  - source_column_name: day
+    target_column_name: Day
+    expected_data_type: date
+    parser: date
+  - source_column_name: flag
+    target_column_name: Flag
+    expected_data_type: boolean
+    parser: boolean
+"""
+    )
+
+
+def test_error_collection_records_all_failures_without_audit_in_both_ansi_modes(
+    spark: SparkSession,
+) -> None:
+    config = public_parser.to_mapping(_error_collection_config())
+    source = spark.sql(
+        """
+SELECT * FROM VALUES
+  (1, '  nope  ', 'bad-day', 'perhaps'),
+  (2, '42', '2026-09-04', 'true')
+AS source(row_id, number, day, flag)
+"""
+    )
+    previous_ansi = spark.conf.get("spark.sql.ansi.enabled")
+    snapshots = {}
+    try:
+        for ansi_value in ("true", "false"):
+            spark.conf.set("spark.sql.ansi.enabled", ansi_value)
+            parsing = public_parser.parse_dataframe(
+                source,
+                config,
+                key_columns=["row_id"],
+                error_mode="collect",
+            )
+            assert parsing.error_mode == "collect"
+            assert parsing.parsed_df.columns == [
+                "Number",
+                "Day",
+                "Flag",
+                "spark_parser_parse_errors",
+            ]
+            assert parsing.results_df.columns == [
+                "row_id",
+                "spark_parser_parse_results",
+                "spark_parser_config",
+                "spark_parser_engine_version",
+                "spark_parser_parse_errors",
+                "spark_parser_error_mode",
+            ]
+            parsed_rows = parsing.parsed_df.orderBy(F.col("Number").asc_nulls_first()).collect()
+            result_rows = parsing.results_df.orderBy("row_id").collect()
+            snapshots[ansi_value] = (
+                [row.asDict(recursive=True) for row in parsed_rows],
+                [row.asDict(recursive=True) for row in result_rows],
+            )
+    finally:
+        spark.conf.set("spark.sql.ansi.enabled", previous_ansi)
+
+    assert snapshots["true"] == snapshots["false"]
+    parsed_rows, result_rows = snapshots["true"]
+    errors = parsed_rows[0]["spark_parser_parse_errors"]
+    assert errors == [
+        {
+            "source_column_name": source_name,
+            "target_column_name": target_name,
+            "original_value": original,
+            "expected_data_type": expected_type,
+            "error_code": "PARSE_ERROR",
+            "message": f"Value could not be parsed as {expected_type}.",
+            "resolution": "null",
+        }
+        for source_name, target_name, original, expected_type in (
+            ("number", "Number", "  nope  ", "integer"),
+            ("day", "Day", "bad-day", "date"),
+            ("flag", "Flag", "perhaps", "boolean"),
+        )
+    ]
+    assert all(parsed_rows[0][name] is None for name in ("Number", "Day", "Flag"))
+    assert parsed_rows[1]["Number"] == 42
+    assert parsed_rows[1]["Day"].isoformat() == "2026-09-04"
+    assert parsed_rows[1]["Flag"] is True
+    assert parsed_rows[1]["spark_parser_parse_errors"] == []
+    assert result_rows[0]["spark_parser_parse_errors"] == errors
+    assert result_rows[1]["spark_parser_parse_errors"] == []
+    assert all(row["spark_parser_parse_results"] == [] for row in result_rows)
+    assert all(row["spark_parser_error_mode"] == "collect" for row in result_rows)
+
+
+@pytest.mark.parametrize(
+    ("string_format", "invalid_value"),
+    [
+        ("state_us", "  not-a-state  "),
+        ("zip", "1234A"),
+        ("property_type_v1", "Unknown Property"),
+    ],
+)
+@pytest.mark.parametrize("on_parse_error", ["fail", "preserve"])
+def test_error_collection_identifies_failed_string_profiles_without_audit(
+    spark: SparkSession,
+    string_format: str,
+    invalid_value: str,
+    on_parse_error: str,
+) -> None:
+    """Report the rejecting profile even when string type alone would accept the source value."""
+    config = YamlParserConfigCompiler().compile_mapping(
+        {
+            "parser_config_id": "collection_string_profiles",
+            "parser_config_name": "Collection String Profiles",
+            "version": "1",
+            "columns": [
+                {
+                    "source_column_name": "value",
+                    "target_column_name": "Value",
+                    "expected_data_type": "string",
+                    "parser": {
+                        "type": "string",
+                        "format": string_format,
+                        "audit": False,
+                        "on_parse_error": on_parse_error,
+                    },
+                }
+            ],
+        }
+    )
+    parsing = SparkDataFrameParser().parse_dataframe(
+        spark.range(1).select(F.col("id").alias("row_id"), F.lit(invalid_value).alias("value")),
+        config,
+        key_columns=["row_id"],
+        error_mode="collect",
+    )
+
+    parsed = parsing.parsed_df.first()
+    assert parsed.Value == (invalid_value if on_parse_error == "preserve" else None)
+    assert len(parsed.spark_parser_parse_errors) == 1
+    error = parsed.spark_parser_parse_errors[0]
+    assert error.asDict() == {
+        "source_column_name": "value",
+        "target_column_name": "Value",
+        "original_value": invalid_value,
+        "expected_data_type": "string",
+        "error_code": "PARSE_ERROR",
+        "message": f"Value could not be parsed as string with format '{string_format}'.",
+        "resolution": "preserve" if on_parse_error == "preserve" else "null",
+    }
+    result = parsing.results_df.first()
+    assert result.spark_parser_parse_errors == parsed.spark_parser_parse_errors
+    assert result.spark_parser_parse_results == []
+
+
+def test_error_collection_preserves_policies_and_reports_final_resolution(
+    spark: SparkSession,
+) -> None:
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: collection_policies
+parser_config_name: Collection Policies
+version: "1"
+columns:
+  - source_column_name: bad
+    target_column_name: Strict
+    expected_data_type: integer
+    parser: {type: integer, audit: true}
+  - source_column_name: bad
+    target_column_name: Required
+    expected_data_type: integer
+    parser: {type: integer, audit: true, is_nullable: false, default_on_null: -1}
+  - source_column_name: bad
+    target_column_name: Nullable
+    expected_data_type: integer
+    parser: {type: integer, audit: true, on_parse_error: null}
+  - source_column_name: bad
+    target_column_name: Defaulted
+    expected_data_type: integer
+    parser: {type: integer, audit: true, on_parse_error: default, default_on_error: 7}
+  - source_column_name: state
+    target_column_name: Preserved
+    expected_data_type: string
+    parser: {type: string, format: state_us, audit: true, on_parse_error: preserve}
+"""
+    )
+    parsing = SparkDataFrameParser().parse_dataframe(
+        spark.sql("SELECT 'row-1' AS row_id, 'bad' AS bad, '  not-a-state  ' AS state"),
+        config,
+        key_columns=["row_id"],
+        column_prefix="quality",
+        error_mode="collect",
+    )
+    parsed = parsing.parsed_df.first()
+    assert parsed.Strict is None
+    assert parsed.Required == -1
+    assert parsed.Nullable is None
+    assert parsed.Defaulted == 7
+    assert parsed.Preserved == "  not-a-state  "
+    assert [error.resolution for error in parsed.quality_parse_errors] == [
+        "null",
+        "default_on_null",
+        "null",
+        "default_on_error",
+        "preserve",
+    ]
+    results = parsing.results_df.first()
+    assert results.quality_parse_errors == parsed.quality_parse_errors
+    assert results.quality_error_mode == "collect"
+    audits = results.quality_parse_results
+    assert [audit.actions_applied for audit in audits] == [
+        ["parse_error_collected", "parse_error_to_null"],
+        ["parse_error_collected", "parse_error_to_null", "default_on_null_applied"],
+        ["parse_error_to_null"],
+        ["parse_error_default_applied"],
+        ["parse_error_preserved"],
+    ]
+    assert audits[0].changed is True
+    assert audits[1].changed is True
+    assert all(audit.error.startswith("Value could not be parsed as ") for audit in audits)
+    assert audits[-1].error == "Value could not be parsed as string."
+
+
+def test_error_collection_excludes_null_markers_empty_zero_and_missing_inputs(
+    spark: SparkSession,
+) -> None:
+    config = YamlParserConfigCompiler().compile_text(
+        """
+parser_config_id: collection_non_errors
+parser_config_name: Collection Non Errors
+version: "1"
+globals:
+  null_markers: [NA]
+columns:
+  - source_column_name: number
+    target_column_name: Number
+    expected_data_type: integer
+    parser: {type: integer, audit: true, replace_null_markers: true, zero_is_valid: false}
+  - source_column_name: absent
+    target_column_name: Absent
+    expected_data_type: integer
+    parser: {type: integer, audit: true, is_nullable: false, default_on_null: -1}
+"""
+    )
+    source = spark.sql(
+        "SELECT * FROM VALUES (1, CAST(NULL AS STRING)), (2, ' '), (3, 'NA'), (4, '0') "
+        "AS source(row_id, number)"
+    )
+    with pytest.warns(SchemaWarning, match="absent"):
+        parsing = SparkDataFrameParser().parse_dataframe(
+            source,
+            config,
+            key_columns=["row_id"],
+            on_missing_source="warn",
+            error_mode="collect",
+        )
+    parsed_rows = parsing.parsed_df.collect()
+    assert len(parsed_rows) == 4
+    assert all(row.Number is None and row.Absent == -1 for row in parsed_rows)
+    assert all(row.spark_parser_parse_errors == [] for row in parsed_rows)
+    for result in parsing.results_df.collect():
+        assert result.spark_parser_parse_errors == []
+        assert result.spark_parser_parse_results[0].error is None
+        assert result.spark_parser_parse_results[1].error == "Source column is missing."
+
+
+def test_error_collection_empty_input_retains_diagnostic_schema(spark: SparkSession) -> None:
+    parsing = SparkDataFrameParser().parse_dataframe(
+        spark.sql(
+            "SELECT 'row-1' AS row_id, '1' AS number, '2026-09-04' AS day, 'true' AS flag "
+            "WHERE false"
+        ),
+        _error_collection_config(),
+        key_columns=["row_id"],
+        error_mode="collect",
+    )
+    parsed_type = parsing.parsed_df.schema["spark_parser_parse_errors"].dataType
+    assert parsed_type == parsing.results_df.schema["spark_parser_parse_errors"].dataType
+    assert parsed_type.elementType.fieldNames() == [
+        "source_column_name",
+        "target_column_name",
+        "original_value",
+        "expected_data_type",
+        "error_code",
+        "message",
+        "resolution",
+    ]
+    assert all(field.dataType.simpleString() == "string" for field in parsed_type.elementType)
+    assert parsing.parsed_df.collect() == []
+    assert parsing.results_df.collect() == []
+
+
+@pytest.mark.parametrize("explicit_mode", [False, True])
+def test_error_collection_keeps_configured_mode_strict(
+    spark: SparkSession,
+    explicit_mode: bool,
+) -> None:
+    options = {"error_mode": "configured"} if explicit_mode else {}
+    parsing = SparkDataFrameParser().parse_dataframe(
+        spark.sql("SELECT 'row-1' AS row_id, 'bad' AS number, '2026-09-04' AS day, 'true' AS flag"),
+        _error_collection_config(),
+        key_columns=["row_id"],
+        **options,
+    )
+    assert parsing.error_mode == "configured"
+    assert parsing.parsed_df.columns == ["Number", "Day", "Flag"]
+    assert "spark_parser_parse_errors" not in parsing.results_df.columns
+    assert "spark_parser_error_mode" not in parsing.results_df.columns
+    with pytest.raises((Py4JJavaError, PySparkException), match="target column 'Number'"):
+        parsing.parsed_df.collect()
+
+
+@pytest.mark.parametrize("error_mode", [None, False, 1, [], "", "COLLECT", "unknown"])
+def test_error_collection_rejects_invalid_execution_modes(
+    spark: SparkSession,
+    error_mode,
+) -> None:
+    expected_exception = ValueError if isinstance(error_mode, str) else TypeError
+    with pytest.raises(expected_exception, match="error_mode must be 'configured' or 'collect'"):
+        public_parser.parse_dataframe(
+            spark.sql("SELECT '1' AS number, '2026-09-04' AS day, 'true' AS flag"),
+            _error_collection_config(),
+            key_columns=["number"],
+            error_mode=error_mode,
+        )
+
+
+@pytest.mark.parametrize("metadata_name", ["quality_parse_errors", "quality_error_mode"])
+def test_error_collection_rejects_reserved_input_and_mapped_key_names(
+    spark: SparkSession,
+    metadata_name: str,
+) -> None:
+    compiler = YamlParserConfigCompiler()
+    config = compiler.compile_mapping(
+        {
+            "parser_config_id": "collection_reserved_names",
+            "parser_config_name": "Collection Reserved Names",
+            "version": "1",
+            "columns": [
+                {
+                    "source_column_name": "value",
+                    "target_column_name": "Value",
+                    "expected_data_type": "string",
+                    "parser": "string",
+                }
+            ],
+        }
+    )
+    with pytest.raises(SchemaValidationError, match="reserved parser output columns"):
+        SparkDataFrameParser().parse_dataframe(
+            spark.sql(f"SELECT 'ok' AS value, 'occupied' AS {metadata_name}"),
+            config,
+            key_columns=["value"],
+            column_prefix="quality",
+            error_mode="collect",
+        )
+    mapped_config = compiler.compile_mapping(
+        {
+            "parser_config_id": "collection_reserved_key",
+            "parser_config_name": "Collection Reserved Key",
+            "version": "1",
+            "columns": [
+                {
+                    "source_column_name": "value",
+                    "target_column_name": metadata_name,
+                    "expected_data_type": "string",
+                    "parser": "string",
+                }
+            ],
+        }
+    )
+    with pytest.raises(SchemaValidationError, match=metadata_name):
+        SparkDataFrameParser().parse_dataframe(
+            spark.sql("SELECT 'ok' AS value"),
+            mapped_config,
+            key_columns=["value"],
+            column_prefix="quality",
+            error_mode="collect",
+        )
+
+
+@pytest.mark.classic_spark
+def test_error_collection_rejects_unkeyed_target_collisions_with_active_resolver(
+    classic_spark: SparkSession,
+) -> None:
+    spark = classic_spark
+    config = YamlParserConfigCompiler().compile_mapping(
+        {
+            "parser_config_id": "collection_target_resolver",
+            "parser_config_name": "Collection Target Resolver",
+            "version": "1",
+            "columns": [
+                {
+                    "source_column_name": "value",
+                    "target_column_name": "QUALITY_PARSE_ERRORS",
+                    "expected_data_type": "string",
+                    "parser": "string",
+                }
+            ],
+        }
+    )
+    source = spark.sql("SELECT 'row-1' AS row_id, 'ok' AS value")
+    previous_case_sensitive = spark.conf.get("spark.sql.caseSensitive")
+    try:
+        spark.conf.set("spark.sql.caseSensitive", "false")
+        with pytest.raises(SchemaValidationError, match="QUALITY_PARSE_ERRORS"):
+            SparkDataFrameParser().parse_dataframe(
+                source,
+                config,
+                key_columns=["row_id"],
+                column_prefix="quality",
+                error_mode="collect",
+            )
+        spark.conf.set("spark.sql.caseSensitive", "true")
+        parsing = SparkDataFrameParser().parse_dataframe(
+            source,
+            config,
+            key_columns=["row_id"],
+            column_prefix="quality",
+            error_mode="collect",
+        )
+        assert parsing.parsed_df.first().asDict() == {
+            "QUALITY_PARSE_ERRORS": "ok",
+            "quality_parse_errors": [],
+        }
+    finally:
+        spark.conf.set("spark.sql.caseSensitive", previous_case_sensitive)
+
+
+def test_error_collection_still_rejects_invalid_source_schema_and_datetime_formats(
+    spark: SparkSession,
+) -> None:
+    with pytest.raises(SchemaValidationError, match="must have Spark string type"):
+        SparkDataFrameParser().parse_dataframe(
+            spark.sql("SELECT 42 AS number, '2026-09-04' AS day, 'true' AS flag"),
+            _error_collection_config(),
+            key_columns=["number"],
+            error_mode="collect",
+        )
+    with pytest.raises(
+        SchemaValidationError, match=r"Custom datetime format 'invalid\[' is invalid"
+    ):
+        SparkDataFrameParser().parse_dataframe(
+            spark.sql("SELECT 'anything' AS occurred_at"),
+            _invalid_custom_datetime_config(),
+            key_columns=["occurred_at"],
+            error_mode="collect",
+        )
+
+
+@pytest.mark.classic_spark
+def test_error_collection_classic_persistence_keeps_errors_in_the_shared_plan(
+    classic_spark: SparkSession,
+) -> None:
+    parsing = SparkDataFrameParser().parse_dataframe(
+        classic_spark.sql(
+            "SELECT 'row-1' AS row_id, 'bad' AS number, 'bad-day' AS day, 'perhaps' AS flag"
+        ),
+        _error_collection_config(),
+        key_columns=["row_id"],
+        error_mode="collect",
+    )
+    assert parsing.persist() is parsing
+    try:
+        assert parsing._evaluated.storageLevel == StorageLevel.MEMORY_AND_DISK_DESER
+        assert parsing.parsed_df.select("Number").first().Number is None
+        parsed_errors = parsing.parsed_df.first().spark_parser_parse_errors
+        assert len(parsed_errors) == 3
+        assert parsing.results_df.first().spark_parser_parse_errors == parsed_errors
+    finally:
+        parsing.unpersist(blocking=True)
+    assert parsing._evaluated.storageLevel == StorageLevel.NONE
+
+
+def test_error_collection_keeps_errors_on_rows_with_failed_parsed_keys(
+    spark: SparkSession,
+) -> None:
+    config = _error_collection_config()
+    parsing = public_parser.parse_dataframe(
+        spark.sql(
+            """
+SELECT * FROM VALUES
+  ('first-bad-key', '2026-09-04', 'true'),
+  ('second-bad-key', '2026-09-04', 'true')
+AS source(number, day, flag)
+"""
+        ),
+        config,
+        key_columns=["number"],
+        error_mode="collect",
+    )
+    assert parsing.key_columns == ("Number",)
+    for projection in (parsing.parsed_df, parsing.results_df):
+        rows = projection.collect()
+        assert len(rows) == 2
+        assert all(row.Number is None for row in rows)
+        assert sorted(row.spark_parser_parse_errors[0].original_value for row in rows) == [
+            "first-bad-key",
+            "second-bad-key",
+        ]
+    assert (
+        parsing.results_df.first().spark_parser_config.content_hash
+        == public_parser.content_hash(config)
+    )

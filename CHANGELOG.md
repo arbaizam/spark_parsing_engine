@@ -28,6 +28,19 @@
 - Accept case-insensitive quoted `null` and `none` as disabled string-format aliases and serialize
   both to canonical null.
 - Report platform path-value failures through the compiler's public `CompilationError` contract.
+- Collect independent configuration-authoring and DataFrame schema findings before raising, expose
+  them through ordered exception `errors` tuples, and retain exact legacy text for singleton
+  failures. Syntax-level YAML failures and configured fail-mode row-value errors remain immediate
+  boundaries.
+- Add opt-in `error_mode="collect"` to record every conversion failure in an ordered
+  `<prefix>_parse_errors` array on both DataFrame projections, regardless of auditing. Suppress
+  configured `fail` errors with typed nulls while retaining other error policies, zero invalidation,
+  and final null defaults. Expose execution mode separately from configuration identity and record
+  suppressed failures accurately in audit actions.
+- Reject pass-through row keys that collide with configured target names under Spark's active
+  resolver, preventing unrelated raw and parsed values from sharing a public key name.
+- Identify the rejecting string-format profile in collected error messages, document diagnostic
+  size growth and suppression-action semantics, and cover collection in the Databricks notebook.
 - Update the reference YAML, Databricks guide, system tests, and package documentation around the
   explicit scalar processing boundary.
 

@@ -410,6 +410,7 @@ class SparkParserService:
         key_columns: Sequence[str],
         on_missing_source: str = "fail",
         column_prefix: str = "spark_parser",
+        error_mode: str = "configured",
     ):
         """Compile when necessary and build lazy parsed/audit Spark projections.
 
@@ -417,6 +418,8 @@ class SparkParserService:
         metadata use cases. Passing an already compiled config avoids redundant authoring work.
         ``key_columns`` names input fields; uniquely configured keys are returned by the audit
         projection under their parsed target columns.
+        ``error_mode='collect'`` replaces fail-policy conversion errors with null/default values
+        and appends structured parse errors to both projections, including unaudited columns.
         """
         resolved = config if isinstance(config, ParserConfig) else self.compile_yaml(config)
         from spark_parser.spark_runtime import SparkDataFrameParser
@@ -427,6 +430,7 @@ class SparkParserService:
             key_columns=key_columns,
             on_missing_source=on_missing_source,
             column_prefix=column_prefix,
+            error_mode=error_mode,
         )
 
     def review_yaml(
@@ -441,7 +445,18 @@ class SparkParserService:
         source_label: str | None = None
         try:
             config, source_label = self._compile_source(source)
-        except (CompilationError, TypeError, ValueError, OSError) as exc:
+        except CompilationError as exc:
+            return ConfigReviewReport(
+                is_valid=False,
+                source=source_label or self._source_label(source),
+                errors=exc.errors,
+                warnings=(),
+                summary={},
+                validation_checks=(),
+                column_reviews=(),
+                resolved_config=None,
+            )
+        except (TypeError, ValueError, OSError) as exc:
             return ConfigReviewReport(
                 is_valid=False,
                 source=source_label or self._source_label(source),

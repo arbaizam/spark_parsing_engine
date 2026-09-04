@@ -5,7 +5,7 @@
 # MAGIC
 # MAGIC These tests cover behavior that requires a real Databricks Spark session: native scalar
 # MAGIC parsing and display profiles, lazy fail-mode materialization, ANSI-mode parity, generated
-# MAGIC output schemas, row-level audit data, and input-schema validation. Compiler-only
+# MAGIC output schemas, row-level audit data, error collection, and input-schema validation. Compiler-only
 # MAGIC permutations remain in the pytest suite.
 # MAGIC
 # MAGIC Run this notebook from a Databricks Git checkout of the repository. It reads source directly
@@ -49,7 +49,7 @@ import spark_parser as spark_parser_package
 from spark_parser import SchemaValidationError, __version__, parser
 
 
-SYSTEM_TEST_IDS = tuple(f"ST-{number:03d}" for number in range(1, 9))
+SYSTEM_TEST_IDS = tuple(f"ST-{number:03d}" for number in range(1, 10))
 PASSED_TEST_IDS = []
 ACTIVE_TEST_ID = None
 
@@ -460,9 +460,7 @@ columns:
         "system_property_parse_results",
     )
 
-assert profile_rows["good-1"]["BusinessLabel"] == (
-    "FHLB Semi-Annual 2-Years 12-Month Advance"
-)
+assert profile_rows["good-1"]["BusinessLabel"] == ("FHLB Semi-Annual 2-Years 12-Month Advance")
 assert profile_rows["good-1"]["RateIndex"] == "SOFR Term 12-Month"
 assert profile_audit_rows["good-1"]["BusinessLabel"].changed is True
 assert profile_audit_rows["good-1"]["BusinessLabel"].actions_applied == []
@@ -481,9 +479,7 @@ assert set(property_rows) == {
     "Mixed Use - Multifamily - Over 20",
     "Storage",
 }
-assert property_audit_rows["unknown"]["PropertyType"].actions_applied == [
-    "parse_error_preserved"
-]
+assert property_audit_rows["unknown"]["PropertyType"].actions_applied == ["parse_error_preserved"]
 
 _pass(
     "ST-003",
@@ -751,6 +747,214 @@ _pass("ST-008", "Non-string sources, reserved outputs, and omitted explicit keys
 
 # COMMAND ----------
 
+_start("ST-009", "Collect row errors across policies while preserving configured-mode failures")
+
+collection_config = parser.compile_text(
+    """
+parser_config_id: system_error_collection
+parser_config_name: System Error Collection
+version: "1"
+columns:
+  - source_column_name: row_id
+    target_column_name: RowId
+    expected_data_type: string
+    parser: string
+  - source_column_name: number
+    target_column_name: CollectedValue
+    expected_data_type: integer
+    parser: {type: integer, audit: false}
+  - source_column_name: number
+    target_column_name: RequiredValue
+    expected_data_type: integer
+    parser: {type: integer, audit: true, is_nullable: false, default_on_null: -1}
+  - source_column_name: number
+    target_column_name: NullableValue
+    expected_data_type: integer
+    parser: {type: integer, audit: true, on_parse_error: null}
+  - source_column_name: number
+    target_column_name: DefaultedValue
+    expected_data_type: integer
+    parser: {type: integer, audit: true, on_parse_error: default, default_on_error: 7}
+  - source_column_name: state
+    target_column_name: PreservedValue
+    expected_data_type: string
+    parser: {type: string, format: state_us, audit: true, on_parse_error: preserve}
+"""
+)
+collection_hash = parser.content_hash(collection_config)
+collection_source = spark.sql(
+    """
+SELECT * FROM VALUES
+  ('bad', '  invalid  ', '  not-a-state  '),
+  ('good', '42', 'Illinois'),
+  ('null', CAST(NULL AS STRING), CAST(NULL AS STRING))
+AS source(row_id, number, state)
+"""
+)
+with _spark_conf_scope(STRICT_SQL_SETTINGS):
+    collection_parsing = parser.parse_dataframe(
+        collection_source,
+        collection_config,
+        key_columns=["row_id"],
+        column_prefix="system_quality",
+        error_mode="collect",
+    )
+    # Materialize every target and both diagnostic projections. count() could prune conversions.
+    collection_rows = _rows_by_key(collection_parsing.parsed_df, "RowId")
+    collection_results = _rows_by_key(collection_parsing.results_df, "RowId")
+    configured_parsing = parser.parse_dataframe(
+        collection_source,
+        collection_config,
+        key_columns=["row_id"],
+        column_prefix="system_quality",
+    )
+    collection_fail_exception = _expect_raises(
+        (Py4JJavaError, PySparkException),
+        lambda: (
+            configured_parsing.parsed_df.where(F.col("RowId") == "bad")
+            .select("CollectedValue")
+            .collect()
+        ),
+        contains=(
+            "Spark Parser could not parse source 'number' into target column 'CollectedValue' "
+            "as integer"
+        ),
+    )
+
+collection_targets = [
+    "RowId",
+    "CollectedValue",
+    "RequiredValue",
+    "NullableValue",
+    "DefaultedValue",
+    "PreservedValue",
+]
+assert collection_parsing.error_mode == "collect"
+assert collection_parsing.key_columns == ("RowId",)
+assert collection_parsing.parsed_df.columns == [*collection_targets, "system_quality_parse_errors"]
+assert collection_parsing.result_columns == (
+    "system_quality_parse_results",
+    "system_quality_config",
+    "system_quality_engine_version",
+    "system_quality_parse_errors",
+    "system_quality_error_mode",
+)
+assert collection_parsing.results_df.columns == ["RowId", *collection_parsing.result_columns]
+assert configured_parsing.error_mode == "configured"
+assert configured_parsing.parsed_df.columns == collection_targets
+assert "system_quality_parse_errors" not in configured_parsing.results_df.columns
+assert "system_quality_error_mode" not in configured_parsing.results_df.columns
+assert parser.content_hash(collection_config) == collection_hash
+collection_error_type = collection_parsing.parsed_df.schema["system_quality_parse_errors"].dataType
+assert collection_error_type == (
+    collection_parsing.results_df.schema["system_quality_parse_errors"].dataType
+)
+assert collection_error_type.elementType.fieldNames() == [
+    "source_column_name",
+    "target_column_name",
+    "original_value",
+    "expected_data_type",
+    "error_code",
+    "message",
+    "resolution",
+]
+assert all(field.dataType.simpleString() == "string" for field in collection_error_type.elementType)
+assert all(
+    collection_parsing.parsed_df.schema[name].dataType.simpleString() == "int"
+    for name in collection_targets[1:5]
+)
+for row_id, expected_values in (
+    ("bad", [None, -1, None, 7, "  not-a-state  "]),
+    ("good", [42, 42, 42, 42, "IL"]),
+    ("null", [None, -1, None, None, None]),
+):
+    assert [collection_rows[row_id][name] for name in collection_targets[1:]] == expected_values
+    result = collection_results[row_id]
+    assert (
+        result["system_quality_parse_errors"]
+        == (collection_rows[row_id]["system_quality_parse_errors"])
+    )
+    assert result["system_quality_error_mode"] == "collect"
+    assert result["system_quality_config"]["content_hash"] == collection_hash
+    assert result["system_quality_config"]["id"] == collection_config.parser_config_id
+    assert result["system_quality_config"]["version"] == collection_config.version
+    assert result["system_quality_engine_version"] == __version__
+    if row_id != "bad":
+        assert result["system_quality_parse_errors"] == []
+
+assert collection_rows["bad"]["system_quality_parse_errors"] == [
+    {
+        "source_column_name": source_name,
+        "target_column_name": target_name,
+        "original_value": original,
+        "expected_data_type": expected_type,
+        "error_code": "PARSE_ERROR",
+        "message": message,
+        "resolution": resolution,
+    }
+    for source_name, target_name, original, expected_type, message, resolution in (
+        (
+            "number",
+            "CollectedValue",
+            "  invalid  ",
+            "integer",
+            "Value could not be parsed as integer.",
+            "null",
+        ),
+        (
+            "number",
+            "RequiredValue",
+            "  invalid  ",
+            "integer",
+            "Value could not be parsed as integer.",
+            "default_on_null",
+        ),
+        (
+            "number",
+            "NullableValue",
+            "  invalid  ",
+            "integer",
+            "Value could not be parsed as integer.",
+            "null",
+        ),
+        (
+            "number",
+            "DefaultedValue",
+            "  invalid  ",
+            "integer",
+            "Value could not be parsed as integer.",
+            "default_on_error",
+        ),
+        (
+            "state",
+            "PreservedValue",
+            "  not-a-state  ",
+            "string",
+            "Value could not be parsed as string with format 'state_us'.",
+            "preserve",
+        ),
+    )
+]
+collection_bad_audit = collection_results["bad"]["system_quality_parse_results"]
+assert [audit["target_column_name"] for audit in collection_bad_audit] == collection_targets[2:]
+assert [audit["actions_applied"] for audit in collection_bad_audit] == [
+    ["parse_error_collected", "parse_error_to_null", "default_on_null_applied"],
+    ["parse_error_to_null"],
+    ["parse_error_default_applied"],
+    ["parse_error_preserved"],
+]
+assert all(audit["changed"] is True for audit in collection_bad_audit)
+assert collection_bad_audit[-1]["error"] == "Value could not be parsed as string."
+print(f"Expected configured-mode materialization error: {type(collection_fail_exception).__name__}")
+
+_pass(
+    "ST-009",
+    "Both projections collect ordered errors independently of auditing, retain policy outcomes "
+    "and identity metadata, and leave configured mode strict.",
+)
+
+# COMMAND ----------
+
 assert tuple(PASSED_TEST_IDS) == SYSTEM_TEST_IDS, (
     "The final success marker requires every system test to pass in order; "
     f"recorded {PASSED_TEST_IDS!r}."
@@ -759,5 +963,5 @@ assert ACTIVE_TEST_ID is None, f"System test {ACTIVE_TEST_ID} did not record a P
 
 print()
 print("=" * 80)
-print("PASS: All 8 current-contract Spark Parser system tests completed.")
+print("PASS: All 9 current-contract Spark Parser system tests completed.")
 print("=" * 80)

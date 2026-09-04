@@ -692,6 +692,490 @@ columns:
         compiler.compile_mapping({1: "invalid"})  # type: ignore[dict-item]
 
 
+def test_singleton_invalid_list_keeps_its_complete_legacy_message() -> None:
+    invalid_values = list(range(20))
+    payload = {
+        "parser_config_id": "long_invalid_list",
+        "parser_config_name": "Long Invalid List",
+        "version": "1",
+        "globals": {"true_values": invalid_values},
+        "columns": [
+            {
+                "source_column_name": "value",
+                "target_column_name": "Value",
+                "expected_data_type": "string",
+                "parser": "string",
+            }
+        ],
+    }
+
+    with pytest.raises(CompilationError) as exc_info:
+        YamlParserConfigCompiler().compile_mapping(payload)
+
+    expected = f"globals.true_values must contain only valid strings: {invalid_values!r}."
+    assert exc_info.value.errors == (expected,)
+    assert str(exc_info.value) == expected
+
+
+def test_aggregate_validation_skips_checks_that_depend_on_incompatible_types() -> None:
+    """A parser/type mismatch must not leak a Decimal conversion or invent default errors."""
+    payload = {
+        "parser_config_id": "mismatch",
+        "parser_config_name": "Mismatch",
+        "version": "1",
+        "columns": [
+            {
+                "source_column_name": "value",
+                "target_column_name": "Value",
+                "expected_data_type": "string",
+                "parser": {
+                    "type": "integer",
+                    "is_nullable": False,
+                    "default_on_null": "not-a-number",
+                    "zero_is_valid": False,
+                },
+            }
+        ],
+    }
+
+    with pytest.raises(CompilationError) as exc_info:
+        YamlParserConfigCompiler().compile_mapping(payload)
+
+    assert exc_info.value.errors == (
+        "Parser 'integer' is incompatible with expected_data_type 'string' for target column "
+        "'Value'; expected 'string'.",
+    )
+    assert str(exc_info.value) == exc_info.value.errors[0]
+
+
+def test_aggregate_validation_checks_both_binary_defaults_and_duplicate_targets() -> None:
+    payload = {
+        "parser_config_id": "binary_defaults",
+        "parser_config_name": "Binary Defaults",
+        "version": "1",
+        "columns": [
+            {
+                "source_column_name": "first",
+                "target_column_name": "Payload",
+                "expected_data_type": "binary",
+                "parser": {
+                    "type": "binary",
+                    "is_nullable": False,
+                    "default_on_null": "not base64",
+                    "on_parse_error": "default",
+                    "default_on_error": "also not base64",
+                },
+            },
+            {
+                "source_column_name": "second",
+                "target_column_name": "Payload",
+                "expected_data_type": "string",
+                "parser": {"type": "string", "audit": "yes"},
+            },
+        ],
+    }
+
+    with pytest.raises(CompilationError) as exc_info:
+        YamlParserConfigCompiler().compile_mapping(payload)
+
+    assert exc_info.value.errors == (
+        "columns[0].parser.default_on_null: default_on_null is not valid base64 binary text.",
+        "columns[0].parser.default_on_error: default_on_error is not valid base64 binary text.",
+        "columns[1].parser.audit: audit must be true or false.",
+        "columns: Duplicate target_column_name values: ['Payload'].",
+    )
+
+
+def test_null_marker_relationships_respect_invalid_or_incomplete_mode_dependencies() -> None:
+    compiler = YamlParserConfigCompiler()
+    base = {
+        "parser_config_id": "marker_dependencies",
+        "parser_config_name": "Marker Dependencies",
+        "version": "1",
+        "columns": [
+            {
+                "source_column_name": "value",
+                "target_column_name": "Value",
+                "expected_data_type": "string",
+                "parser": {
+                    "type": "string",
+                    "null_markers_mode": "replace",
+                    "replace_null_markers": True,
+                },
+            }
+        ],
+    }
+
+    with pytest.raises(CompilationError) as incomplete:
+        compiler.compile_mapping(base)
+    assert incomplete.value.errors == (
+        "null_markers_mode for 'Value' requires column null_markers.",
+    )
+
+    base["columns"][0]["parser"]["null_markers_mode"] = "bogus"
+    base["columns"][0]["parser"]["null_markers"] = []
+    with pytest.raises(CompilationError) as indeterminate:
+        compiler.compile_mapping(base)
+    assert indeterminate.value.errors == (
+        "columns[0].parser.null_markers_mode: Invalid null_markers_mode 'bogus'. "
+        "Valid values: replace, extend.",
+        "columns[0].parser.replace_null_markers: replace_null_markers is true for 'Value', "
+        "but no null markers exist.",
+    )
+
+
+def test_invalid_global_boolean_overlap_is_not_repeated_for_inheriting_columns() -> None:
+    payload = {
+        "parser_config_id": "global_overlap",
+        "parser_config_name": "Global Overlap",
+        "version": "1",
+        "globals": {
+            "true_values": ["Y"],
+            "false_values": ["y"],
+            "boolean_case_sensitive": False,
+        },
+        "columns": [
+            {
+                "source_column_name": "first",
+                "target_column_name": "First",
+                "expected_data_type": "boolean",
+                "parser": "boolean",
+            },
+            {
+                "source_column_name": "second",
+                "target_column_name": "Second",
+                "expected_data_type": "boolean",
+                "parser": {
+                    "type": "boolean",
+                    "boolean_values_mode": "extend",
+                    "true_values": ["Y"],
+                },
+            },
+        ],
+    }
+
+    with pytest.raises(CompilationError) as exc_info:
+        YamlParserConfigCompiler().compile_mapping(payload)
+
+    assert exc_info.value.errors == (
+        "Boolean true_values and false_values overlap for globals: ['y'].",
+    )
+
+
+def test_boolean_overlap_waits_for_a_required_replace_vocabulary() -> None:
+    payload = {
+        "parser_config_id": "incomplete_boolean_replace",
+        "parser_config_name": "Incomplete Boolean Replace",
+        "version": "1",
+        "globals": {
+            "true_values": ["Y"],
+            "false_values": ["y"],
+            "boolean_case_sensitive": True,
+        },
+        "columns": [
+            {
+                "source_column_name": "value",
+                "target_column_name": "Value",
+                "expected_data_type": "boolean",
+                "parser": {
+                    "type": "boolean",
+                    "boolean_values_mode": "replace",
+                    "boolean_case_sensitive": False,
+                },
+            }
+        ],
+    }
+
+    with pytest.raises(CompilationError) as exc_info:
+        YamlParserConfigCompiler().compile_mapping(payload)
+
+    assert exc_info.value.errors == (
+        "boolean_values_mode for 'Value' requires true_values or false_values.",
+    )
+
+
+def test_extend_does_not_duplicate_one_overlap_from_local_and_inherited_checks() -> None:
+    payload = {
+        "parser_config_id": "deduplicated_overlap",
+        "parser_config_name": "Deduplicated Overlap",
+        "version": "1",
+        "globals": {
+            "true_values": ["x"],
+            "false_values": ["y"],
+        },
+        "columns": [
+            {
+                "source_column_name": "value",
+                "target_column_name": "Value",
+                "expected_data_type": "boolean",
+                "parser": {
+                    "type": "boolean",
+                    "boolean_values_mode": "extend",
+                    "true_values": ["y"],
+                    "false_values": ["y"],
+                },
+            }
+        ],
+    }
+
+    with pytest.raises(CompilationError) as exc_info:
+        YamlParserConfigCompiler().compile_mapping(payload)
+
+    assert exc_info.value.errors == (
+        "Boolean true_values and false_values overlap for target column 'Value': ['y'].",
+    )
+
+
+def test_extend_reports_distinct_column_overlap_when_globals_already_overlap() -> None:
+    payload = {
+        "parser_config_id": "global_and_column_overlap",
+        "parser_config_name": "Global And Column Overlap",
+        "version": "1",
+        "globals": {
+            "true_values": ["Y", "A"],
+            "false_values": ["y"],
+            "boolean_case_sensitive": False,
+        },
+        "columns": [
+            {
+                "source_column_name": "value",
+                "target_column_name": "Value",
+                "expected_data_type": "boolean",
+                "parser": {
+                    "type": "boolean",
+                    "boolean_values_mode": "extend",
+                    "false_values": ["a"],
+                },
+            }
+        ],
+    }
+
+    with pytest.raises(CompilationError) as exc_info:
+        YamlParserConfigCompiler().compile_mapping(payload)
+
+    assert exc_info.value.errors == (
+        "globals: Boolean true_values and false_values overlap for globals: ['y'].",
+        "columns[0].parser: Boolean true_values and false_values overlap for target column "
+        "'Value': ['a'].",
+    )
+
+
+def test_case_override_reports_only_new_overlap_beyond_a_global_exact_overlap() -> None:
+    payload = {
+        "parser_config_id": "case_override_additional_overlap",
+        "parser_config_name": "Case Override Additional Overlap",
+        "version": "1",
+        "globals": {
+            "true_values": ["X", "A"],
+            "false_values": ["X", "a"],
+            "boolean_case_sensitive": True,
+        },
+        "columns": [
+            {
+                "source_column_name": "value",
+                "target_column_name": "Value",
+                "expected_data_type": "boolean",
+                "parser": {"type": "boolean", "boolean_case_sensitive": False},
+            }
+        ],
+    }
+
+    with pytest.raises(CompilationError) as exc_info:
+        YamlParserConfigCompiler().compile_mapping(payload)
+
+    assert exc_info.value.errors == (
+        "globals: Boolean true_values and false_values overlap for globals: ['X'].",
+        "columns[0].parser: Boolean true_values and false_values overlap for target column "
+        "'Value': ['a'].",
+    )
+
+
+def test_extend_collects_local_and_inherited_cross_overlaps_independently() -> None:
+    payload = {
+        "parser_config_id": "multiple_column_overlaps",
+        "parser_config_name": "Multiple Column Overlaps",
+        "version": "1",
+        "globals": {
+            "true_values": ["A"],
+            "false_values": ["B"],
+            "boolean_case_sensitive": False,
+        },
+        "columns": [
+            {
+                "source_column_name": "value",
+                "target_column_name": "Value",
+                "expected_data_type": "boolean",
+                "parser": {
+                    "type": "boolean",
+                    "boolean_values_mode": "extend",
+                    "true_values": ["X"],
+                    "false_values": ["x", "a"],
+                },
+            }
+        ],
+    }
+
+    with pytest.raises(CompilationError) as exc_info:
+        YamlParserConfigCompiler().compile_mapping(payload)
+
+    assert exc_info.value.errors == (
+        "columns[0].parser: Boolean true_values and false_values overlap for target column "
+        "'Value': ['x'].",
+        "columns[0].parser: Boolean true_values and false_values overlap for target column "
+        "'Value': ['a'].",
+    )
+
+
+def test_exact_boolean_overlap_is_reported_when_case_setting_is_invalid() -> None:
+    payload = {
+        "parser_config_id": "exact_overlap",
+        "parser_config_name": "Exact Overlap",
+        "version": "1",
+        "globals": {
+            "true_values": ["same"],
+            "false_values": ["same"],
+            "boolean_case_sensitive": "invalid",
+        },
+        "columns": [
+            {
+                "source_column_name": "value",
+                "target_column_name": "Value",
+                "expected_data_type": "boolean",
+                "parser": "boolean",
+            }
+        ],
+    }
+
+    with pytest.raises(CompilationError) as exc_info:
+        YamlParserConfigCompiler().compile_mapping(payload)
+
+    assert exc_info.value.errors == (
+        "globals.boolean_case_sensitive: boolean_case_sensitive must be true or false.",
+        "globals: Boolean true_values and false_values overlap for globals: ['same'].",
+    )
+
+
+def test_supplied_exact_boolean_overlap_is_reported_when_mode_is_invalid() -> None:
+    payload = {
+        "parser_config_id": "invalid_mode_overlap",
+        "parser_config_name": "Invalid Mode Overlap",
+        "version": "1",
+        "columns": [
+            {
+                "source_column_name": "value",
+                "target_column_name": "Value",
+                "expected_data_type": "boolean",
+                "parser": {
+                    "type": "boolean",
+                    "boolean_values_mode": "invalid",
+                    "true_values": ["same"],
+                    "false_values": ["same"],
+                },
+            }
+        ],
+    }
+
+    with pytest.raises(CompilationError) as exc_info:
+        YamlParserConfigCompiler().compile_mapping(payload)
+
+    assert exc_info.value.errors == (
+        "columns[0].parser.boolean_values_mode: Invalid boolean_values_mode 'invalid'. "
+        "Valid values: replace, extend.",
+        "columns[0].parser: Boolean true_values and false_values overlap for target column "
+        "'Value': ['same'].",
+    )
+
+
+def test_one_sided_boolean_overlap_is_reported_when_mode_is_invalid() -> None:
+    payload = {
+        "parser_config_id": "invalid_mode_inherited_overlap",
+        "parser_config_name": "Invalid Mode Inherited Overlap",
+        "version": "1",
+        "columns": [
+            {
+                "source_column_name": "value",
+                "target_column_name": "Value",
+                "expected_data_type": "boolean",
+                "parser": {
+                    "type": "boolean",
+                    "boolean_values_mode": "invalid",
+                    "true_values": ["false"],
+                },
+            }
+        ],
+    }
+
+    with pytest.raises(CompilationError) as exc_info:
+        YamlParserConfigCompiler().compile_mapping(payload)
+
+    assert exc_info.value.errors == (
+        "columns[0].parser.boolean_values_mode: Invalid boolean_values_mode 'invalid'. "
+        "Valid values: replace, extend.",
+        "columns[0].parser: Boolean true_values and false_values overlap for target column "
+        "'Value': ['false'].",
+    )
+
+
+def test_column_case_override_checks_vocabularies_when_global_case_setting_is_invalid() -> None:
+    payload = {
+        "parser_config_id": "column_case_override",
+        "parser_config_name": "Column Case Override",
+        "version": "1",
+        "globals": {
+            "true_values": ["Y"],
+            "false_values": ["y"],
+            "boolean_case_sensitive": "invalid",
+        },
+        "columns": [
+            {
+                "source_column_name": "value",
+                "target_column_name": "Value",
+                "expected_data_type": "boolean",
+                "parser": {"type": "boolean", "boolean_case_sensitive": False},
+            }
+        ],
+    }
+
+    with pytest.raises(CompilationError) as exc_info:
+        YamlParserConfigCompiler().compile_mapping(payload)
+
+    assert exc_info.value.errors == (
+        "globals.boolean_case_sensitive: boolean_case_sensitive must be true or false.",
+        "columns[0].parser: Boolean true_values and false_values overlap for target column "
+        "'Value': ['y'].",
+    )
+
+
+def test_boolean_override_is_checked_when_other_global_vocabulary_is_empty() -> None:
+    payload = {
+        "parser_config_id": "empty_global_vocabulary",
+        "parser_config_name": "Empty Global Vocabulary",
+        "version": "1",
+        "globals": {"true_values": [], "false_values": ["N"]},
+        "columns": [
+            {
+                "source_column_name": "value",
+                "target_column_name": "Value",
+                "expected_data_type": "boolean",
+                "parser": {
+                    "type": "boolean",
+                    "boolean_values_mode": "extend",
+                    "true_values": ["N"],
+                },
+            }
+        ],
+    }
+
+    with pytest.raises(CompilationError) as exc_info:
+        YamlParserConfigCompiler().compile_mapping(payload)
+
+    assert exc_info.value.errors == (
+        "globals: globals.true_values and globals.false_values must be non-empty.",
+        "columns[0].parser: Boolean true_values and false_values overlap for target column "
+        "'Value': ['N', 'n'].",
+    )
+
+
 def test_metadata_is_trimmed_but_source_and_target_names_are_preserved() -> None:
     compiler = YamlParserConfigCompiler()
     serializer = ParserConfigSerializer()

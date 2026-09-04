@@ -2,8 +2,8 @@
 
 Sources: `tests/unit/` and `tests/integration/`. Shared test data lives under `tests/fixtures/`.
 
-The 0.5.0 release suite covers the scalar-only package contract and collects **161 pytest cases**:
-**117 Spark-independent unit cases** and **44 Spark integration cases**. The Databricks system
+The 0.5.0 release suite covers the scalar-only package contract and collects **244 pytest cases**:
+**159 Spark-independent unit cases** and **85 Spark integration cases**. The Databricks system
 notebook is separate from those counts and is documented in
 `spark_parser_system_test_summary.md`.
 
@@ -11,16 +11,25 @@ notebook is separate from those counts and is documented in
 
 | Area | Current contract covered |
 | --- | --- |
-| YAML compilation and datatype grammar | Strict YAML shapes, source-located duplicate-key errors, well-formed Unicode, bounded YAML composition, all scalar parser contracts, scalar aliases, `decimal(p,s)` bounds, typed defaults, cross-Python timestamp defaults, Boolean vocabulary inheritance, source fan-out, target uniqueness, and clear rejection of array/struct/map datatypes and parser names. |
+| YAML compilation and datatype grammar | Strict YAML shapes, source-located duplicate-key errors, well-formed Unicode, bounded YAML composition, dependency-aware aggregate findings with stable field paths, all scalar parser contracts, scalar aliases, `decimal(p,s)` bounds, typed defaults, cross-Python timestamp defaults, Boolean vocabulary inheritance, source fan-out, target uniqueness, and clear rejection of array/struct/map datatypes and parser names. |
 | Serialization | Deterministic resolved mappings, canonical JSON, semantic/order-sensitive content hashing, caller detachment, and recompilation of scalar configurations. |
+| Public exceptions | Singleton and aggregate validation messages, ordinary Exception constructor compatibility, and preservation of messages, arguments, and individual errors across pickle round trips. |
 | Service and configuration review | Discoverable scalar parser/config metadata, immutable defaults with detached JSON copies, compilation/serialization facades, public errors, review reports, type-driven YAML text/`Path`/mapping dispatch, deferred Unicode checks, warnings, Markdown/YAML/JSON safety, and scalar source-to-target schema reporting. |
-| Native Spark runtime | Every scalar datatype, string display profiles including `title_business_v1`, `interest_rate_index_v1`, and `property_type_v1`, value-aware string/ZIP audit flags, target-mapped and pass-through result keys, Unicode normalization, strict numeric/Base64/datetime tokens, floating-width underflow rejection, Boolean overlap checks, defaults and error policies, Spark identifier resolution, public facade projections, cache delegation, date/timezone stability, ANSI parity, schema guards, wide configurations, output prefixes, and lazy fail-mode materialization. |
+| Native Spark runtime | Every scalar datatype, string display profiles including `title_business_v1`, `interest_rate_index_v1`, and `property_type_v1`, value-aware string/ZIP audit flags, target-mapped and pass-through result keys, Unicode normalization, strict numeric/Base64/datetime tokens, floating-width underflow rejection, Boolean overlap checks, defaults and error policies, aggregate metadata-only schema findings with guarded dependencies, Spark identifier resolution, public facade projections, cache delegation, date/timezone stability, ANSI parity, schema guards, wide configurations, output prefixes, and lazy fail-mode materialization. |
+| Error collection and result identity | Every failed conversion appears in both projections regardless of auditing, with stable schemas/order, original values, format-aware messages, final resolutions, and unchanged configuration identity. Coverage includes valid/empty/null/missing inputs, mixed policies, failed parsed keys, persistence, generated-name collisions, and rejection of pass-through keys that conflict with parsed targets under the active resolver. |
 
 Configured arrays, structs, maps, recursive defaults, child-error policies, and nested audit paths are
 not part of the 0.5.0 contract. Complex source data is decoded or flattened upstream and complex
 target data may be reconstructed downstream.
 
 ## Execution
+
+Refresh the counts above after adding or changing parametrized cases:
+
+```bash
+python -m pytest tests/unit --collect-only -q
+python -m pytest tests/integration --collect-only -q
+```
 
 Run the Spark-independent unit suite:
 

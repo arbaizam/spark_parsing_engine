@@ -75,6 +75,23 @@ PARSE_RESULT_STRUCT = T.StructType(
 )
 PARSE_RESULT_ARRAY = T.ArrayType(PARSE_RESULT_STRUCT, containsNull=True)
 
+# Collection diagnostics are independent of the optional, more detailed audit records.
+PARSE_ERROR_STRUCT = T.StructType(
+    [
+        T.StructField(name, T.StringType(), True)
+        for name in (
+            "source_column_name",
+            "target_column_name",
+            "original_value",
+            "expected_data_type",
+            "error_code",
+            "message",
+            "resolution",
+        )
+    ]
+)
+PARSE_ERROR_ARRAY = T.ArrayType(PARSE_ERROR_STRUCT, containsNull=True)
+
 # Numeric values are decoded through strict JSON to obtain ANSI-safe casts. This pattern rejects
 # partial tokens and non-JSON spellings before Spark attempts the typed conversion.
 _JSON_NUMBER_PATTERN = r"\A-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?\z"
@@ -156,6 +173,17 @@ def _spark_error_class(exc: PySparkException) -> str:
     get_condition = getattr(exc, "getCondition", None)
     condition = get_condition() if get_condition is not None else exc.getErrorClass()
     return str(condition or "")
+
+
+def _is_invalid_datetime_pattern_error(exc: PySparkException) -> bool:
+    """Recognize only Spark failures that prove a datetime pattern is invalid."""
+    condition = _spark_error_class(exc)
+    return (
+        condition.startswith("INVALID_DATETIME_PATTERN")
+        or condition.startswith("INCONSISTENT_BEHAVIOR_CROSS_VERSION.DATETIME_PATTERN_RECOGNITION")
+        or condition == "_LEGACY_ERROR_TEMP_2130"
+        or (not condition and "Illegal pattern character" in str(exc))
+    )
 
 
 def _resolver_is_case_sensitive(df: DataFrame) -> bool:
@@ -276,6 +304,38 @@ def _resolver_duplicates(
         return sorted(collisions)
 
 
+def _resolver_cross_conflicts(
+    df: DataFrame,
+    candidates: Sequence[str],
+    other_names: Sequence[str],
+    *,
+    case_sensitive: bool,
+) -> list[str]:
+    """Return candidate aliases that collide with the other namespace under Catalyst's resolver."""
+    unique_candidates = tuple(dict.fromkeys(candidates))
+    if not unique_candidates or not other_names:
+        return []
+    if case_sensitive or all(name.isascii() for name in (*unique_candidates, *other_names)):
+        other_keys = {
+            _ascii_resolver_key(name, case_sensitive=case_sensitive) for name in other_names
+        }
+        return sorted(
+            name
+            for name in unique_candidates
+            if _ascii_resolver_key(name, case_sensitive=case_sensitive) in other_keys
+        )
+    return sorted(
+        name
+        for name in unique_candidates
+        if name
+        in _resolver_duplicates(
+            df,
+            (name, *other_names),
+            case_sensitive=case_sensitive,
+        )
+    )
+
+
 def _reserved_output_conflicts(
     df: DataFrame,
     names: Sequence[str],
@@ -330,6 +390,7 @@ class SparkDataFrameParser:
         key_columns: Sequence[str],
         on_missing_source: str = "fail",
         column_prefix: str = "spark_parser",
+        error_mode: str = "configured",
     ) -> DataFrameParsing:
         """Build lazy parsed and row-level audit projections.
 
@@ -338,19 +399,33 @@ class SparkDataFrameParser:
         recoverable warning and typed null/default substitution.
         Invalid non-null values raise during the first Spark action unless their parser explicitly
         selects ``on_parse_error: null``, ``default``, or string-only ``preserve``.
+        ``error_mode='collect'`` suppresses fail-policy conversion errors and attaches all row
+        conversion errors to both projections regardless of auditing. Null/default handling still
+        applies. Configuration, schema, and unrelated Spark execution failures are not suppressed.
         """
         if not isinstance(config, ParserConfig):
             raise TypeError("config must be a ParserConfig.")
+        if not isinstance(error_mode, str):
+            raise TypeError("error_mode must be 'configured' or 'collect'.")
+        if error_mode not in {"configured", "collect"}:
+            raise ValueError("error_mode must be 'configured' or 'collect'.")
         if not isinstance(column_prefix, str) or not column_prefix:
             raise ValueError("column_prefix must be a non-empty string.")
         if not _is_well_formed_unicode(column_prefix):
             raise ValueError("column_prefix must contain well-formed Unicode.")
+        collect_errors = error_mode == "collect"
+        collection_output_names = (
+            (f"{column_prefix}_parse_errors", f"{column_prefix}_error_mode")
+            if collect_errors
+            else ()
+        )
         key_bindings, schema_warnings, missing_sources = self._validate_schema(
             df,
             config,
             key_columns,
             on_missing_source,
             column_prefix,
+            collection_output_names=collection_output_names,
         )
 
         # Generate every internal name up front. UUID-backed names prevent conflicts with unusual
@@ -396,6 +471,7 @@ class SparkDataFrameParser:
                     self._parse_failed(plan),
                     self._source_value(plan),
                     plan.config,
+                    collect_errors=collect_errors,
                 )
                 for plan in plans
             },
@@ -426,7 +502,11 @@ class SparkDataFrameParser:
             for binding in key_bindings
         )
         parsed_columns = [(plan.config.target_column_name, plan.final_name) for plan in plans]
-        audit_structs = [self._audit_for_plan(plan) for plan in plans if plan.config.parser.audit]
+        audit_structs = [
+            self._audit_for_plan(plan, collect_errors=collect_errors)
+            for plan in plans
+            if plan.config.parser.audit
+        ]
 
         parse_results_name = f"{column_prefix}_parse_results"
         config_name = f"{column_prefix}_config"
@@ -436,19 +516,24 @@ class SparkDataFrameParser:
         parse_results = (F.array(*audit_structs) if audit_structs else F.array()).cast(
             PARSE_RESULT_ARRAY
         )
-        working = self._with_columns_checked(
-            working,
-            {
-                parse_results_name: parse_results,
-                config_name: F.struct(
-                    F.lit(config.parser_config_id).alias("id"),
-                    F.lit(config.version).alias("version"),
-                    F.lit(self._serializer.content_hash(config)).alias("content_hash"),
-                ),
-                engine_version_name: F.lit(__version__),
-            },
-            config,
-        )
+        metadata_columns = {
+            parse_results_name: parse_results,
+            config_name: F.struct(
+                F.lit(config.parser_config_id).alias("id"),
+                F.lit(config.version).alias("version"),
+                F.lit(self._serializer.content_hash(config)).alias("content_hash"),
+            ),
+            engine_version_name: F.lit(__version__),
+        }
+        if collect_errors:
+            parse_errors_name, error_mode_name = collection_output_names
+            metadata_columns[parse_errors_name] = F.filter(
+                F.array(*(self._collected_error_for_plan(plan) for plan in plans)),
+                lambda error: error.isNotNull(),
+            ).cast(PARSE_ERROR_ARRAY)
+            metadata_columns[error_mode_name] = F.lit(error_mode)
+            parsed_columns.append((parse_errors_name, parse_errors_name))
+        working = self._with_columns_checked(working, metadata_columns, config)
         # Drop bronze and temporary staging columns from the shared plan. Configured row keys use
         # their parsed target values and names so results_df can join directly to parsed_df;
         # unconfigured and source-fan-out keys remain pass-through input fields.
@@ -458,16 +543,15 @@ class SparkDataFrameParser:
                 for output_name, internal_name in result_key_columns
             ],
             *[_column(plan.final_name) for plan in plans],
-            _column(parse_results_name),
-            _column(config_name),
-            _column(engine_version_name),
+            *[_column(name) for name in metadata_columns],
         )
         return DataFrameParsing(
             working,
             parsed_columns=parsed_columns,
             key_columns=tuple(output_name for output_name, _ in result_key_columns),
-            result_columns=(parse_results_name, config_name, engine_version_name),
+            result_columns=tuple(metadata_columns),
             warnings=schema_warnings,
+            error_mode=error_mode,
         )
 
     @classmethod
@@ -542,74 +626,70 @@ class SparkDataFrameParser:
         key_columns: Sequence[str],
         on_missing_source: str,
         column_prefix: str,
+        *,
+        collection_output_names: Sequence[str] = (),
     ) -> tuple[tuple[_KeyBinding, ...], tuple[str, ...], frozenset[str]]:
         """Validate the bronze schema and bind input row keys to public audit keys.
 
         Schema inspection is metadata-only and does not trigger a Spark action. Missing configured
         sources are recoverable only through an explicit warn policy; ambiguous or non-string
-        sources are not recoverable and fail immediately. A key that is also a uniquely configured
-        source is projected through that column's parsed target. Unconfigured keys and keys whose
-        source intentionally fans out to multiple targets pass through unchanged.
+        sources are not recoverable. Independent incompatibilities are reported together, while
+        checks that depend on invalid or ambiguous names are skipped. A key that is also a uniquely
+        configured source is projected through that column's parsed target. Unconfigured keys and
+        keys whose source intentionally fans out to multiple targets pass through unchanged.
         """
         if not isinstance(on_missing_source, str):
             raise TypeError("on_missing_source must be 'fail' or 'warn'.")
         if on_missing_source not in {"fail", "warn"}:
             raise ValueError("on_missing_source must be 'fail' or 'warn'.")
-        if key_columns is None:
-            raise SchemaValidationError("key_columns is required and must be supplied explicitly.")
-        if isinstance(key_columns, (str, bytes)):
-            raise TypeError("key_columns must be a sequence, not a string.")
-        try:
-            normalized_keys = tuple(key_columns)
-        except TypeError as exc:
-            raise TypeError("key_columns must be a sequence of column names.") from exc
-        if not normalized_keys:
-            raise SchemaValidationError("key_columns must contain at least one column name.")
-        invalid_keys = [name for name in normalized_keys if not isinstance(name, str) or not name]
-        if invalid_keys:
-            raise SchemaValidationError("key_columns must contain only non-empty strings.")
-        if any(not _is_well_formed_unicode(name) for name in normalized_keys):
-            raise SchemaValidationError("key_columns must contain well-formed Unicode.")
+        normalized_keys, key_errors, all_keys_valid = self._normalize_schema_keys(key_columns)
+        validation_errors = list(key_errors)
 
         case_sensitive = self._case_sensitivity_for_schema(df, config)
-        self._validate_spark_boolean_overlap(df, config)
-        self._validate_custom_datetime_policy(df, config)
+        validation_errors.extend(self._validate_spark_boolean_overlap(df, config))
+        validation_errors.extend(self._validate_custom_datetime_policy(df, config))
         configured_names = {column.source_column_name for column in config.columns}
         configured_output_names = {column.target_column_name for column in config.columns}
-        if any(
-            not _is_well_formed_unicode(name) for name in configured_names | configured_output_names
-        ):
-            raise SchemaValidationError(
+        source_names_well_formed = all(_is_well_formed_unicode(name) for name in configured_names)
+        target_names_well_formed = all(
+            _is_well_formed_unicode(name) for name in configured_output_names
+        )
+        if not source_names_well_formed or not target_names_well_formed:
+            validation_errors.append(
                 "Configured source and target column names must contain well-formed Unicode."
             )
-        resolved_sources, ambiguous, missing = _resolve_input_fields(
-            df,
-            sorted(configured_names),
-            case_sensitive=case_sensitive,
-        )
+
+        resolved_sources: dict[str, T.StructField] = {}
+        ambiguous: list[str] = []
+        missing: list[str] = []
+        if source_names_well_formed:
+            resolved_sources, ambiguous, missing = _resolve_input_fields(
+                df,
+                sorted(configured_names),
+                case_sensitive=case_sensitive,
+            )
         if ambiguous:
-            raise SchemaValidationError(f"Configured input columns are ambiguous: {ambiguous}.")
-        schema_warnings: list[str] = []
+            validation_errors.append(f"Configured input columns are ambiguous: {ambiguous}.")
+        missing_source_warning: str | None = None
         if missing:
             if on_missing_source == "fail":
-                raise SchemaValidationError(
+                validation_errors.append(
                     f"Configured source columns are missing: {missing}. Pass "
                     "on_missing_source='warn' only when typed null/default substitution is "
                     "intentional."
                 )
-            message = (
-                "Configured source columns are missing and will produce typed null/default "
-                f"values: {missing}."
-            )
-            schema_warnings.append(message)
-            python_warnings.warn(message, SchemaWarning, stacklevel=3)
+            else:
+                missing_source_warning = (
+                    "Configured source columns are missing and will produce typed null/default "
+                    f"values: {missing}."
+                )
         non_string = {
-            name: resolved_sources[name].dataType.simpleString()
-            for name in sorted(configured_names - set(missing))
-            if not isinstance(resolved_sources[name].dataType, T.StringType)
+            name: field.dataType.simpleString()
+            for name, field in sorted(resolved_sources.items())
+            if not isinstance(field.dataType, T.StringType)
         }
         if non_string:
-            raise SchemaValidationError(
+            validation_errors.append(
                 f"Configured bronze columns must have Spark string type; found {non_string}."
             )
 
@@ -617,6 +697,7 @@ class SparkDataFrameParser:
             f"{column_prefix}_parse_results",
             f"{column_prefix}_config",
             f"{column_prefix}_engine_version",
+            *collection_output_names,
         )
         conflicts = _reserved_output_conflicts(
             df,
@@ -624,47 +705,155 @@ class SparkDataFrameParser:
             case_sensitive=case_sensitive,
         )
         if conflicts:
-            raise SchemaValidationError(
-                f"Input contains reserved parser output columns: {conflicts}."
-            )
+            validation_errors.append(f"Input contains reserved parser output columns: {conflicts}.")
         target_names = tuple(column.target_column_name for column in config.columns)
-        target_conflicts = _resolver_duplicates(
-            df,
-            target_names,
-            case_sensitive=case_sensitive,
-        )
+        target_conflicts: list[str] = []
+        if target_names_well_formed:
+            target_conflicts = _resolver_duplicates(
+                df,
+                target_names,
+                case_sensitive=case_sensitive,
+            )
+            validation_errors.extend(
+                self._validate_collection_targets(
+                    df, target_names, collection_output_names, case_sensitive=case_sensitive
+                )
+            )
         if target_conflicts:
-            raise SchemaValidationError(
+            validation_errors.append(
                 "Configured target columns collide under Spark's active identifier resolver: "
                 f"{target_conflicts}."
             )
-        duplicate_keys = _resolver_duplicates(
-            df,
-            normalized_keys,
-            case_sensitive=case_sensitive,
-        )
-        if duplicate_keys:
-            raise SchemaValidationError(f"key_columns contains duplicates: {duplicate_keys}.")
-        resolved_keys, ambiguous_keys, missing_keys = _resolve_input_fields(
-            df,
-            normalized_keys,
-            case_sensitive=case_sensitive,
-        )
-        if missing_keys:
-            raise SchemaValidationError(f"key_columns are missing: {missing_keys}.")
-        if ambiguous_keys:
-            raise SchemaValidationError(f"key_columns are ambiguous: {ambiguous_keys}.")
 
-        key_bindings = self._bind_result_keys(
-            df,
-            config,
+        duplicate_keys: list[str] = []
+        resolved_keys: dict[str, T.StructField] = {}
+        ambiguous_keys: list[str] = []
+        missing_keys: list[str] = []
+        if normalized_keys:
+            duplicate_keys = _resolver_duplicates(
+                df,
+                normalized_keys,
+                case_sensitive=case_sensitive,
+            )
+            resolved_keys, ambiguous_keys, missing_keys = _resolve_input_fields(
+                df,
+                normalized_keys,
+                case_sensitive=case_sensitive,
+            )
+        if duplicate_keys:
+            validation_errors.append(f"key_columns contains duplicates: {duplicate_keys}.")
+        if missing_keys:
+            validation_errors.append(f"key_columns are missing: {missing_keys}.")
+        if ambiguous_keys:
+            validation_errors.append(f"key_columns are ambiguous: {ambiguous_keys}.")
+
+        unresolvable_key_names = set(missing_keys) | set(ambiguous_keys)
+        diagnostic_keys = self._diagnostic_schema_keys(
             normalized_keys,
-            resolved_sources,
             resolved_keys,
-            output_names,
-            case_sensitive=case_sensitive,
+            unresolvable_key_names,
         )
-        return key_bindings, tuple(schema_warnings), frozenset(missing)
+        all_key_bindings_valid = (
+            all_keys_valid
+            and len(diagnostic_keys) == len(normalized_keys)
+            and not duplicate_keys
+            and not unresolvable_key_names
+        )
+        can_diagnose_key_bindings = (
+            bool(diagnostic_keys) and source_names_well_formed and target_names_well_formed
+        )
+        key_bindings: tuple[_KeyBinding, ...] = ()
+        if can_diagnose_key_bindings:
+            diagnostic_bindings, binding_errors = self._bind_result_keys(
+                df,
+                config,
+                diagnostic_keys,
+                resolved_sources,
+                resolved_keys,
+                output_names,
+                case_sensitive=case_sensitive,
+            )
+            validation_errors.extend(binding_errors)
+            if all_key_bindings_valid:
+                key_bindings = diagnostic_bindings
+
+        if validation_errors:
+            raise SchemaValidationError(validation_errors)
+
+        schema_warnings: tuple[str, ...] = ()
+        if missing_source_warning is not None:
+            schema_warnings = (missing_source_warning,)
+            python_warnings.warn(missing_source_warning, SchemaWarning, stacklevel=3)
+        return key_bindings, schema_warnings, frozenset(missing)
+
+    @staticmethod
+    def _validate_collection_targets(
+        df: DataFrame,
+        target_names: Sequence[str],
+        collection_output_names: Sequence[str],
+        *,
+        case_sensitive: bool,
+    ) -> tuple[str, ...]:
+        """Reserve collection metadata even against targets that are not audit keys."""
+        conflicts = _resolver_cross_conflicts(
+            df, target_names, collection_output_names, case_sensitive=case_sensitive
+        )
+        if conflicts:
+            return (f"Configured targets conflict with parser collection columns: {conflicts}.",)
+        return ()
+
+    @staticmethod
+    def _normalize_schema_keys(
+        key_columns: Sequence[str],
+    ) -> tuple[tuple[str, ...], tuple[str, ...], bool]:
+        """Return resolvable keys and findings, retaining immediate argument-type failures."""
+        if key_columns is None:
+            return (), ("key_columns is required and must be supplied explicitly.",), False
+        if isinstance(key_columns, (str, bytes)):
+            raise TypeError("key_columns must be a sequence, not a string.")
+        try:
+            normalized_keys = tuple(key_columns)
+        except TypeError as exc:
+            raise TypeError("key_columns must be a sequence of column names.") from exc
+
+        validation_errors: list[str] = []
+        if not normalized_keys:
+            validation_errors.append("key_columns must contain at least one column name.")
+        invalid_keys = [name for name in normalized_keys if not isinstance(name, str) or not name]
+        if invalid_keys:
+            validation_errors.append("key_columns must contain only non-empty strings.")
+        resolvable_keys: list[str] = []
+        malformed_unicode = False
+        for name in normalized_keys:
+            if not isinstance(name, str) or not name:
+                continue
+            if not _is_well_formed_unicode(name):
+                malformed_unicode = True
+                continue
+            resolvable_keys.append(name)
+        if malformed_unicode:
+            validation_errors.append("key_columns must contain well-formed Unicode.")
+        all_keys_valid = bool(normalized_keys) and len(resolvable_keys) == len(normalized_keys)
+        return tuple(resolvable_keys), tuple(validation_errors), all_keys_valid
+
+    @staticmethod
+    def _diagnostic_schema_keys(
+        normalized_keys: Sequence[str],
+        resolved_keys: Mapping[str, T.StructField],
+        unresolvable_key_names: set[str],
+    ) -> tuple[str, ...]:
+        """Keep one resolvable spelling per input field for safe partial binding diagnostics."""
+        diagnostic_keys: list[str] = []
+        input_fields_seen: set[str] = set()
+        for name in normalized_keys:
+            if name in unresolvable_key_names or name not in resolved_keys:
+                continue
+            input_field_name = resolved_keys[name].name
+            if input_field_name in input_fields_seen:
+                continue
+            input_fields_seen.add(input_field_name)
+            diagnostic_keys.append(name)
+        return tuple(diagnostic_keys)
 
     @staticmethod
     def _bind_result_keys(
@@ -676,7 +865,7 @@ class SparkDataFrameParser:
         result_columns: Sequence[str],
         *,
         case_sensitive: bool,
-    ) -> tuple[_KeyBinding, ...]:
+    ) -> tuple[tuple[_KeyBinding, ...], tuple[str, ...]]:
         """Map uniquely configured input keys and validate the final results namespace."""
         targets_by_input_name: dict[str, list[str]] = {}
         for column in config.columns:
@@ -703,27 +892,41 @@ class SparkDataFrameParser:
             result_key_names,
             case_sensitive=case_sensitive,
         )
+        binding_errors: list[str] = []
         if duplicate_result_keys:
-            raise SchemaValidationError(
+            binding_errors.append(
                 "Mapped key columns collide under Spark's active identifier resolver: "
                 f"{duplicate_result_keys}."
             )
-        all_result_conflicts = _resolver_duplicates(
+        passthrough_target_conflicts = _resolver_cross_conflicts(
             df,
-            (*result_key_names, *result_columns),
+            tuple(binding.output_name for binding in key_bindings if binding.target_name is None),
+            tuple(column.target_column_name for column in config.columns),
             case_sensitive=case_sensitive,
         )
-        result_key_conflicts = sorted(
-            name for name in result_key_names if name in all_result_conflicts
+        if passthrough_target_conflicts:
+            binding_errors.append(
+                "Pass-through key columns conflict with configured target columns: "
+                f"{passthrough_target_conflicts}."
+            )
+        result_key_conflicts = _resolver_cross_conflicts(
+            df,
+            result_key_names,
+            result_columns,
+            case_sensitive=case_sensitive,
         )
         if result_key_conflicts:
-            raise SchemaValidationError(
+            binding_errors.append(
                 f"key_columns conflict with parser result columns: {result_key_conflicts}."
             )
-        return tuple(key_bindings)
+        return tuple(key_bindings), tuple(binding_errors)
 
     @classmethod
-    def _validate_custom_datetime_policy(cls, df: DataFrame, config: ParserConfig) -> None:
+    def _validate_custom_datetime_policy(
+        cls,
+        df: DataFrame,
+        config: ParserConfig,
+    ) -> tuple[str, ...]:
         """Reject unsafe custom datetime parsing before Spark can bypass parser error policy."""
         custom_formats = sorted(
             {
@@ -736,28 +939,32 @@ class SparkDataFrameParser:
             }
         )
         if not custom_formats:
-            return
+            return ()
         try:
             policy_setting = df.sparkSession.conf.get(
                 "spark.sql.legacy.timeParserPolicy",
                 "EXCEPTION",
             )
-        except PySparkException as exc:
-            raise SchemaValidationError(
+        except PySparkException:
+            return (
                 "Custom datetime formats require access to "
                 "spark.sql.legacy.timeParserPolicy so the parser can verify CORRECTED mode. "
                 "The active Spark runtime withholds that setting; use built-in datetime formats "
-                "or enable the setting for this workload."
-            ) from exc
+                "or enable the setting for this workload.",
+            )
         policy = (policy_setting or "EXCEPTION").upper()
         if policy != "CORRECTED":
-            raise SchemaValidationError(
+            return (
                 "Custom datetime formats require "
                 "spark.sql.legacy.timeParserPolicy=CORRECTED so malformed values follow the "
                 f"configured parser error policy; current policy is {policy!r}. Custom formats: "
-                f"{custom_formats}."
+                f"{custom_formats}.",
             )
-        probe_session = cls._metadata_probe_session(df, time_parser_policy=policy)
+        try:
+            probe_session = cls._metadata_probe_session(df, time_parser_policy=policy)
+        except SchemaValidationError as exc:
+            return exc.errors
+        validation_errors: list[str] = []
         for datetime_format in custom_formats:
             try:
                 # ``schema`` stops at analysis, where Spark has not yet compiled the formatter.
@@ -768,13 +975,20 @@ class SparkDataFrameParser:
                 )
                 probe.inputFiles()
             except PySparkException as exc:
-                raise SchemaValidationError(
+                if not _is_invalid_datetime_pattern_error(exc):
+                    raise
+                validation_errors.append(
                     f"Custom datetime format {datetime_format!r} is invalid for the active "
                     "Spark runtime."
-                ) from exc
+                )
+        return tuple(validation_errors)
 
     @classmethod
-    def _validate_spark_boolean_overlap(cls, df: DataFrame, config: ParserConfig) -> None:
+    def _validate_spark_boolean_overlap(
+        cls,
+        df: DataFrame,
+        config: ParserConfig,
+    ) -> tuple[str, ...]:
         """Validate non-ASCII case-insensitive vocabularies with Spark, without a data job.
 
         Python and Spark may use different Unicode tables, and Spark releases can differ even on
@@ -783,7 +997,11 @@ class SparkDataFrameParser:
         normalization result through metadata alone, even when optimizer constant folding is
         disabled and even for empty DataFrames.
         """
-        checked: set[tuple[tuple[str, ...], tuple[str, ...]]] = set()
+        checked: dict[
+            tuple[tuple[str, ...], tuple[str, ...]],
+            tuple[str, ...],
+        ] = {}
+        validation_errors: list[str] = []
         for column in config.columns:
             options = column.parser
             if options.parser_type is not ParserType.BOOLEAN or not (
@@ -795,35 +1013,39 @@ class SparkDataFrameParser:
             ):
                 continue
             signature = (options.true_values, options.false_values)
-            if signature in checked:
-                continue
-            checked.add(signature)
-            true_values = F.array(*(F.lower(F.lit(value)) for value in options.true_values))
-            false_values = F.array(*(F.lower(F.lit(value)) for value in options.false_values))
-            overlap = F.arrays_overlap(true_values, false_values)
-            schema_ddl = F.when(overlap, F.lit("STRUCT<overlap: INT>")).otherwise(
-                F.lit("STRUCT<disjoint: INT>")
-            )
-            probe_type = (
-                df.sparkSession.range(0)
-                .select(F.from_json(F.lit("{}"), schema_ddl).alias("validated"))
-                .schema["validated"]
-                .dataType
-            )
-            field_names = probe_type.fieldNames() if isinstance(probe_type, T.StructType) else []
-            if field_names == ["overlap"]:
-                raise SchemaValidationError(
+            field_names = checked.get(signature)
+            if field_names is None:
+                true_values = F.array(*(F.lower(F.lit(value)) for value in options.true_values))
+                false_values = F.array(*(F.lower(F.lit(value)) for value in options.false_values))
+                overlap = F.arrays_overlap(true_values, false_values)
+                schema_ddl = F.when(overlap, F.lit("STRUCT<overlap: INT>")).otherwise(
+                    F.lit("STRUCT<disjoint: INT>")
+                )
+                probe_type = (
+                    df.sparkSession.range(0)
+                    .select(F.from_json(F.lit("{}"), schema_ddl).alias("validated"))
+                    .schema["validated"]
+                    .dataType
+                )
+                field_names = (
+                    tuple(probe_type.fieldNames()) if isinstance(probe_type, T.StructType) else ()
+                )
+                checked[signature] = field_names
+            if field_names == ("overlap",):
+                validation_errors.append(
                     "Boolean true_values and false_values overlap under the active Spark "
                     "runtime's case-insensitive Unicode normalization for target column "
                     f"{column.target_column_name!r}. Use disjoint token sets or enable "
                     "boolean_case_sensitive. No Spark data action was started."
                 )
-            if field_names != ["disjoint"]:
-                raise SchemaValidationError(
+            elif field_names != ("disjoint",):
+                validation_errors.append(
                     "Spark did not return the expected metadata shape while validating "
                     "case-insensitive Boolean vocabularies. Ensure the built-in from_json "
                     "function is not shadowed, then retry. No Spark data action was started."
                 )
+                break
+        return tuple(validation_errors)
 
     @classmethod
     def _metadata_probe_session(
@@ -877,10 +1099,7 @@ class SparkDataFrameParser:
         try:
             control.inputFiles()
         except PySparkException as exc:
-            condition = _spark_error_class(exc)
-            if condition.startswith("INVALID_DATETIME_PATTERN") or (
-                not condition and "Illegal pattern character" in str(exc)
-            ):
+            if _is_invalid_datetime_pattern_error(exc):
                 return probe_session
             raise
         raise SchemaValidationError(
@@ -1018,7 +1237,7 @@ class SparkDataFrameParser:
             ).otherwise(_column(plan.post_zero_name))
         return _column(plan.post_zero_name)
 
-    def _audit_for_plan(self, plan: _ColumnRuntimePlan) -> Column:
+    def _audit_for_plan(self, plan: _ColumnRuntimePlan, *, collect_errors: bool = False) -> Column:
         """Rebuild explanatory flags and assemble one top-level audit struct expression."""
         # These expressions intentionally mirror normalization rather than reading only the final
         # value. Two different actions can lead to the same null, and audit consumers need the cause.
@@ -1041,6 +1260,39 @@ class SparkDataFrameParser:
             source_missing=F.lit(plan.source_missing),
             normalized=_column(plan.normalized_name),
             candidate=self._candidate_value(plan),
+            collect_errors=collect_errors,
+        )
+
+    def _collected_error_for_plan(self, plan: _ColumnRuntimePlan) -> Column:
+        """Describe a failed conversion using its original token and final resolution.
+
+        Failure is determined before replacements, so a successful fallback never erases an
+        error. Resolution follows the final value and the default actually applied.
+        """
+        options = plan.config.parser
+        resolution = {
+            ParseErrorMode.DEFAULT: "default_on_error",
+            ParseErrorMode.PRESERVE: "preserve",
+        }.get(options.on_parse_error, "null")
+        final_resolution = (
+            F.when(_column(plan.final_name).isNull(), F.lit("null"))
+            .when(self._default_on_null_applied(plan), F.lit("default_on_null"))
+            .otherwise(F.lit(resolution))
+        )
+        message = f"Value could not be parsed as {plan.config.expected_data_type}"
+        if options.string_format is not None:
+            message += f" with format {options.string_format.value!r}"
+        return F.when(
+            self._parse_failed(plan),
+            F.struct(
+                F.lit(plan.config.source_column_name).alias("source_column_name"),
+                F.lit(plan.config.target_column_name).alias("target_column_name"),
+                self._source_value(plan).alias("original_value"),
+                F.lit(plan.config.expected_data_type).alias("expected_data_type"),
+                F.lit("PARSE_ERROR").alias("error_code"),
+                F.lit(f"{message}.").alias("message"),
+                final_resolution.alias("resolution"),
+            ),
         )
 
     def _parse_candidate(
@@ -1209,10 +1461,14 @@ class SparkDataFrameParser:
         parse_failed: Column,
         source: Column,
         column_config: ColumnParser,
+        *,
+        collect_errors: bool = False,
     ) -> Column:
         """Resolve a top-level parse failure according to its compiled error policy."""
         options = column_config.parser
-        if options.on_parse_error is ParseErrorMode.NULL:
+        if options.on_parse_error is ParseErrorMode.NULL or (
+            collect_errors and options.on_parse_error is ParseErrorMode.FAIL
+        ):
             return candidate
         if options.on_parse_error is ParseErrorMode.DEFAULT:
             return F.when(
@@ -1296,10 +1552,16 @@ class SparkDataFrameParser:
         source_missing: Column,
         normalized: Column,
         candidate: Column,
+        collect_errors: bool = False,
     ) -> Column:
         """Assemble one deterministic, human-explainable parser audit struct expression."""
         options = column_config.parser
-        parse_to_null = parse_failed & F.lit(options.on_parse_error is ParseErrorMode.NULL)
+        parse_collected = parse_failed & F.lit(
+            collect_errors and options.on_parse_error is ParseErrorMode.FAIL
+        )
+        parse_to_null = (
+            parse_failed & F.lit(options.on_parse_error is ParseErrorMode.NULL)
+        ) | parse_collected
         parse_default = parse_failed & F.lit(options.on_parse_error is ParseErrorMode.DEFAULT)
         parse_preserved = parse_failed & F.lit(options.on_parse_error is ParseErrorMode.PRESERVE)
         if options.string_format is StringFormat.ZIP:
@@ -1343,6 +1605,7 @@ class SparkDataFrameParser:
                 F.when(source_missing, F.lit("source_column_missing")),
                 F.when(empty_to_null, F.lit("empty_string_to_null")),
                 F.when(marker_replaced, F.lit("null_marker_replaced")),
+                F.when(parse_collected, F.lit("parse_error_collected")),
                 F.when(parse_to_null, F.lit("parse_error_to_null")),
                 F.when(parse_default, F.lit("parse_error_default_applied")),
                 F.when(parse_preserved, F.lit("parse_error_preserved")),

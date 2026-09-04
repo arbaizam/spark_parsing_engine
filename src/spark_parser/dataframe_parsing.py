@@ -32,6 +32,7 @@ class DataFrameParsing:
         key_columns: Sequence[str],
         result_columns: Sequence[str],
         warnings: Sequence[str] = (),
+        error_mode: str = "configured",
     ) -> None:
         """Store immutable projection metadata around the runtime's evaluated logical plan."""
         # Convert every caller-owned sequence to a tuple so later mutation cannot silently alter
@@ -41,6 +42,12 @@ class DataFrameParsing:
         self._key_columns = tuple(key_columns)
         self._result_columns = tuple(result_columns)
         self._warnings = tuple(warnings)
+        self._error_mode = error_mode
+
+    @property
+    def error_mode(self) -> str:
+        """Return the execution policy independently of the authored configuration."""
+        return self._error_mode
 
     @property
     def key_columns(self) -> tuple[str, ...]:
@@ -59,10 +66,11 @@ class DataFrameParsing:
 
     @property
     def parsed_df(self) -> DataFrame:
-        """Return only configured target columns in configuration order.
+        """Return configured targets in order, followed by parse errors in collection mode.
 
         Internal UUID-backed names prevent collisions while the plan is built. This final select
-        restores the public target names promised by the configuration.
+        restores the public target names promised by the configuration. Collection mode appends
+        ``<prefix>_parse_errors`` so errors remain attached even when parsed row keys change.
         """
         return self._evaluated.select(
             *[

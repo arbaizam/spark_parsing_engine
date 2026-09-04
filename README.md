@@ -187,7 +187,7 @@ datatype validation, serialization, and hashing work in a lightweight Python env
 | `parser.compile_path(path)` | Read and compile a UTF-8 YAML file. |
 | `parser.compile_mapping(mapping)` | Compile an already-loaded YAML-compatible mapping. |
 | `parser.compile_yaml(source)` | Dispatch YAML text, a `pathlib.Path`, or a mapping by type. |
-| `parser.parse_dataframe(df, config, ...)` | Bind a compiled or authorable config to a DataFrame. |
+| `parser.parse_dataframe(df, config, ...)` | Bind a compiled or authorable config to a DataFrame; optional `error_mode="collect"` records conversion failures inline. |
 | `parser.to_mapping(config)` | Return every resolved option as a JSON-compatible mapping. |
 | `parser.canonical_json(config)` | Return deterministic canonical JSON. |
 | `parser.content_hash(config)` | Return the resolved configuration's SHA-256 identity. |
@@ -204,7 +204,11 @@ Metadata accessors exist for `string`, `byte`, `short`, `integer`, `long`, `floa
 ## Configuration review
 
 `review_yaml()` accepts YAML text, a `pathlib.Path`, or an already loaded mapping. String inputs are
-always YAML text. A valid `ConfigReviewReport` includes:
+always YAML text. Semantic validation visits every independently checkable field and column before
+returning, so an invalid report's ordered `errors` tuple contains all actionable findings with
+paths such as `columns[2].parser.default_on_error`. Malformed YAML, duplicate YAML keys, unreadable
+files, and invalid outer mapping shapes remain single errors because no trustworthy object tree is
+available for continued validation. A valid `ConfigReviewReport` includes:
 
 - identity, ownership, version, and canonical content hash;
 - compiler validation evidence;
@@ -469,7 +473,9 @@ field follows `on_parse_error`; partial lists are never returned. ZIP padding re
 
 Compilation checks YAML shape, required metadata, unique targets, supported scalar datatypes,
 parser/type compatibility, option placement, typed defaults, null-marker modes, and effective
-Boolean vocabularies. Duplicate and unknown keys fail rather than being ignored.
+Boolean vocabularies. Duplicate and unknown keys fail rather than being ignored. Compilation raises
+one `CompilationError` after collecting independent semantic findings; its ordered `.errors` tuple
+contains the individual messages. A single finding retains its prior exception text.
 
 When binding a DataFrame, Spark Parser also checks that:
 
@@ -479,11 +485,17 @@ When binding a DataFrame, Spark Parser also checks that:
 - generated result-column names do not collide with existing input fields, including present
   sources and row keys; and
 - row keys are existing, unique, unambiguous input names whose projected result names do not
-  collide.
+  collide; and
+- pass-through row keys do not share names with configured targets, since their original values
+  could differ from the parsed values exposed under those target names.
 
-`on_parse_error: fail` is lazy: it raises only when Spark evaluates the failing target expression.
-An optimizer-pruned `count()` may not materialize every target. A full target write or explicit
-projection does.
+Independent metadata findings are raised together through `SchemaValidationError.errors`. Checks
+whose prerequisites are invalid are skipped to avoid cascade messages, and recoverable
+missing-source warnings are emitted only if no fatal schema issue exists.
+
+With the default `error_mode="configured"`, `on_parse_error: fail` is lazy: it raises only when
+Spark evaluates the failing target expression. An optimizer-pruned `count()` may not materialize
+every target. A full target write or explicit projection does.
 
 ## DataFrameParsing outputs and audit contract
 
@@ -491,8 +503,9 @@ projection does.
 
 | Property/method | Behavior |
 | --- | --- |
-| `parsed_df` | Target scalar columns, in configuration order. |
-| `results_df` | Target-mapped row keys followed by audit and configuration identity columns. |
+| `parsed_df` | Target scalar columns, in configuration order; collection mode appends an error array. |
+| `results_df` | Target-mapped row keys followed by audit and configuration identity columns, plus collection metadata when enabled. |
+| `error_mode` | Execution mode: `"configured"` (default) or `"collect"`. |
 | `warnings` | Recoverable schema warnings such as an explicitly allowed missing source. |
 | `persist()` / `unpersist()` | Optional shared-plan caching on runtimes that support it. |
 
@@ -510,6 +523,44 @@ The result columns are:
 | `<prefix>_parse_results` | Array containing one audit struct per `audit: true` scalar column. |
 | `<prefix>_config` | Struct containing configuration `id`, `version`, and content hash. |
 | `<prefix>_engine_version` | Installed Spark Parser version. |
+| `<prefix>_parse_errors` | Collection mode only: ordered conversion-error array, also appended to `parsed_df`. |
+| `<prefix>_error_mode` | Collection mode only: the string `"collect"`. |
+
+See [Error modes by example](#error-modes-by-example) for the same input parsed in default and
+collection modes, including output values, individual errors, and row filtering.
+
+Collection mode replaces a failed `on_parse_error: fail` conversion with a typed null without
+calling Spark's `raise_error`. Configured `null`, `default`, and `preserve` policies retain their
+behavior. Numeric zero invalidation and the final `default_on_null` stage still apply, so a failed
+non-nullable target receives its configured null default. All conversion failures appear in the
+error array, including columns with `audit: false`; successful rows receive `[]`. Errors stay in
+configuration order and retain the source value before normalization.
+
+Each error struct contains `source_column_name`, `target_column_name`, `original_value`,
+`expected_data_type`, `error_code`, `message`, and `resolution`. The code is `PARSE_ERROR` and the
+message is `Value could not be parsed as TYPE.`, using the expected datatype for `TYPE`. String
+format failures also identify the rejecting profile, for example,
+`Value could not be parsed as string with format 'state_us'.`
+`resolution` describes the final outcome: `null`, `default_on_null`, `default_on_error`, or
+`preserve`, including any effect of zero invalidation and the final null default. The default
+`column_prefix="spark_parser"` controls the generated names shown above; collection metadata names
+must not collide with input, target, or key columns.
+
+Null source values, empty strings or null markers normalized to null, zero invalidation alone,
+and allowed missing-source warnings are not conversion errors. Configuration, schema, and unrelated
+Spark failures still raise. Collection stays lazy and uses native Spark expressions; materializing
+the error array evaluates every configured conversion it describes. Mapped parsed keys can become
+null or defaults on failure, so the inline error array preserves each error's association with its
+parsed row without requiring a join. The execution mode is exposed separately from the authored
+configuration: it is not a YAML option and does not change the configuration content hash.
+
+Collection retains the full original source string in every error entry, with no truncation.
+When one source feeds several failing targets, each target's error repeats that string; for
+example, a 200,000-character token feeding five failing targets creates five copies in the error
+array. This increases row width and the memory, transfer, and storage required to materialize
+diagnostics. Writing both `parsed_df` and `results_df` stores the error array in both outputs.
+For wide or large-token loads, retain diagnostics in the output that needs them and project out
+unneeded diagnostic fields before writing other outputs.
 
 Each audit struct has `source_column_name`, `target_column_name`, `parser_type`,
 `expected_data_type`, `original_value`, `parsed_value`, `changed`, `effective`, `actions_applied`,
@@ -519,11 +570,174 @@ occurs, or when a string parser's final text differs from its source. The audit 
 has no nested child-path fields.
 
 Possible actions are `source_column_missing`, `empty_string_to_null`, `null_marker_replaced`,
-`parse_error_to_null`, `parse_error_default_applied`, `parse_error_preserved`, `zero_invalidated`,
-`default_on_null_applied`, `zip_padded`, and `zip_plus4_formatted`. Routine string normalization and
+`parse_error_collected`, `parse_error_to_null`, `parse_error_default_applied`, `parse_error_preserved`,
+`zero_invalidated`, `default_on_null_applied`, `zip_padded`, and `zip_plus4_formatted`. Routine string normalization and
 successful formatting do not add action entries, but they set `changed` when the final text differs;
 ZIP formatting follows the same comparison while retaining its specific ZIP actions. Successful
-non-string conversion does not set `changed` on its own.
+non-string conversion does not set `changed` on its own. For an audited, suppressed `fail` error,
+collection mode records `parse_error_collected` then `parse_error_to_null`, followed by
+`default_on_null_applied` when applicable, and marks `changed` as true. Here
+`parse_error_collected` specifically identifies suppression of the configured `fail` policy.
+Use `<prefix>_parse_errors` to enumerate or count all collected failures across every policy.
+
+## Error modes by example
+
+These examples use an existing SparkSession named `spark`. The input has one valid row, one row
+with two malformed values, and one row with null/empty values. `record_id` is explicitly configured
+so `RecordId` appears in both output DataFrames. Auditing stays at its default of `false`.
+
+```python
+from pyspark.sql import functions as F
+from spark_parser import parser
+
+bronze_df = spark.sql("""
+SELECT * FROM VALUES
+  ('r1', '12',   '2026-09-04'),
+  ('r2', 'oops', 'not-a-date'),
+  ('r3', NULL,   '')
+AS source(record_id, units, opened_date)
+""")
+
+config = parser.compile_yaml("""
+parser_config_id: error_mode_example
+parser_config_name: Error Mode Example
+version: "1"
+columns:
+  - source_column_name: record_id
+    target_column_name: RecordId
+    expected_data_type: string
+    parser: string
+  - source_column_name: units
+    target_column_name: Units
+    expected_data_type: integer
+    parser: integer
+  - source_column_name: opened_date
+    target_column_name: OpenedDate
+    expected_data_type: date
+    parser: date
+""")
+```
+
+### Default mode: raise when a failing target is evaluated
+
+Omitting `error_mode` is equivalent to `error_mode="configured"`. This configuration uses the
+default `on_parse_error: fail`, so materializing `Units` raises on `r2`:
+
+```python
+strict = parser.parse_dataframe(bronze_df, config, key_columns=["record_id"])
+
+# Building the parsing wrapper does not scan the rows. This action evaluates Units and raises.
+strict.parsed_df.select("Units").collect()
+```
+
+The Spark exception includes this message; the enclosing exception class varies by runtime:
+
+```text
+Spark Parser could not parse source 'units' into target column 'Units' as integer: oops
+```
+
+The action fails rather than returning a partial set of valid rows. The default `parsed_df` has
+only `RecordId`, `Units`, and `OpenedDate`; it has no `spark_parser_parse_errors` column. Use an
+action that evaluates the target to check failure behavior: `count()` can prune target expressions.
+
+### Collection mode: return parsed rows with all conversion errors
+
+Use the same input and compiled configuration, changing only the execution mode:
+
+```python
+collected = parser.parse_dataframe(
+    bronze_df, config, key_columns=["record_id"], error_mode="collect"
+)
+
+collected.parsed_df.select(
+    "RecordId", "Units", "OpenedDate",
+    F.size("spark_parser_parse_errors").alias("ErrorCount"),
+).orderBy("RecordId").show()
+```
+
+The result is:
+
+| RecordId | Units | OpenedDate | ErrorCount |
+| --- | --- | --- | --- |
+| r1 | 12 | 2026-09-04 | 0 |
+| r2 | NULL | NULL | 2 |
+| r3 | NULL | NULL | 0 |
+
+Both malformed values in `r2` are recorded, even though neither column enables auditing.
+The error array is `[]` for `r1` and `r3`: a null source and an empty string normalized to null
+are not conversion failures.
+
+Separate the rows and inspect each error without joining to `results_df`:
+
+```python
+bad_rows = collected.parsed_df.filter(F.size("spark_parser_parse_errors") > 0)
+good_rows = collected.parsed_df.filter(F.size("spark_parser_parse_errors") == 0)
+
+bad_rows.select(
+    "RecordId", F.explode("spark_parser_parse_errors").alias("error")
+).select(
+    "RecordId", "error.target_column_name", "error.original_value", "error.resolution"
+).show(truncate=False)
+```
+
+`bad_rows` contains `r2`; `good_rows` contains `r1` and `r3`. The exploded error details are:
+
+| RecordId | target_column_name | original_value | resolution |
+| --- | --- | --- | --- |
+| r2 | Units | oops | null |
+| r2 | OpenedDate | not-a-date | null |
+
+Each entry also has `error_code="PARSE_ERROR"`, its source column and expected datatype, and a
+message such as `Value could not be parsed as integer.` The same error array appears in
+`collected.results_df`, alongside `spark_parser_error_mode="collect"` and the unchanged
+configuration identity. The optional `spark_parser_parse_results` audit array remains empty here.
+
+### Collection mode with a required-value default
+
+To see how final null handling interacts with collection, make `Units` non-nullable with a
+fallback of `0`. `to_mapping()` returns a detached configuration, leaving `config` unchanged:
+
+```python
+required_config = parser.to_mapping(config)
+required_config["columns"][1]["parser"].update(is_nullable=False, default_on_null=0)
+
+with_defaults = parser.parse_dataframe(
+    bronze_df, required_config, key_columns=["record_id"], error_mode="collect"
+)
+with_defaults.parsed_df.select(
+    "RecordId", "Units",
+    F.size("spark_parser_parse_errors").alias("ErrorCount"),
+).orderBy("RecordId").show()
+```
+
+| RecordId | Units | ErrorCount |
+| --- | --- | --- |
+| r1 | 12 | 0 |
+| r2 | 0 | 2 |
+| r3 | 0 | 0 |
+
+The `Units` error for `r2` now has `resolution="default_on_null"`; assigning a default does not
+erase the error. `r3` gets the same default without a conversion error. In default execution mode,
+the malformed `r2` value would still raise: `on_parse_error: fail` runs before `default_on_null`.
+
+The execution mode and each column's `on_parse_error` policy are separate controls. For malformed,
+non-null input, the policies compare as follows (targets are nullable unless noted):
+
+| Column policy | Default execution (`configured`) | Collection execution (`collect`) | Collected resolution |
+| --- | --- | --- | --- |
+| `fail` (default) | Raises when evaluated. | Returns NULL and records an error. | `null` |
+| `fail`, `is_nullable: false`, `default_on_null: 0` | Raises before the null default. | Returns 0 and records an error. | `default_on_null` |
+| `null` | Returns NULL. | Returns NULL and records an error. | `null` |
+| `default`, `default_on_error: 7` | Returns 7. | Returns 7 and records an error. | `default_on_error` |
+| `preserve` on a string formatter | Returns the exact original token. | Preserves the token and records an error. | `preserve` |
+
+For example, a `state_us` string formatter with `on_parse_error: preserve` returns an unrecognized
+token such as `"Atlantis"` in either execution mode. Collection additionally records the failure
+with `message="Value could not be parsed as string with format 'state_us'."` and
+`resolution="preserve"`.
+Default execution can record handled errors in `results_df` when `audit: true`; it never adds the
+collection error array. Neither execution mode converts invalid configuration or incompatible
+source schemas into row-level conversion errors.
 
 ## Testing
 

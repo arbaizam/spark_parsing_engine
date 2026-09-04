@@ -11,11 +11,14 @@ import base64
 import binascii
 import math
 import re
+import reprlib
 import struct
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from enum import Enum
+from functools import partial
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -58,6 +61,103 @@ from spark_parser.models import ColumnParser, ParserConfig, ParserGlobals, Parse
 # ``None`` is a legitimate YAML value, so a private sentinel is required to distinguish an omitted
 # key from an explicitly authored null.
 _MISSING = object()
+
+
+def _recursion_safe_repr(value: Any) -> str:
+    """Preserve ordinary diagnostic text while bounding pathological recursive rendering."""
+    try:
+        return repr(value)
+    except RecursionError:
+        return reprlib.repr(value)
+
+
+@dataclass(frozen=True)
+class _ValidationIssue:
+    """One semantic authoring problem and the path that identifies its input location."""
+
+    path: str
+    message: str
+
+    def render(self) -> str:
+        """Render an unambiguous message for a multi-error result."""
+        return f"{self.path}: {self.message}" if self.path else self.message
+
+
+class _IssueCollector:
+    """Collect independent compiler failures without constructing a partial public config."""
+
+    def __init__(self) -> None:
+        self.issues: list[_ValidationIssue] = []
+        self._seen: set[_ValidationIssue] = set()
+
+    def add(self, path: str, message: str) -> None:
+        """Append one issue in validation order."""
+        issue = _ValidationIssue(path, message)
+        if issue in self._seen:
+            return
+        self._seen.add(issue)
+        self.issues.append(issue)
+
+    def capture(self, path: str, operation: Callable[[], Any]) -> Any:
+        """Run one existing validator, recording its public error and returning a sentinel."""
+        try:
+            return operation()
+        except CompilationError as exc:
+            for error in exc.errors:
+                self.add(path, error)
+            return _MISSING
+
+    def raise_if_any(self) -> None:
+        """Raise once, preserving legacy text when exactly one issue was found."""
+        if not self.issues:
+            return
+        errors = (
+            (self.issues[0].message,)
+            if len(self.issues) == 1
+            else tuple(issue.render() for issue in self.issues)
+        )
+        raise CompilationError(errors)
+
+
+@dataclass(frozen=True)
+class _GlobalsValidation:
+    """Usable global fallbacks plus provenance needed to suppress cascading column errors."""
+
+    config: ParserGlobals
+    null_markers_valid: bool = True
+    true_values_valid: bool = True
+    false_values_valid: bool = True
+    boolean_case_sensitive_valid: bool = True
+    boolean_overlap_values: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
+class _NullMarkerValidation:
+    """Resolved marker options produced during dependency-aware parser validation."""
+
+    markers: tuple[str, ...]
+    mode: NullMarkersMode
+    replace: bool
+    case_sensitive: bool
+
+
+@dataclass(frozen=True)
+class _NullDefaultValidation:
+    """Resolved final-null policy and whether its typed value can be checked further."""
+
+    is_nullable: bool
+    value: Any
+    value_valid: bool
+
+
+@dataclass(frozen=True)
+class _ParseErrorValidation:
+    """Resolved parse-error policy and whether its typed value can be checked further."""
+
+    mode: ParseErrorMode
+    value: Any
+    value_valid: bool
+
 
 # Spark integer types have fixed signed ranges. Python integers do not overflow, which means these
 # boundaries must be enforced here before defaults become Spark literals.
@@ -236,288 +336,413 @@ class YamlParserConfigCompiler:
     def compile_mapping(self, payload: Mapping[str, Any]) -> ParserConfig:
         """Validate and fully resolve an already-loaded YAML-compatible mapping.
 
-        Validation proceeds from the outside inward: top-level keys, inherited globals, each
-        column/parser binding, and finally cross-column uniqueness. The returned object therefore
-        represents a complete runtime contract rather than partially validated authoring data.
+        Once the outer mapping is trustworthy, independent semantic issues are collected in a
+        deterministic validation order. Dependent checks run only when their prerequisites are
+        valid, so the aggregate does not contain misleading cascade errors. No partial public model
+        escapes on failure.
         """
         payload = self._ensure_mapping(payload, "parser config")
-        self._reject_keys(
-            payload,
-            {
-                "parser_config_id",
-                "parser_config_name",
-                "version",
-                "description",
-                "owner",
-                "owner_department",
-                "globals",
-                "columns",
-            },
-            "Parser config",
-        )
-        # Globals must be compiled before columns because column vocabularies can inherit or extend
-        # them. No column receives the mutable raw mapping.
-        globals_config = self._compile_globals(payload.get("globals", {}))
-        raw_columns = payload.get("columns")
-        if not isinstance(raw_columns, list) or not raw_columns:
-            raise CompilationError("columns must be a non-empty list.")
-        columns = tuple(
-            self._compile_column(raw_column, globals_config, index)
-            for index, raw_column in enumerate(raw_columns, start=1)
-        )
-        self._validate_unique_columns(columns)
-        return ParserConfig(
-            parser_config_id=self._required_string(payload, "parser_config_id"),
-            parser_config_name=self._required_string(payload, "parser_config_name"),
-            version=self._required_string(payload, "version"),
-            columns=columns,
-            globals=globals_config,
-            description=self._optional_string(payload, "description"),
-            owner=self._optional_string(payload, "owner"),
-            owner_department=self._optional_string(payload, "owner_department"),
+        collector = _IssueCollector()
+        collector.capture(
+            "parser config",
+            lambda: self._reject_keys(
+                payload,
+                {
+                    "parser_config_id",
+                    "parser_config_name",
+                    "version",
+                    "description",
+                    "owner",
+                    "owner_department",
+                    "globals",
+                    "columns",
+                },
+                "Parser config",
+            ),
         )
 
-    def _compile_globals(self, raw_globals: Any) -> ParserGlobals:
-        """Validate global null/Boolean vocabularies and return immutable inherited options."""
-        payload = self._ensure_mapping(raw_globals, "globals")
-        self._reject_keys(
-            payload,
-            {
-                "null_markers",
-                "null_marker_case_sensitive",
-                "true_values",
-                "false_values",
-                "boolean_case_sensitive",
-            },
-            "globals",
+        parser_config_id = collector.capture(
+            "parser_config_id", lambda: self._required_string(payload, "parser_config_id")
         )
-        true_values = self._string_sequence(
-            payload.get("true_values", list(DEFAULT_BOOLEAN_TRUE_VALUES)),
-            "globals.true_values",
-            allow_empty_values=False,
+        parser_config_name = collector.capture(
+            "parser_config_name", lambda: self._required_string(payload, "parser_config_name")
         )
-        false_values = self._string_sequence(
-            payload.get("false_values", list(DEFAULT_BOOLEAN_FALSE_VALUES)),
-            "globals.false_values",
-            allow_empty_values=False,
+        version = collector.capture("version", lambda: self._required_string(payload, "version"))
+        description = collector.capture(
+            "description", lambda: self._optional_string(payload, "description")
         )
-        if not true_values or not false_values:
-            raise CompilationError(
-                "globals.true_values and globals.false_values must be non-empty."
+        owner = collector.capture("owner", lambda: self._optional_string(payload, "owner"))
+        owner_department = collector.capture(
+            "owner_department", lambda: self._optional_string(payload, "owner_department")
+        )
+
+        # Globals must be compiled before columns because column vocabularies can inherit or extend
+        # them. Invalid authored values use internal defaults only to let unrelated column checks
+        # continue; the collector still prevents those fallbacks from becoming a public config.
+        globals_validation = self._compile_globals(payload.get("globals", {}), collector)
+        raw_columns = payload.get("columns")
+        columns: list[ColumnParser] = []
+        target_names: list[str] = []
+        if not isinstance(raw_columns, list) or not raw_columns:
+            collector.add("columns", "columns must be a non-empty list.")
+        else:
+            for index, raw_column in enumerate(raw_columns, start=1):
+                column, target_name = self._compile_column(
+                    raw_column,
+                    globals_validation,
+                    index,
+                    collector,
+                )
+                if column is not None:
+                    columns.append(column)
+                if target_name is not None:
+                    target_names.append(target_name)
+            duplicate_columns = self._duplicates(target_names)
+            if duplicate_columns:
+                collector.add(
+                    "columns",
+                    f"Duplicate target_column_name values: {duplicate_columns}.",
+                )
+
+        collector.raise_if_any()
+        assert all(
+            value is not _MISSING
+            for value in (
+                parser_config_id,
+                parser_config_name,
+                version,
+                description,
+                owner,
+                owner_department,
             )
-        boolean_case_sensitive = self._bool(
-            payload,
-            "boolean_case_sensitive",
-            DEFAULT_BOOLEAN_CASE_SENSITIVE,
         )
-        # Overlap would make the same bronze token both true and false. Validate using exactly the
-        # case-folding behavior that Spark expressions use later.
-        self._validate_boolean_overlap(
-            true_values,
-            false_values,
-            boolean_case_sensitive,
+        return ParserConfig(
+            parser_config_id=parser_config_id,
+            parser_config_name=parser_config_name,
+            version=version,
+            columns=tuple(columns),
+            globals=globals_validation.config,
+            description=description,
+            owner=owner,
+            owner_department=owner_department,
+        )
+
+    def _compile_globals(
+        self,
+        raw_globals: Any,
+        collector: _IssueCollector,
+    ) -> _GlobalsValidation:
+        """Validate globals independently and retain safe fallbacks for later column checks."""
+        payload = collector.capture("globals", lambda: self._ensure_mapping(raw_globals, "globals"))
+        if payload is _MISSING:
+            return _GlobalsValidation(
+                ParserGlobals(),
+                null_markers_valid=False,
+                true_values_valid=False,
+                false_values_valid=False,
+                boolean_case_sensitive_valid=False,
+                boolean_overlap_values=frozenset(),
+            )
+
+        collector.capture(
             "globals",
+            lambda: self._reject_keys(
+                payload,
+                {
+                    "null_markers",
+                    "null_marker_case_sensitive",
+                    "true_values",
+                    "false_values",
+                    "boolean_case_sensitive",
+                },
+                "globals",
+            ),
         )
-        return ParserGlobals(
-            null_markers=self._string_sequence(
+        true_values_result = collector.capture(
+            "globals.true_values",
+            lambda: self._string_sequence(
+                payload.get("true_values", list(DEFAULT_BOOLEAN_TRUE_VALUES)),
+                "globals.true_values",
+                allow_empty_values=False,
+            ),
+        )
+        false_values_result = collector.capture(
+            "globals.false_values",
+            lambda: self._string_sequence(
+                payload.get("false_values", list(DEFAULT_BOOLEAN_FALSE_VALUES)),
+                "globals.false_values",
+                allow_empty_values=False,
+            ),
+        )
+        true_values_valid = true_values_result is not _MISSING
+        false_values_valid = false_values_result is not _MISSING
+        true_values = true_values_result if true_values_valid else DEFAULT_BOOLEAN_TRUE_VALUES
+        false_values = false_values_result if false_values_valid else DEFAULT_BOOLEAN_FALSE_VALUES
+        vocabularies_nonempty = not (
+            (true_values_valid and not true_values) or (false_values_valid and not false_values)
+        )
+        if not vocabularies_nonempty:
+            collector.add(
+                "globals",
+                "globals.true_values and globals.false_values must be non-empty.",
+            )
+
+        boolean_case_sensitive_result = collector.capture(
+            "globals.boolean_case_sensitive",
+            lambda: self._bool(
+                payload,
+                "boolean_case_sensitive",
+                DEFAULT_BOOLEAN_CASE_SENSITIVE,
+            ),
+        )
+        boolean_case_sensitive_valid = boolean_case_sensitive_result is not _MISSING
+        boolean_case_sensitive = (
+            boolean_case_sensitive_result
+            if boolean_case_sensitive_valid
+            else DEFAULT_BOOLEAN_CASE_SENSITIVE
+        )
+        # Exact overlap is independent of case sensitivity. If that flag is invalid, validate the
+        # exact sets now and defer only the case-folded comparison.
+        boolean_overlap_values: frozenset[str] = frozenset()
+        if true_values_valid and false_values_valid and vocabularies_nonempty:
+            boolean_overlap_values = frozenset(
+                self._boolean_overlap_values(
+                    true_values,
+                    false_values,
+                    boolean_case_sensitive if boolean_case_sensitive_valid else True,
+                )
+            )
+            collector.capture(
+                "globals",
+                lambda: self._validate_boolean_overlap(
+                    true_values,
+                    false_values,
+                    (boolean_case_sensitive if boolean_case_sensitive_valid else True),
+                    "globals",
+                ),
+            )
+
+        null_markers_result = collector.capture(
+            "globals.null_markers",
+            lambda: self._string_sequence(
                 payload.get("null_markers", list(DEFAULT_NULL_MARKERS)),
                 "null_markers",
             ),
-            null_marker_case_sensitive=self._bool(
+        )
+        null_markers_valid = null_markers_result is not _MISSING
+        null_markers = null_markers_result if null_markers_valid else DEFAULT_NULL_MARKERS
+        null_marker_case_sensitive_result = collector.capture(
+            "globals.null_marker_case_sensitive",
+            lambda: self._bool(
                 payload,
                 "null_marker_case_sensitive",
                 DEFAULT_NULL_MARKER_CASE_SENSITIVE,
             ),
-            true_values=true_values,
-            false_values=false_values,
-            boolean_case_sensitive=boolean_case_sensitive,
+        )
+        null_marker_case_sensitive = (
+            null_marker_case_sensitive_result
+            if null_marker_case_sensitive_result is not _MISSING
+            else DEFAULT_NULL_MARKER_CASE_SENSITIVE
+        )
+        return _GlobalsValidation(
+            ParserGlobals(
+                null_markers=null_markers,
+                null_marker_case_sensitive=null_marker_case_sensitive,
+                true_values=true_values,
+                false_values=false_values,
+                boolean_case_sensitive=boolean_case_sensitive,
+            ),
+            null_markers_valid=null_markers_valid,
+            true_values_valid=true_values_valid and bool(true_values),
+            false_values_valid=false_values_valid and bool(false_values),
+            boolean_case_sensitive_valid=boolean_case_sensitive_valid,
+            boolean_overlap_values=boolean_overlap_values,
         )
 
     def _compile_column(
         self,
         raw_column: Any,
-        globals_config: ParserGlobals,
+        globals_validation: _GlobalsValidation,
         index: int,
-    ) -> ColumnParser:
-        """Compile one top-level source-to-target scalar mapping."""
-        payload = self._ensure_mapping(raw_column, f"column at index {index}")
-        self._reject_keys(
-            payload,
-            {
-                "source_column_name",
-                "target_column_name",
-                "expected_data_type",
-                "parser",
-            },
-            f"Column at index {index}",
+        collector: _IssueCollector,
+    ) -> tuple[ColumnParser | None, str | None]:
+        """Validate one binding, returning its valid target even when another field fails."""
+        path = f"columns[{index - 1}]"
+        issue_count = len(collector.issues)
+        payload = collector.capture(
+            path,
+            lambda: self._ensure_mapping(raw_column, f"column at index {index}"),
         )
-        source_column_name = self._required_identifier(payload, "source_column_name")
-        target_column_name = self._required_identifier(payload, "target_column_name")
+        if payload is _MISSING:
+            return None, None
+        collector.capture(
+            path,
+            lambda: self._reject_keys(
+                payload,
+                {
+                    "source_column_name",
+                    "target_column_name",
+                    "expected_data_type",
+                    "parser",
+                },
+                f"Column at index {index}",
+            ),
+        )
+        source_column_name = collector.capture(
+            f"{path}.source_column_name",
+            lambda: self._required_identifier(payload, "source_column_name"),
+        )
+        target_column_name = collector.capture(
+            f"{path}.target_column_name",
+            lambda: self._required_identifier(payload, "target_column_name"),
+        )
+        valid_target_name = target_column_name if target_column_name is not _MISSING else None
         # Parse the scalar DDL once and carry both its model and canonical text. Complex DDL is
         # rejected by ``parse_spark_data_type`` before parser options are considered.
-        data_type = parse_spark_data_type(self._required_string(payload, "expected_data_type"))
-        expected_data_type = data_type.canonical
+        data_type = collector.capture(
+            f"{path}.expected_data_type",
+            lambda: parse_spark_data_type(self._required_string(payload, "expected_data_type")),
+        )
         options = self._compile_parser(
             payload.get("parser", _MISSING),
-            globals_config,
-            data_type,
-            target_column_name,
+            globals_validation,
+            None if data_type is _MISSING else data_type,
+            (
+                target_column_name
+                if target_column_name is not _MISSING
+                else f"column at index {index}"
+            ),
+            f"{path}.parser",
+            collector,
         )
+        if len(collector.issues) != issue_count:
+            return None, valid_target_name
+        assert source_column_name is not _MISSING
+        assert target_column_name is not _MISSING
+        assert data_type is not _MISSING
+        assert options is not None
         return ColumnParser(
             source_column_name=source_column_name,
             target_column_name=target_column_name,
-            expected_data_type=expected_data_type,
+            expected_data_type=data_type.canonical,
             data_type=data_type,
             parser=options,
-        )
+        ), valid_target_name
 
     def _compile_parser(
         self,
         raw_parser: Any,
-        globals_config: ParserGlobals,
-        data_type: SparkDataType,
+        globals_validation: _GlobalsValidation,
+        data_type: SparkDataType | None,
         target_column_name: str,
-    ) -> ParserOptions:
-        """Resolve one scalar parser against its expected datatype."""
+        path: str,
+        collector: _IssueCollector,
+    ) -> ParserOptions | None:
+        """Resolve one scalar parser while collecting independent option failures."""
+        issue_count = len(collector.issues)
         if raw_parser is _MISSING:
-            raise CompilationError(f"parser is required for column {target_column_name!r}.")
+            collector.add(path, f"parser is required for column {target_column_name!r}.")
+            return None
         # Scalar shorthand such as ``parser: date`` is normalized into the same mapping path as
         # long-form options. From this point onward there is only one validation implementation.
         if isinstance(raw_parser, str):
             payload: Mapping[str, Any] = {"type": raw_parser}
         else:
-            payload = self._ensure_mapping(raw_parser, f"parser for {target_column_name!r}")
+            payload = collector.capture(
+                path,
+                lambda: self._ensure_mapping(raw_parser, f"parser for {target_column_name!r}"),
+            )
+            if payload is _MISSING:
+                return None
 
-        parser_type = self._parser_type(self._required_string(payload, "type"))
-        expected_data_type = data_type.canonical
-        if parser_type is not data_type.parser_type:
-            raise CompilationError(
+        parser_type_result = collector.capture(
+            f"{path}.type",
+            lambda: self._parser_type(self._required_string(payload, "type")),
+        )
+        parser_type = None if parser_type_result is _MISSING else parser_type_result
+        types_compatible = (
+            parser_type is not None
+            and data_type is not None
+            and parser_type is data_type.parser_type
+        )
+        if parser_type is not None and data_type is not None and not types_compatible:
+            collector.add(
+                f"{path}.type",
                 f"Parser {parser_type.value!r} is incompatible with expected_data_type "
-                f"{expected_data_type!r} for target column {target_column_name!r}; "
-                f"expected {data_type.parser_type.value!r}."
+                f"{data_type.canonical!r} for target column {target_column_name!r}; "
+                f"expected {data_type.parser_type.value!r}.",
             )
-        self._reject_keys(
-            payload,
-            self._parser_allowed_keys(parser_type),
-            f"Parser for {target_column_name!r}",
+        allowed_keys = (
+            self._parser_allowed_keys(parser_type)
+            if parser_type is not None
+            else set().union(*(self._parser_allowed_keys(member) for member in ParserType))
+        )
+        collector.capture(
+            path,
+            lambda: self._reject_keys(
+                payload,
+                allowed_keys,
+                f"Parser for {target_column_name!r}",
+            ),
         )
 
-        # Resolve marker inheritance before validating ``replace_null_markers``. A column can use
-        # global markers, replace them, or append its own markers while preserving first-seen order.
-        markers_mode = self._enum_value(
-            NullMarkersMode,
-            payload.get("null_markers_mode", DEFAULT_NULL_MARKERS_MODE.value),
-            "null_markers_mode",
-        )
-        if "null_markers_mode" in payload and "null_markers" not in payload:
-            raise CompilationError(
-                f"null_markers_mode for {target_column_name!r} requires column null_markers."
-            )
-        if "null_markers" in payload:
-            column_markers = self._string_sequence(payload["null_markers"], "null_markers")
-            markers = (
-                self._deduplicate((*globals_config.null_markers, *column_markers))
-                if markers_mode is NullMarkersMode.EXTEND
-                else column_markers
-            )
-        else:
-            markers = globals_config.null_markers
-        replace_null_markers = self._bool(
+        marker_options = self._compile_null_marker_options(
             payload,
-            "replace_null_markers",
-            DEFAULT_REPLACE_NULL_MARKERS,
+            globals_validation,
+            target_column_name,
+            path,
+            collector,
         )
-        if replace_null_markers and not markers:
-            raise CompilationError(
-                f"replace_null_markers is true for {target_column_name!r}, "
-                "but no null markers exist."
-            )
 
         # Null defaults describe the final contract, not parse failure alone. They are permitted
         # only for non-nullable outputs and run after parsing and zero invalidation.
-        is_nullable = self._bool(payload, "is_nullable", DEFAULT_IS_NULLABLE)
-        raw_default_on_null = payload.get("default_on_null", _MISSING)
-        if not is_nullable and raw_default_on_null is _MISSING:
-            raise CompilationError(
-                f"Column {target_column_name!r} is not nullable and requires default_on_null."
-            )
-        if is_nullable and raw_default_on_null is not _MISSING:
-            raise CompilationError(
-                f"default_on_null for {target_column_name!r} requires is_nullable: false."
-            )
-        default_on_null = (
-            self._typed_default(
-                raw_default_on_null,
-                data_type,
-                "default_on_null",
-            )
-            if raw_default_on_null is not _MISSING
-            else None
+        null_default = self._compile_null_default(
+            payload,
+            data_type if types_compatible else None,
+            target_column_name,
+            path,
+            collector,
         )
 
         # Parse-error defaults are independent of null defaults: one handles invalid non-null
         # input; the other guarantees a final non-null value.
-        raw_on_parse_error = payload.get("on_parse_error", DEFAULT_ON_PARSE_ERROR.value)
-        # YAML resolves an unquoted ``null`` scalar to ``None``. In this one
-        # enum position it unambiguously names the canonical ``null`` mode.
-        if "on_parse_error" in payload and raw_on_parse_error is None:
-            raw_on_parse_error = ParseErrorMode.NULL.value
-        on_parse_error = self._enum_value(
-            ParseErrorMode,
-            raw_on_parse_error,
-            "on_parse_error",
+        parse_error = self._compile_parse_error_default(
+            payload,
+            parser_type,
+            data_type if types_compatible else None,
+            target_column_name,
+            path,
+            collector,
         )
-        # Preserving an invalid token is type-safe only when the target itself is a string. A raw
-        # value such as ``Mul`` cannot inhabit an integer, date, or binary Spark column.
-        # Enforcing this during compilation keeps runtime expressions schema-consistent and gives the
-        # author a useful error before any Spark job starts.
-        if on_parse_error is ParseErrorMode.PRESERVE and parser_type is not ParserType.STRING:
-            raise CompilationError(
-                f"on_parse_error: preserve for {target_column_name!r} requires a string parser."
+        zero_is_valid = self._compile_zero_policy(
+            payload,
+            parser_type,
+            types_compatible,
+            null_default,
+            parse_error,
+            target_column_name,
+            path,
+            collector,
+        )
+
+        string_format_result = (
+            collector.capture(
+                f"{path}.format",
+                lambda: self._compile_string_format(payload, parser_type),
             )
-        raw_default_on_error = payload.get("default_on_error", _MISSING)
-        if on_parse_error is ParseErrorMode.DEFAULT and raw_default_on_error is _MISSING:
-            raise CompilationError(
-                f"on_parse_error: default for {target_column_name!r} requires default_on_error."
-            )
-        if on_parse_error is not ParseErrorMode.DEFAULT and raw_default_on_error is not _MISSING:
-            raise CompilationError(
-                f"default_on_error for {target_column_name!r} requires on_parse_error: default."
-            )
-        default_on_error = (
-            self._typed_default(
-                raw_default_on_error,
-                data_type,
-                "default_on_error",
-            )
-            if raw_default_on_error is not _MISSING
+            if parser_type is ParserType.STRING
             else None
         )
-
-        zero_is_valid = self._bool(payload, "zero_is_valid", DEFAULT_ZERO_IS_VALID)
-        # Reject contradictory defaults at compile time. Otherwise the runtime would assign zero
-        # and immediately invalidate it, producing a surprising null despite an authored default.
-        if (
-            parser_type in NUMERIC_PARSER_TYPES
-            and not zero_is_valid
-            and default_on_null is not None
-            and Decimal(str(default_on_null)) == 0
-        ):
-            raise CompilationError(
-                f"Column {target_column_name!r} rejects zero but uses zero as default_on_null."
+        string_format = None if string_format_result is _MISSING else string_format_result
+        formats_result = (
+            collector.capture(
+                f"{path}.formats",
+                lambda: self._compile_formats(payload, parser_type),
             )
-        if (
-            parser_type in NUMERIC_PARSER_TYPES
-            and not zero_is_valid
-            and default_on_error is not None
-            and Decimal(str(default_on_error)) == 0
-        ):
-            raise CompilationError(
-                f"Column {target_column_name!r} rejects zero but uses zero as default_on_error."
-            )
-
-        string_format = self._compile_string_format(payload, parser_type)
-        formats = self._compile_formats(payload, parser_type)
+            if parser_type in {ParserType.DATE, ParserType.TIMESTAMP, ParserType.TIMESTAMP_NTZ}
+            else ()
+        )
+        formats = () if formats_result is _MISSING else formats_result
         (
             true_values,
             false_values,
@@ -527,37 +752,71 @@ class YamlParserConfigCompiler:
             payload,
             parser_type,
             target_column_name,
-            globals_config,
+            globals_validation,
+            path,
+            collector,
         )
+
+        def captured_bool(key: str, default: bool) -> bool:
+            result = collector.capture(f"{path}.{key}", lambda: self._bool(payload, key, default))
+            return default if result is _MISSING else result
+
+        trim_whitespace = captured_bool("trim_whitespace", DEFAULT_TRIM_WHITESPACE)
+        collapse_whitespace = captured_bool("collapse_whitespace", DEFAULT_COLLAPSE_WHITESPACE)
+        empty_is_null = captured_bool("empty_is_null", DEFAULT_EMPTY_IS_NULL)
+        audit = captured_bool("audit", DEFAULT_AUDIT)
+
+        if parser_type is ParserType.BINARY:
+            binary_encoding_result = collector.capture(
+                f"{path}.encoding",
+                lambda: self._enum_value(
+                    BinaryEncoding,
+                    payload.get("encoding", DEFAULT_BINARY_ENCODING.value),
+                    "encoding",
+                ),
+            )
+            binary_encoding = (
+                binary_encoding_result
+                if binary_encoding_result is not _MISSING
+                else DEFAULT_BINARY_ENCODING
+            )
+            if binary_encoding_result is not _MISSING and types_compatible:
+                for label, value, valid in (
+                    ("default_on_null", null_default.value, null_default.value_valid),
+                    ("default_on_error", parse_error.value, parse_error.value_valid),
+                ):
+                    if valid and value is not None:
+                        collector.capture(
+                            f"{path}.{label}",
+                            partial(
+                                self._validate_binary_default,
+                                value,
+                                binary_encoding,
+                                label,
+                            ),
+                        )
+        else:
+            binary_encoding = DEFAULT_BINARY_ENCODING
+
+        if len(collector.issues) != issue_count or parser_type is None:
+            return None
         # Construct one fully resolved immutable options object only after every conditional
         # relationship has passed. Runtime code may safely branch on parser_type without looking
         # back at raw YAML.
-        compiled_options = ParserOptions(
+        return ParserOptions(
             parser_type=parser_type,
-            trim_whitespace=self._bool(
-                payload,
-                "trim_whitespace",
-                DEFAULT_TRIM_WHITESPACE,
-            ),
-            collapse_whitespace=self._bool(
-                payload,
-                "collapse_whitespace",
-                DEFAULT_COLLAPSE_WHITESPACE,
-            ),
-            empty_is_null=self._bool(payload, "empty_is_null", DEFAULT_EMPTY_IS_NULL),
-            replace_null_markers=replace_null_markers,
-            null_markers=markers,
-            null_markers_mode=markers_mode,
-            null_marker_case_sensitive=self._bool(
-                payload,
-                "null_marker_case_sensitive",
-                globals_config.null_marker_case_sensitive,
-            ),
-            is_nullable=is_nullable,
-            default_on_null=default_on_null,
-            on_parse_error=on_parse_error,
-            default_on_error=default_on_error,
-            audit=self._bool(payload, "audit", DEFAULT_AUDIT),
+            trim_whitespace=trim_whitespace,
+            collapse_whitespace=collapse_whitespace,
+            empty_is_null=empty_is_null,
+            replace_null_markers=marker_options.replace,
+            null_markers=marker_options.markers,
+            null_markers_mode=marker_options.mode,
+            null_marker_case_sensitive=marker_options.case_sensitive,
+            is_nullable=null_default.is_nullable,
+            default_on_null=null_default.value,
+            on_parse_error=parse_error.mode,
+            default_on_error=parse_error.value,
+            audit=audit,
             zero_is_valid=zero_is_valid,
             string_format=string_format,
             formats=formats,
@@ -565,43 +824,268 @@ class YamlParserConfigCompiler:
             false_values=false_values,
             boolean_case_sensitive=boolean_case_sensitive,
             boolean_values_mode=boolean_values_mode,
-            binary_encoding=self._enum_value(
-                BinaryEncoding,
-                payload.get("encoding", DEFAULT_BINARY_ENCODING.value),
-                "encoding",
+            binary_encoding=binary_encoding,
+        )
+
+    def _compile_null_marker_options(
+        self,
+        payload: Mapping[str, Any],
+        globals_validation: _GlobalsValidation,
+        target_column_name: str,
+        path: str,
+        collector: _IssueCollector,
+    ) -> _NullMarkerValidation:
+        """Resolve marker inheritance and collect independent marker-option issues."""
+        mode_result = collector.capture(
+            f"{path}.null_markers_mode",
+            lambda: self._enum_value(
+                NullMarkersMode,
+                payload.get("null_markers_mode", DEFAULT_NULL_MARKERS_MODE.value),
+                "null_markers_mode",
             ),
         )
-        self._validate_binary_defaults(compiled_options)
-        return compiled_options
+        mode_valid = mode_result is not _MISSING
+        mode = mode_result if mode_valid else DEFAULT_NULL_MARKERS_MODE
+        markers_requirement_valid = not (
+            "null_markers_mode" in payload and "null_markers" not in payload
+        )
+        if not markers_requirement_valid:
+            collector.add(
+                f"{path}.null_markers",
+                f"null_markers_mode for {target_column_name!r} requires column null_markers.",
+            )
 
-    def _validate_binary_defaults(
-        self,
-        options: ParserOptions,
-    ) -> None:
-        """Verify each authored binary default uses the parser's configured encoding."""
-        if options.parser_type is not ParserType.BINARY:
-            return
-        for label, value in (
-            ("default_on_null", options.default_on_null),
-            ("default_on_error", options.default_on_error),
+        column_markers: tuple[str, ...] = ()
+        column_markers_valid = True
+        if "null_markers" in payload:
+            column_markers_result = collector.capture(
+                f"{path}.null_markers",
+                lambda: self._string_sequence(payload["null_markers"], "null_markers"),
+            )
+            column_markers_valid = column_markers_result is not _MISSING
+            column_markers = column_markers_result if column_markers_valid else ()
+            markers_valid = column_markers_valid and mode_valid
+            if mode is NullMarkersMode.EXTEND:
+                markers_valid = markers_valid and globals_validation.null_markers_valid
+                markers = self._deduplicate(
+                    (*globals_validation.config.null_markers, *column_markers)
+                )
+            else:
+                markers = column_markers
+        else:
+            markers = globals_validation.config.null_markers
+            markers_valid = globals_validation.null_markers_valid and mode_valid
+
+        replace_result = collector.capture(
+            f"{path}.replace_null_markers",
+            lambda: self._bool(
+                payload,
+                "replace_null_markers",
+                DEFAULT_REPLACE_NULL_MARKERS,
+            ),
+        )
+        replace = replace_result if replace_result is not _MISSING else DEFAULT_REPLACE_NULL_MARKERS
+        markers_guaranteed_empty = markers_valid and not markers
+        if (
+            not mode_valid
+            and "null_markers" in payload
+            and column_markers_valid
+            and not column_markers
+            and globals_validation.null_markers_valid
+            and not globals_validation.config.null_markers
         ):
-            if value is None:
-                continue
-            try:
-                if options.binary_encoding is BinaryEncoding.BASE64:
-                    base64.b64decode(value, validate=True)
-                elif options.binary_encoding is BinaryEncoding.HEX:
-                    # Spark's ``unhex`` accepts empty and odd-length hexadecimal strings (padding
-                    # the leading nibble) but rejects whitespace. ``bytes.fromhex`` has the inverse
-                    # edge behavior, so validate Spark's ASCII grammar directly.
-                    if _ASCII_HEX_PATTERN.fullmatch(value) is None:
-                        raise ValueError("not Spark hexadecimal text")
-                else:
-                    value.encode("utf-8")
-            except (ValueError, UnicodeError, binascii.Error) as exc:
-                raise CompilationError(
-                    f"{label} is not valid {options.binary_encoding.value} binary text."
-                ) from exc
+            # Both valid mode interpretations resolve to an empty vocabulary, so this relationship
+            # can still be diagnosed without guessing which mode the author intended.
+            markers_guaranteed_empty = True
+        if (
+            replace_result is not _MISSING
+            and replace
+            and markers_requirement_valid
+            and markers_guaranteed_empty
+        ):
+            collector.add(
+                f"{path}.replace_null_markers",
+                f"replace_null_markers is true for {target_column_name!r}, "
+                "but no null markers exist.",
+            )
+
+        case_sensitive_result = collector.capture(
+            f"{path}.null_marker_case_sensitive",
+            lambda: self._bool(
+                payload,
+                "null_marker_case_sensitive",
+                globals_validation.config.null_marker_case_sensitive,
+            ),
+        )
+        case_sensitive = (
+            case_sensitive_result
+            if case_sensitive_result is not _MISSING
+            else globals_validation.config.null_marker_case_sensitive
+        )
+        return _NullMarkerValidation(markers, mode, replace, case_sensitive)
+
+    def _compile_null_default(
+        self,
+        payload: Mapping[str, Any],
+        data_type: SparkDataType | None,
+        target_column_name: str,
+        path: str,
+        collector: _IssueCollector,
+    ) -> _NullDefaultValidation:
+        """Resolve final-null behavior, skipping typed checks when its contract is invalid."""
+        is_nullable_result = collector.capture(
+            f"{path}.is_nullable",
+            lambda: self._bool(payload, "is_nullable", DEFAULT_IS_NULLABLE),
+        )
+        is_nullable = (
+            is_nullable_result if is_nullable_result is not _MISSING else DEFAULT_IS_NULLABLE
+        )
+        raw_default = payload.get("default_on_null", _MISSING)
+        if is_nullable_result is _MISSING:
+            return _NullDefaultValidation(is_nullable, None, raw_default is _MISSING)
+        if not is_nullable and raw_default is _MISSING:
+            collector.add(
+                f"{path}.default_on_null",
+                f"Column {target_column_name!r} is not nullable and requires default_on_null.",
+            )
+            return _NullDefaultValidation(is_nullable, None, False)
+        if is_nullable and raw_default is not _MISSING:
+            collector.add(
+                f"{path}.default_on_null",
+                f"default_on_null for {target_column_name!r} requires is_nullable: false.",
+            )
+            return _NullDefaultValidation(is_nullable, None, False)
+        if raw_default is _MISSING:
+            return _NullDefaultValidation(is_nullable, None, True)
+        if data_type is None:
+            return _NullDefaultValidation(is_nullable, None, False)
+
+        default_result = collector.capture(
+            f"{path}.default_on_null",
+            lambda: self._typed_default(raw_default, data_type, "default_on_null"),
+        )
+        return _NullDefaultValidation(
+            is_nullable,
+            None if default_result is _MISSING else default_result,
+            default_result is not _MISSING,
+        )
+
+    def _compile_parse_error_default(
+        self,
+        payload: Mapping[str, Any],
+        parser_type: ParserType | None,
+        data_type: SparkDataType | None,
+        target_column_name: str,
+        path: str,
+        collector: _IssueCollector,
+    ) -> _ParseErrorValidation:
+        """Resolve parse-error behavior and its optional typed default."""
+        raw_mode = payload.get("on_parse_error", DEFAULT_ON_PARSE_ERROR.value)
+        # YAML resolves an unquoted ``null`` scalar to ``None``. Here it names the null mode.
+        if "on_parse_error" in payload and raw_mode is None:
+            raw_mode = ParseErrorMode.NULL.value
+        mode_result = collector.capture(
+            f"{path}.on_parse_error",
+            lambda: self._enum_value(ParseErrorMode, raw_mode, "on_parse_error"),
+        )
+        mode = mode_result if mode_result is not _MISSING else DEFAULT_ON_PARSE_ERROR
+        if (
+            mode_result is not _MISSING
+            and mode is ParseErrorMode.PRESERVE
+            and parser_type is not None
+            and parser_type is not ParserType.STRING
+        ):
+            collector.add(
+                f"{path}.on_parse_error",
+                f"on_parse_error: preserve for {target_column_name!r} requires a string parser.",
+            )
+
+        raw_default = payload.get("default_on_error", _MISSING)
+        if mode_result is _MISSING:
+            return _ParseErrorValidation(mode, None, raw_default is _MISSING)
+        if mode is ParseErrorMode.DEFAULT and raw_default is _MISSING:
+            collector.add(
+                f"{path}.default_on_error",
+                f"on_parse_error: default for {target_column_name!r} requires default_on_error.",
+            )
+            return _ParseErrorValidation(mode, None, False)
+        if mode is not ParseErrorMode.DEFAULT and raw_default is not _MISSING:
+            collector.add(
+                f"{path}.default_on_error",
+                f"default_on_error for {target_column_name!r} requires on_parse_error: default.",
+            )
+            return _ParseErrorValidation(mode, None, False)
+        if raw_default is _MISSING:
+            return _ParseErrorValidation(mode, None, True)
+        if data_type is None:
+            return _ParseErrorValidation(mode, None, False)
+
+        default_result = collector.capture(
+            f"{path}.default_on_error",
+            lambda: self._typed_default(raw_default, data_type, "default_on_error"),
+        )
+        return _ParseErrorValidation(
+            mode,
+            None if default_result is _MISSING else default_result,
+            default_result is not _MISSING,
+        )
+
+    def _compile_zero_policy(
+        self,
+        payload: Mapping[str, Any],
+        parser_type: ParserType | None,
+        types_compatible: bool,
+        null_default: _NullDefaultValidation,
+        parse_error: _ParseErrorValidation,
+        target_column_name: str,
+        path: str,
+        collector: _IssueCollector,
+    ) -> bool:
+        """Resolve numeric zero validity and reject contradictory validated defaults."""
+        if parser_type not in NUMERIC_PARSER_TYPES:
+            return DEFAULT_ZERO_IS_VALID
+        zero_result = collector.capture(
+            f"{path}.zero_is_valid",
+            lambda: self._bool(payload, "zero_is_valid", DEFAULT_ZERO_IS_VALID),
+        )
+        zero_is_valid = zero_result if zero_result is not _MISSING else DEFAULT_ZERO_IS_VALID
+        if zero_result is _MISSING or zero_is_valid or not types_compatible:
+            return zero_is_valid
+        for label, default in (
+            ("default_on_null", null_default),
+            ("default_on_error", parse_error),
+        ):
+            if (
+                default.value_valid
+                and default.value is not None
+                and Decimal(str(default.value)) == 0
+            ):
+                collector.add(
+                    f"{path}.{label}",
+                    f"Column {target_column_name!r} rejects zero but uses zero as {label}.",
+                )
+        return zero_is_valid
+
+    @staticmethod
+    def _validate_binary_default(
+        value: str,
+        encoding: BinaryEncoding,
+        label: str,
+    ) -> None:
+        """Validate one binary default so sibling defaults can be checked independently."""
+        try:
+            if encoding is BinaryEncoding.BASE64:
+                base64.b64decode(value, validate=True)
+            elif encoding is BinaryEncoding.HEX:
+                # Spark's ``unhex`` accepts empty and odd-length hexadecimal strings (padding the
+                # leading nibble) but rejects whitespace. ``bytes.fromhex`` has the inverse edge
+                # behavior, so validate Spark's ASCII grammar directly.
+                if _ASCII_HEX_PATTERN.fullmatch(value) is None:
+                    raise ValueError("not Spark hexadecimal text")
+            else:
+                value.encode("utf-8")
+        except (ValueError, UnicodeError, binascii.Error) as exc:
+            raise CompilationError(f"{label} is not valid {encoding.value} binary text.") from exc
 
     @staticmethod
     def _parser_allowed_keys(parser_type: ParserType) -> set[str]:
@@ -691,11 +1175,13 @@ class YamlParserConfigCompiler:
     def _compile_boolean_values(
         self,
         payload: Mapping[str, Any],
-        parser_type: ParserType,
+        parser_type: ParserType | None,
         target_column_name: str,
-        globals_config: ParserGlobals,
+        globals_validation: _GlobalsValidation,
+        parser_path: str,
+        collector: _IssueCollector,
     ) -> tuple[tuple[str, ...], tuple[str, ...], bool, BooleanValuesMode]:
-        """Resolve inherited or extended Boolean tokens for one Boolean parser."""
+        """Resolve Boolean tokens while suppressing checks with invalid prerequisites."""
         if parser_type is not ParserType.BOOLEAN:
             return (
                 DEFAULT_BOOLEAN_TRUE_VALUES,
@@ -703,58 +1189,329 @@ class YamlParserConfigCompiler:
                 DEFAULT_BOOLEAN_CASE_SENSITIVE,
                 DEFAULT_BOOLEAN_VALUES_MODE,
             )
-        mode = self._enum_value(
-            BooleanValuesMode,
-            payload.get("boolean_values_mode", DEFAULT_BOOLEAN_VALUES_MODE.value),
-            "boolean_values_mode",
+        globals_config = globals_validation.config
+        mode_result = collector.capture(
+            f"{parser_path}.boolean_values_mode",
+            lambda: self._enum_value(
+                BooleanValuesMode,
+                payload.get("boolean_values_mode", DEFAULT_BOOLEAN_VALUES_MODE.value),
+                "boolean_values_mode",
+            ),
         )
+        mode_valid = mode_result is not _MISSING
+        mode = mode_result if mode_valid else DEFAULT_BOOLEAN_VALUES_MODE
         supplied_true = "true_values" in payload
         supplied_false = "false_values" in payload
         if "boolean_values_mode" in payload and not (supplied_true or supplied_false):
-            raise CompilationError(
+            collector.add(
+                f"{parser_path}.boolean_values_mode",
                 f"boolean_values_mode for {target_column_name!r} requires true_values "
-                "or false_values."
+                "or false_values.",
             )
-        column_true = (
-            self._string_sequence(
-                payload["true_values"],
-                "true_values",
-                allow_empty_values=False,
+        column_true_result = (
+            collector.capture(
+                f"{parser_path}.true_values",
+                lambda: self._string_sequence(
+                    payload["true_values"],
+                    "true_values",
+                    allow_empty_values=False,
+                ),
             )
             if supplied_true
             else ()
         )
-        column_false = (
-            self._string_sequence(
-                payload["false_values"],
-                "false_values",
-                allow_empty_values=False,
+        column_false_result = (
+            collector.capture(
+                f"{parser_path}.false_values",
+                lambda: self._string_sequence(
+                    payload["false_values"],
+                    "false_values",
+                    allow_empty_values=False,
+                ),
             )
             if supplied_false
             else ()
         )
+        column_true_valid = column_true_result is not _MISSING
+        column_false_valid = column_false_result is not _MISSING
+        column_true = column_true_result if column_true_valid else ()
+        column_false = column_false_result if column_false_valid else ()
+        case_sensitive_result = collector.capture(
+            f"{parser_path}.boolean_case_sensitive",
+            lambda: self._bool(
+                payload,
+                "boolean_case_sensitive",
+                globals_config.boolean_case_sensitive,
+            ),
+        )
+        case_sensitive_valid = case_sensitive_result is not _MISSING and (
+            "boolean_case_sensitive" in payload or globals_validation.boolean_case_sensitive_valid
+        )
+        column_case_override_valid = (
+            "boolean_case_sensitive" in payload and case_sensitive_result is not _MISSING
+        )
+        case_sensitive = (
+            case_sensitive_result
+            if case_sensitive_result is not _MISSING
+            else globals_config.boolean_case_sensitive
+        )
+
+        supplied_overlap_valid = True
+        if supplied_true and supplied_false and column_true_valid and column_false_valid:
+            supplied_overlap_result = collector.capture(
+                parser_path,
+                lambda: self._validate_boolean_overlap(
+                    column_true,
+                    column_false,
+                    case_sensitive if case_sensitive_valid else True,
+                    f"target column {target_column_name!r}",
+                ),
+            )
+            supplied_overlap_valid = supplied_overlap_result is not _MISSING
         if mode is BooleanValuesMode.EXTEND:
-            # Ordered de-duplication keeps serialized output deterministic and gives author-supplied tokens
-            # predictable precedence in reports without changing membership behavior.
+            # Ordered de-duplication keeps serialization and report precedence deterministic.
             true_values = self._deduplicate((*globals_config.true_values, *column_true))
             false_values = self._deduplicate((*globals_config.false_values, *column_false))
+            true_values_valid = (
+                mode_valid
+                and globals_validation.true_values_valid
+                and (not supplied_true or column_true_valid)
+            )
+            false_values_valid = (
+                mode_valid
+                and globals_validation.false_values_valid
+                and (not supplied_false or column_false_valid)
+            )
         else:
             true_values = column_true if supplied_true else globals_config.true_values
             false_values = column_false if supplied_false else globals_config.false_values
-        if not true_values or not false_values:
-            raise CompilationError("true_values and false_values must be non-empty.")
-        case_sensitive = self._bool(
-            payload,
-            "boolean_case_sensitive",
-            globals_config.boolean_case_sensitive,
+            true_values_valid = mode_valid and (
+                column_true_valid if supplied_true else globals_validation.true_values_valid
+            )
+            false_values_valid = mode_valid and (
+                column_false_valid if supplied_false else globals_validation.false_values_valid
+            )
+        vocabularies_nonempty = not (
+            (true_values_valid and not true_values) or (false_values_valid and not false_values)
         )
-        self._validate_boolean_overlap(
-            true_values,
-            false_values,
-            case_sensitive,
-            f"target column {target_column_name!r}",
+        if not vocabularies_nonempty:
+            collector.add(
+                parser_path,
+                "true_values and false_values must be non-empty.",
+            )
+        should_recheck_inherited_case = (
+            mode_valid
+            and column_case_override_valid
+            and globals_validation.true_values_valid
+            and globals_validation.false_values_valid
+            and (
+                not globals_validation.boolean_case_sensitive_valid
+                or case_sensitive != globals_config.boolean_case_sensitive
+            )
+            and (
+                mode is BooleanValuesMode.EXTEND
+                or ("boolean_values_mode" not in payload and not (supplied_true or supplied_false))
+            )
         )
+        if should_recheck_inherited_case:
+            inherited_overlap = self._boolean_overlap_values(
+                globals_config.true_values,
+                globals_config.false_values,
+                case_sensitive,
+            )
+            already_reported = set(globals_validation.boolean_overlap_values)
+            if not case_sensitive:
+                already_reported.update(
+                    {value.lower() for value in already_reported if value.isascii()}
+                )
+            inherited_overlap.difference_update(already_reported)
+            if inherited_overlap:
+                collector.add(
+                    parser_path,
+                    self._boolean_overlap_message(
+                        inherited_overlap,
+                        f"target column {target_column_name!r}",
+                    ),
+                )
+        if (
+            mode_valid
+            and mode is BooleanValuesMode.REPLACE
+            and (supplied_true or supplied_false)
+            and true_values_valid
+            and false_values_valid
+            and vocabularies_nonempty
+            and supplied_overlap_valid
+        ):
+            collector.capture(
+                parser_path,
+                lambda: self._validate_boolean_overlap(
+                    true_values,
+                    false_values,
+                    case_sensitive if case_sensitive_valid else True,
+                    f"target column {target_column_name!r}",
+                ),
+            )
+        if mode_valid and mode is BooleanValuesMode.EXTEND:
+            self._validate_extended_boolean_additions(
+                column_true=column_true,
+                column_false=column_false,
+                column_true_valid=column_true_valid,
+                column_false_valid=column_false_valid,
+                supplied_true=supplied_true,
+                supplied_false=supplied_false,
+                globals_validation=globals_validation,
+                case_sensitive=case_sensitive,
+                case_sensitive_valid=case_sensitive_valid,
+                target_column_name=target_column_name,
+                parser_path=parser_path,
+                collector=collector,
+            )
+        if not mode_valid and supplied_overlap_valid:
+            self._validate_indeterminate_boolean_mode_overlap(
+                column_true=column_true,
+                column_false=column_false,
+                column_true_valid=column_true_valid,
+                column_false_valid=column_false_valid,
+                supplied_true=supplied_true,
+                supplied_false=supplied_false,
+                globals_validation=globals_validation,
+                case_sensitive=case_sensitive,
+                case_sensitive_valid=case_sensitive_valid,
+                target_column_name=target_column_name,
+                parser_path=parser_path,
+                collector=collector,
+            )
         return true_values, false_values, case_sensitive, mode
+
+    def _validate_extended_boolean_additions(
+        self,
+        *,
+        column_true: tuple[str, ...],
+        column_false: tuple[str, ...],
+        column_true_valid: bool,
+        column_false_valid: bool,
+        supplied_true: bool,
+        supplied_false: bool,
+        globals_validation: _GlobalsValidation,
+        case_sensitive: bool,
+        case_sensitive_valid: bool,
+        target_column_name: str,
+        parser_path: str,
+        collector: _IssueCollector,
+    ) -> None:
+        """Report cross-overlap introduced by EXTEND even when a global sibling is invalid."""
+        comparison_is_case_sensitive = case_sensitive if case_sensitive_valid else True
+        inherited_true = (
+            globals_validation.config.true_values if globals_validation.true_values_valid else ()
+        )
+        inherited_false = (
+            globals_validation.config.false_values if globals_validation.false_values_valid else ()
+        )
+        new_column_true = self._boolean_additions(
+            column_true,
+            inherited_true,
+            comparison_is_case_sensitive,
+        )
+        new_column_false = self._boolean_additions(
+            column_false,
+            inherited_false,
+            comparison_is_case_sensitive,
+        )
+        overlap: set[str] = set()
+        if supplied_true and column_true_valid and globals_validation.false_values_valid:
+            overlap.update(
+                self._boolean_overlap_values(
+                    new_column_true,
+                    globals_validation.config.false_values,
+                    comparison_is_case_sensitive,
+                )
+            )
+        if supplied_false and column_false_valid and globals_validation.true_values_valid:
+            overlap.update(
+                self._boolean_overlap_values(
+                    globals_validation.config.true_values,
+                    new_column_false,
+                    comparison_is_case_sensitive,
+                )
+            )
+        if supplied_true and supplied_false and column_true_valid and column_false_valid:
+            # A direct local overlap was already reported above; keep this diagnostic specific to
+            # additional inherited/local interactions so the same finding is not emitted twice.
+            overlap.difference_update(
+                self._boolean_overlap_values(
+                    column_true,
+                    column_false,
+                    comparison_is_case_sensitive,
+                )
+            )
+        if overlap:
+            collector.add(
+                parser_path,
+                self._boolean_overlap_message(
+                    overlap,
+                    f"target column {target_column_name!r}",
+                ),
+            )
+
+    @staticmethod
+    def _boolean_additions(
+        column_values: tuple[str, ...],
+        inherited_values: tuple[str, ...],
+        case_sensitive: bool,
+    ) -> tuple[str, ...]:
+        """Return values that add a new stable token to one side of an inherited vocabulary."""
+        exact_inherited = set(inherited_values)
+        ascii_inherited = {value.lower() for value in inherited_values if value.isascii()}
+        return tuple(
+            value
+            for value in column_values
+            if value not in exact_inherited
+            and (case_sensitive or not value.isascii() or value.lower() not in ascii_inherited)
+        )
+
+    def _validate_indeterminate_boolean_mode_overlap(
+        self,
+        *,
+        column_true: tuple[str, ...],
+        column_false: tuple[str, ...],
+        column_true_valid: bool,
+        column_false_valid: bool,
+        supplied_true: bool,
+        supplied_false: bool,
+        globals_validation: _GlobalsValidation,
+        case_sensitive: bool,
+        case_sensitive_valid: bool,
+        target_column_name: str,
+        parser_path: str,
+        collector: _IssueCollector,
+    ) -> None:
+        """Report overlap that exists under every valid interpretation of an invalid mode.
+
+        Replacement is the smaller of the two possible vocabularies. If its selected true and
+        false sides overlap, extension can only retain that overlap, so the issue does not depend
+        on which valid mode the author intended.
+        """
+        if not (supplied_true or supplied_false):
+            return
+        true_values = column_true if supplied_true else globals_validation.config.true_values
+        false_values = column_false if supplied_false else globals_validation.config.false_values
+        true_values_valid = (
+            column_true_valid if supplied_true else globals_validation.true_values_valid
+        )
+        false_values_valid = (
+            column_false_valid if supplied_false else globals_validation.false_values_valid
+        )
+        if not true_values_valid or not false_values_valid or not true_values or not false_values:
+            return
+        collector.capture(
+            parser_path,
+            lambda: self._validate_boolean_overlap(
+                true_values,
+                false_values,
+                case_sensitive if case_sensitive_valid else True,
+                f"target column {target_column_name!r}",
+            ),
+        )
 
     @staticmethod
     def _validate_boolean_overlap(
@@ -769,15 +1526,34 @@ class YamlParserConfigCompiler:
         Non-ASCII case-insensitive overlap is deliberately deferred to a Spark expression so the
         compiler never rejects a valid vocabulary because its Unicode table differs from the JVM.
         """
+        overlap = YamlParserConfigCompiler._boolean_overlap_values(
+            true_values,
+            false_values,
+            case_sensitive,
+        )
+        if overlap:
+            raise CompilationError(
+                YamlParserConfigCompiler._boolean_overlap_message(overlap, label)
+            )
+
+    @staticmethod
+    def _boolean_overlap_message(overlap: set[str], label: str) -> str:
+        """Render one deterministic Boolean vocabulary contradiction."""
+        return f"Boolean true_values and false_values overlap for {label}: {sorted(overlap)}."
+
+    @staticmethod
+    def _boolean_overlap_values(
+        true_values: tuple[str, ...],
+        false_values: tuple[str, ...],
+        case_sensitive: bool,
+    ) -> set[str]:
+        """Return overlap labels using the package's stable legacy rendering contract."""
         overlap = set(true_values) & set(false_values)
         if not case_sensitive:
             ascii_true = {item.lower() for item in true_values if item.isascii()}
             ascii_false = {item.lower() for item in false_values if item.isascii()}
             overlap.update(ascii_true & ascii_false)
-        if overlap:
-            raise CompilationError(
-                f"Boolean true_values and false_values overlap for {label}: {sorted(overlap)}."
-            )
+        return overlap
 
     def _parser_type(self, value: str) -> ParserType:
         """Canonicalize aliases and convert a parser name into the closed enum vocabulary."""
@@ -1007,13 +1783,6 @@ class YamlParserConfigCompiler:
             ) from exc
         return canonical
 
-    def _validate_unique_columns(self, columns: tuple[ColumnParser, ...]) -> None:
-        """Reject duplicate target names while intentionally allowing repeated sources."""
-        column_names = [column.target_column_name for column in columns]
-        duplicate_columns = self._duplicates(column_names)
-        if duplicate_columns:
-            raise CompilationError(f"Duplicate target_column_name values: {duplicate_columns}.")
-
     def _string_sequence(
         self,
         value: Any,
@@ -1030,7 +1799,9 @@ class YamlParserConfigCompiler:
             if not isinstance(item, str) or (not allow_empty_values and not item)
         ]
         if invalid:
-            raise CompilationError(f"{label} must contain only valid strings: {invalid!r}.")
+            raise CompilationError(
+                f"{label} must contain only valid strings: {_recursion_safe_repr(invalid)}."
+            )
         for index, item in enumerate(value):
             _validate_utf8_string(item, f"{label}[{index}]")
         return self._deduplicate(tuple(value))
@@ -1107,7 +1878,9 @@ class YamlParserConfigCompiler:
             raise CompilationError(f"{label} must be a mapping.")
         invalid_keys = [key for key in value if not isinstance(key, str)]
         if invalid_keys:
-            raise CompilationError(f"{label} keys must be strings: {invalid_keys!r}.")
+            raise CompilationError(
+                f"{label} keys must be strings: {_recursion_safe_repr(invalid_keys)}."
+            )
         for key in value:
             _validate_utf8_string(key, f"{label} key")
         return value

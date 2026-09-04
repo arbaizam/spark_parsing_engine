@@ -237,9 +237,58 @@ def test_invalid_config_review_returns_errors_instead_of_raising() -> None:
 
     assert report.is_valid is False
     assert report.source == "inline YAML"
-    assert report.errors
-    assert "columns" in report.errors[0]
+    assert report.errors == (
+        "parser_config_name: parser_config_name must be a non-empty string.",
+        "version: version must be a non-empty string.",
+        "columns: columns must be a non-empty list.",
+    )
+    assert report.to_mapping()["errors"] == list(report.errors)
     assert "Validation status:** FAIL" in report.to_markdown()
+
+
+def test_config_validation_collects_independent_errors_in_deterministic_order() -> None:
+    invalid_yaml = """
+parser_config_id: aggregate
+parser_config_name: Aggregate
+version: "1"
+columns:
+  - source_column_name: raw_count
+    target_column_name: Count
+    expected_data_type: integer
+    parser:
+      on_parse_error: default
+      is_nullable: false
+      type: integer
+  - source_column_name: raw_name
+    target_column_name: Name
+    expected_data_type: string
+    parser:
+      default_on_error: fallback
+      default_on_null: fallback
+      type: string
+"""
+    expected_errors = (
+        "columns[0].parser.default_on_null: "
+        "Column 'Count' is not nullable and requires default_on_null.",
+        "columns[0].parser.default_on_error: "
+        "on_parse_error: default for 'Count' requires default_on_error.",
+        "columns[1].parser.default_on_null: "
+        "default_on_null for 'Name' requires is_nullable: false.",
+        "columns[1].parser.default_on_error: "
+        "default_on_error for 'Name' requires on_parse_error: default.",
+    )
+
+    with pytest.raises(CompilationError) as exc_info:
+        parser.compile_text(invalid_yaml)
+
+    assert exc_info.value.errors == expected_errors
+    assert str(exc_info.value) == (
+        "Validation failed with 4 errors:\n" + "\n".join(f"- {error}" for error in expected_errors)
+    )
+    report = parser.review_yaml(invalid_yaml)
+    assert report.is_valid is False
+    assert report.errors == expected_errors
+    assert report.to_markdown().count("\n- ") == len(expected_errors)
 
 
 def test_source_dispatch_is_type_driven_and_boolean_review_is_evidence_based(
