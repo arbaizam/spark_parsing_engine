@@ -25,8 +25,10 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install ".[test]"
 
-      - name: Test Spark-independent contract
-        run: python -m pytest tests/unit -q
+      - name: Test full-suite collection without optional PySpark
+        run: |
+          python -c "import importlib.util; assert importlib.util.find_spec('pyspark') is None"
+          python -m pytest -q
 
   test:
     name: Python ${{ matrix.python }} / PySpark ${{ matrix.pyspark }}
@@ -73,6 +75,43 @@ jobs:
 
       - name: Build distributions
         run: python -m build
+
+      - name: Smoke-test the installed wheel without PySpark
+        run: |
+          python -m venv "$RUNNER_TEMP/spark-parser-wheel-smoke"
+          "$RUNNER_TEMP/spark-parser-wheel-smoke/bin/python" -m pip install dist/*.whl
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/spark-parser-wheel-smoke/bin/python" -I - <<'PY'
+          import importlib.util
+          import json
+          import sys
+          from pathlib import Path
+
+          import spark_parser
+          from spark_parser import parser
+
+          assert Path(spark_parser.__file__).is_relative_to(Path(sys.prefix))
+          assert importlib.util.find_spec("pyspark") is None
+          config = parser.compile_mapping({
+              "parser_config_id": "wheel-smoke",
+              "parser_config_name": "Installed wheel smoke",
+              "version": "1",
+              "columns": [{
+                  "source_column_name": "raw",
+                  "target_column_name": "Amount",
+                  "expected_data_type": "numeric(8,2)",
+                  "parser": "decimal",
+              }],
+          })
+          resolved = parser.to_mapping(config)
+          assert parser.compile_mapping(resolved) == config
+          assert json.loads(parser.canonical_json(config)) == resolved
+          report = parser.review_yaml(resolved)
+          assert report.is_valid
+          assert report.summary["content_hash"] == parser.content_hash(config)
+          assert "Canonical resolved configuration" in report.to_markdown()
+          assert len(parser.describe()) == 13
+          PY
 
       - name: Verify PySpark is optional in wheel metadata
         run: >-

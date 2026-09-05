@@ -38,9 +38,9 @@ US_MONTH_FIRST_12_HOUR_SECONDS_FORMAT: Final = "MM/dd/yyyy h:mm:ss a"
 ISO_LOCAL_TIMESTAMP_FORMAT: Final = "yyyy-MM-dd'T'HH:mm:ss[.SSSSSS]"
 ISO_OFFSET_TIMESTAMP_FORMAT: Final = "yyyy-MM-dd'T'HH:mm:ss[.SSSSSS]XXX"
 SQL_LOCAL_TIMESTAMP_FORMAT: Final = "yyyy-MM-dd HH:mm:ss[.SSSSSS]"
-# Spark 3.5's default EXCEPTION time-parser policy can throw even through try_to_timestamp when one
-# pattern accepts only a prefix. Keep every built-in pattern paired with a full-token shape so
-# defaults and runtime guards cannot drift apart.
+# Keep every built-in pattern paired with a full-token shape. The runtime then converts its known
+# spelling with try_cast, preserving strict lexical acceptance and tolerant Gregorian calendar
+# validation independently of Spark's legacy time-parser policy.
 BUILTIN_DATETIME_FORMAT_SHAPES: Final[dict[str, str]] = {
     "yyyy-MM-dd": r"\A\d{4}-\d{2}-\d{2}\z",
     ISO_LOCAL_TIMESTAMP_FORMAT: (r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?\z"),

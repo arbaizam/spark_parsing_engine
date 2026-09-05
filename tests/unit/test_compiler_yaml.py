@@ -1527,6 +1527,37 @@ def test_hex_defaults_follow_spark_unhex_grammar(value: str) -> None:
     assert config.columns[0].parser.default_on_null == value
 
 
+@pytest.mark.parametrize("default_name", ["default_on_null", "default_on_error"])
+@pytest.mark.parametrize("value", ["", "AA==", "AAA=", "AAAA", "SGk="])
+def test_base64_defaults_accept_complete_quartets_and_required_padding(
+    default_name: str,
+    value: str,
+) -> None:
+    options = {default_name: value}
+    if default_name == "default_on_error":
+        options["on_parse_error"] = "default"
+    config = _compile_default("binary", "", **options)
+    assert getattr(config.columns[0].parser, default_name) == value
+
+
+@pytest.mark.parametrize("default_name", ["default_on_null", "default_on_error"])
+@pytest.mark.parametrize(
+    "value",
+    ["=", "==", "AAAA=", "AAAA==", "SGk==", "SGk", "S Gk=", "SGk!", "SGk=\n", "ＡＡ=="],
+)
+def test_base64_defaults_reject_invalid_padding_and_nonstandard_tokens(
+    default_name: str,
+    value: str,
+) -> None:
+    # Python 3.10's validating decoder accepts excess padding and even standalone '='. These
+    # tokens must be rejected before Spark's decoder can turn a required default into NULL.
+    options = {default_name: value}
+    if default_name == "default_on_error":
+        options["on_parse_error"] = "default"
+    with pytest.raises(CompilationError, match=f"{default_name} is not valid base64 binary text"):
+        _compile_default("binary", "", **options)
+
+
 @pytest.mark.parametrize("value", ["01 AF", "0x12", "Ａ", "é"])
 def test_hex_defaults_reject_whitespace_prefixes_and_non_ascii(value: str) -> None:
     with pytest.raises(CompilationError, match="not valid hex binary text"):

@@ -21,6 +21,7 @@ from pyspark.sql import Column, DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql import types as T
 
+from spark_parser._binary_patterns import BASE64_TOKEN_PATTERN
 from spark_parser._spark_columns import literal_column as _column
 from spark_parser._text_patterns import (
     UNICODE_EDGE_WHITESPACE_PATTERN,
@@ -35,7 +36,12 @@ from spark_parser.address_formats import (
 )
 from spark_parser.data_types import SparkDataType
 from spark_parser.dataframe_parsing import DataFrameParsing
-from spark_parser.defaults import BUILTIN_DATETIME_FORMAT_SHAPES
+from spark_parser.defaults import (
+    BUILTIN_DATETIME_FORMAT_SHAPES,
+    ISO_OFFSET_TIMESTAMP_FORMAT,
+    US_MONTH_FIRST_12_HOUR_FORMAT,
+    US_MONTH_FIRST_12_HOUR_SECONDS_FORMAT,
+)
 from spark_parser.enums import (
     NUMERIC_PARSER_TYPES,
     BinaryEncoding,
@@ -104,10 +110,8 @@ _BRONZE_NUMBER_PATTERN = r"\A[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?\z"
 # digits are deliberately unrestricted: ``0e-10000`` is true zero, while ``1e-10000`` silently
 # underflows in Spark's JSON decoder and must follow the configured parse-error policy.
 _BRONZE_ZERO_PATTERN = r"\A[+-]?(?:0+(?:\.0*)?|\.0+)(?:[eE][+-]?\d+)?\z"
-# Match the same padded standard alphabet accepted by ``base64.b64decode(validate=True)`` during
-# compilation. Spark's native decoder deliberately ignores whitespace and missing padding, so it
-# needs this lexical guard to keep runtime values on the same contract.
-_BASE64_PATTERN = r"\A(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?\z"
+# Use exactly the compiler's grammar, independent of Python's Base64 decoder version.
+_BASE64_PATTERN = r"\A" + BASE64_TOKEN_PATTERN + r"\z"
 
 # ``PERMISSIVE`` gives a null result instead of throwing for invalid numeric wrapper values. The
 # runtime can then apply the user's explicit fail/null/default policy consistently under ANSI mode.
@@ -454,7 +458,7 @@ class SparkDataFrameParser:
         # was null or because conversion failed; the next stage distinguishes those cases.
         candidate_columns = {
             plan.candidate_name: self._parse_candidate(
-                _column(plan.normalized_name),
+                plan.normalized_name,
                 plan.config.data_type,
                 plan.config.parser,
             )
@@ -1297,11 +1301,12 @@ class SparkDataFrameParser:
 
     def _parse_candidate(
         self,
-        normalized: Column,
+        normalized_name: str,
         data_type: SparkDataType,
         options: ParserOptions,
     ) -> Column:
         """Build a scalar candidate expression; invalid non-null input returns typed null."""
+        normalized = _column(normalized_name)
         parser_type = data_type.parser_type
         if parser_type is ParserType.STRING:
             return self._parse_string_candidate(normalized, options.string_format)
@@ -1375,24 +1380,18 @@ class SparkDataFrameParser:
             )
             return parsed
         if parser_type in {ParserType.DATE, ParserType.TIMESTAMP, ParserType.TIMESTAMP_NTZ}:
-            # Try formats in author-supplied order and select the first successful result. Built-in
-            # formats are shape-guarded so Spark 3.5's EXCEPTION time-parser policy cannot
-            # turn a harmless format mismatch into a job-level SparkUpgradeException.
-            if parser_type in {ParserType.DATE, ParserType.TIMESTAMP_NTZ}:
-                candidates = [
-                    self._timestamp_ntz_candidate(normalized, datetime_format)
+            # Dates preserve authored calendar fields, so they narrow from a local timestamp.
+            parsed = F.coalesce(
+                *[
+                    self._datetime_candidate(
+                        normalized_name,
+                        datetime_format,
+                        local=parser_type is not ParserType.TIMESTAMP,
+                    )
                     for datetime_format in options.formats
                 ]
-                parsed = F.coalesce(*candidates)
-                # A date represents the calendar fields the author supplied, not the instant those
-                # fields denote in a session time zone. Parse through TimestampNTZ before narrowing
-                # so an explicit input offset cannot move the value to an adjacent day.
-                return parsed.cast("date") if parser_type is ParserType.DATE else parsed
-            candidates = [
-                self._timestamp_candidate(normalized, datetime_format)
-                for datetime_format in options.formats
-            ]
-            return F.coalesce(*candidates)
+            )
+            return parsed.cast("date") if parser_type is ParserType.DATE else parsed
         raise ValueError(f"Unsupported parser type: {parser_type.value}.")
 
     @staticmethod
@@ -1433,27 +1432,78 @@ class SparkDataFrameParser:
             return format_zip(normalized)
         raise ValueError(f"Unsupported string format: {string_format.value}.")
 
-    @staticmethod
-    def _timestamp_candidate(normalized: Column, datetime_format: str) -> Column:
-        """Parse one timestamp format after any known full-token safety guard."""
-        parsed = F.try_to_timestamp(normalized, F.lit(datetime_format))
-        shape = BUILTIN_DATETIME_FORMAT_SHAPES.get(datetime_format)
-        if shape is None:
-            # DataFrame binding requires CORRECTED timeParserPolicy for custom patterns because the
-            # compiler cannot safely infer a complete regex for Spark's full pattern language.
-            return parsed
-        return F.when(normalized.rlike(shape), parsed).otherwise(F.lit(None).cast("timestamp"))
-
     @classmethod
-    def _timestamp_ntz_candidate(cls, normalized: Column, datetime_format: str) -> Column:
-        """Parse one local timestamp only after the tolerant timestamp probe succeeds."""
-        probed = cls._timestamp_candidate(normalized, datetime_format)
-        # to_timestamp_ntz is not itself a try-function. CaseWhen short-circuiting keeps it away
-        # from lexically invalid input and invalid calendar values rejected by the probe.
+    def _datetime_candidate(
+        cls, normalized_name: str, datetime_format: str, *, local: bool
+    ) -> Column:
+        """Parse a built-in spelling tolerantly, or a validated custom Spark pattern.
+
+        Explicit LTZ/NTZ types prevent spark.sql.timestampType from changing the contract.
+        Built-ins use try_cast after a full-token guard; unlike try_to_timestamp with a pattern,
+        it cannot raise a legacy/new-calendar disagreement under EXCEPTION timeParserPolicy.
+        """
+        normalized = _column(normalized_name)
+        shape = BUILTIN_DATETIME_FORMAT_SHAPES.get(datetime_format)
+        if shape is not None:
+            parsed = cls._builtin_datetime_candidate(normalized_name, datetime_format, local=local)
+            return F.when(normalized.rlike(shape), parsed)
+
+        # Binding requires CORRECTED policy and validates the custom pattern. The explicit schema
+        # gives an ANSI-safe LTZ conversion even when the session's default timestamp type is NTZ.
+        parsed = F.from_json(
+            F.to_json(F.struct(normalized.alias("value"))),
+            T.StructType([T.StructField("value", T.TimestampType())]),
+            {
+                "mode": "PERMISSIVE",
+                "timestampFormat": datetime_format,
+                "enableDateTimeParsingFallback": "false",
+            },
+        ).getField("value")
+        if not local:
+            return parsed
+        # Custom date formats may contain offsets. Validate the entire instant first, then retain
+        # the authored calendar fields with NTZ rather than converting the instant to a session day.
         return F.when(
-            probed.isNotNull(),
+            parsed.isNotNull(),
             F.to_timestamp_ntz(normalized, F.lit(datetime_format)),
-        ).otherwise(F.lit(None).cast("timestamp_ntz"))
+        )
+
+    @staticmethod
+    def _builtin_datetime_candidate(
+        normalized_name: str, datetime_format: str, *, local: bool
+    ) -> Column:
+        """Convert a guarded built-in spelling to ISO text and use an explicit tolerant cast.
+
+        SQL try_cast is available at the Spark 3.5 floor, before Column.try_cast was introduced.
+        Only a quoted generated column name and code-owned SQL fragments enter this expression;
+        source values and authored patterns are never interpolated into SQL.
+        """
+        source = "`" + normalized_name.replace("`", "``") + "`"
+        timestamp_type = "timestamp_ntz" if local else "timestamp_ltz"
+        if datetime_format in {
+            US_MONTH_FIRST_12_HOUR_FORMAT,
+            US_MONTH_FIRST_12_HOUR_SECONDS_FORMAT,
+        }:
+            hour = f"try_cast(regexp_extract({source}, ' ([0-9]+):', 1) AS INT)"
+            hour24 = f"pmod({hour}, 12) + CASE WHEN upper(right({source}, 2)) = 'PM' THEN 12 ELSE 0 END"
+            seconds = (
+                f"regexp_extract({source}, ':[0-9]{{2}}:([0-9]{{2}})', 1)"
+                if datetime_format == US_MONTH_FIRST_12_HOUR_SECONDS_FORMAT
+                else "'00'"
+            )
+            iso = (
+                f"concat(substring({source}, 7, 4), '-', substring({source}, 1, 2), '-', "
+                f"substring({source}, 4, 2), ' ', lpad(cast(({hour24}) AS STRING), 2, '0'), "
+                f"':', regexp_extract({source}, ':([0-9]{{2}})', 1), ':', {seconds})"
+            )
+            return F.expr(
+                f"CASE WHEN {hour} BETWEEN 1 AND 12 THEN try_cast({iso} AS {timestamp_type}) END"
+            )
+        parsed = F.expr(f"try_cast({source} AS {timestamp_type})")
+        if local and datetime_format == ISO_OFFSET_TIMESTAMP_FORMAT:
+            # NTZ casts ignore offsets; reject an invalid offset before retaining local fields.
+            return F.when(F.expr(f"try_cast({source} AS timestamp_ltz)").isNotNull(), parsed)
+        return parsed
 
     def _resolve_parse_error(
         self,
@@ -1496,7 +1546,11 @@ class SparkDataFrameParser:
         # target value; a count whose projection prunes the value may not evaluate it.
         return F.when(
             parse_failed,
-            F.raise_error(message).cast(column_config.expected_data_type),
+            F.raise_error(message).cast(
+                "timestamp_ltz"
+                if options.parser_type is ParserType.TIMESTAMP
+                else column_config.expected_data_type
+            ),
         ).otherwise(candidate)
 
     @staticmethod
@@ -1506,8 +1560,11 @@ class SparkDataFrameParser:
         options: ParserOptions,
     ) -> Column:
         """Convert a compiler-validated scalar default into a native Spark literal."""
+        runtime_type = (
+            "timestamp_ltz" if data_type.parser_type is ParserType.TIMESTAMP else data_type.canonical
+        )
         if value is None:
-            return F.lit(None).cast(data_type.canonical)
+            return F.lit(None).cast(runtime_type)
         if data_type.parser_type is ParserType.DATE:
             assert isinstance(value, date) and not isinstance(value, datetime)
             # Sending Python date/datetime objects through Py4J uses host-timezone/platform
@@ -1517,7 +1574,7 @@ class SparkDataFrameParser:
             assert isinstance(value, datetime)
             # Naive text is interpreted in spark.sql.session.timeZone, while an authored offset is
             # preserved for TimestampType. TimestampNTZ compilation rejects offsets.
-            return F.lit(value.isoformat(sep=" ")).cast(data_type.canonical)
+            return F.lit(value.isoformat(sep=" ")).cast(runtime_type)
         if data_type.parser_type is ParserType.BINARY:
             return F.try_to_binary(F.lit(value), F.lit(_BINARY_FORMATS[options.binary_encoding]))
         return F.lit(value).cast(data_type.canonical)
@@ -1642,6 +1699,10 @@ class SparkDataFrameParser:
         # Audit storage is always printable; binary values become base64 regardless of input encoding.
         if options.parser_type is ParserType.BINARY:
             parsed_value = F.base64(parsed)
+        elif options.parser_type is ParserType.DATE:
+            # Spark's LEGACY date-to-string formatter shifts days inside the Gregorian cutover.
+            # NTZ text uses the actual calendar fields and keeps audit evidence faithful to DateType.
+            parsed_value = F.substring_index(parsed.cast("timestamp_ntz").cast("string"), " ", 1)
         else:
             parsed_value = parsed.cast("string")
         return F.struct(

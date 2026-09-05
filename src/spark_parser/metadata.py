@@ -234,8 +234,8 @@ _SPECIFIC_BEHAVIORS = {
         "interest_rate_index_v1 canonicalizes an approved catalog of interest-rate labels and exact source aliases, including bounded compact tenors such as 12M and 1Yr; display labels omit cosmetic family/value separator hyphens.",
         "property_type_v1 canonicalizes approved loan-property labels, keeps Multifamily - LIHTC distinct from Multifamily, and restructures mixed-use values as Mixed Use followed by their retained, sentence-capitalized descriptors.",
         "pascal removes spaces after init-capitalization; it is intended for identifiers, not names.",
-        "address_us_v1 uses contextual USPS-style suffixes/directionals and smart-cases Mc, apostrophe, and hyphen names.",
-        "county smart-cases the name and ensures exactly one trailing 'County'.",
+        "address_us_v1 uses contextual USPS-style suffixes/directionals and smart-cases Mc, apostrophe, and hyphen names; punctuation-only tokens are removed before detecting unit identifiers.",
+        "county removes one existing trailing County suffix, smart-cases the name, and appends ' County'.",
         "state_us maps one or more comma-separated US state and territory names, postal codes, conventional state abbreviations, and Washington, DC to uppercase two-letter codes.",
         "zip parses one or more comma-separated ZIP5 or ZIP+4 values, retains string output, and pads short numeric components with leading zeroes.",
     ],
@@ -248,6 +248,7 @@ _SPECIFIC_BEHAVIORS = {
         "Formats cascade in order; format inference is not performed.",
         "The defaults accept an ISO date/local timestamp, a SQL-style local timestamp, or a US month-first 12-hour timestamp, with or without seconds, and return only the date.",
         "An explicitly configured offset-bearing format validates the offset but preserves the calendar date written in the source instead of projecting the instant through the Spark session timezone.",
+        "Date audit text preserves the parsed ISO calendar day, including historical dates under legacy SQL formatting settings.",
     ],
     ParserType.TIMESTAMP: [
         "Formats cascade in order; format inference is not performed.",
@@ -270,6 +271,8 @@ _SPECIFIC_GOTCHAS = {
         "county is for jurisdictions named County; it does not infer Parish, Borough, or Census Area.",
         "state_us includes the 50 states, Washington DC, AS, GU, MP, PR, and VI; other unknown non-null values are parse errors.",
         "state_us and zip treat a comma as a property-value separator and fail the whole value when any component is invalid.",
+        "Leading, trailing, or repeated list commas create invalid empty components; Washington, D.C. remains one state value.",
+        "property_type_v1 removes balanced parentheses enclosing a whole mixed-use component, including nested wrappers, while retaining internal or separate parenthesized groups.",
         "zip rejects compact six-to-eight-digit values instead of guessing a ZIP+4 split.",
     ],
     ParserType.DECIMAL: [
@@ -288,7 +291,8 @@ _SPECIFIC_GOTCHAS = {
         "on_parse_error; authored zero remains governed by zero_is_valid.",
     ],
     ParserType.BINARY: [
-        "parsed_value audit output is canonical base64 regardless of input encoding."
+        "parsed_value audit output is canonical base64 regardless of input encoding.",
+        "Base64 defaults use the same standard-alphabet and padding grammar as source tokens; missing or excess padding and whitespace are rejected. Empty defaults represent empty bytes.",
     ],
     ParserType.BOOLEAN: ["Unknown non-null tokens are parse errors, not false."],
     ParserType.DATE: [
@@ -298,7 +302,7 @@ _SPECIFIC_GOTCHAS = {
         "Formats outside the built-in guarded pattern set require spark.sql.legacy.timeParserPolicy=CORRECTED when binding a DataFrame.",
     ],
     ParserType.TIMESTAMP: [
-        "Timestamp interpretation follows the active Spark SQL session timezone.",
+        "The target is always Spark timestamp-with-local-time-zone, independently of spark.sql.timestampType; local inputs follow the session timezone and explicit offsets retain their instant.",
         "The built-in slash-date fallback is explicitly MM/dd/yyyy, not dd/MM/yyyy.",
         "Formats outside the built-in guarded pattern set require spark.sql.legacy.timeParserPolicy=CORRECTED when binding a DataFrame.",
     ],

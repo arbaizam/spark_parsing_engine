@@ -427,6 +427,10 @@ parser_config_id: system_property_types
 parser_config_name: System Property Types
 version: "1"
 columns:
+  - source_column_name: row_id
+    target_column_name: RowId
+    expected_data_type: string
+    parser: string
   - source_column_name: property_type
     target_column_name: PropertyType
     expected_data_type: string
@@ -453,10 +457,10 @@ columns:
         key_columns=["row_id"],
         column_prefix="system_property",
     )
-    property_rows = _rows_by_key(property_parsing.parsed_df, "PropertyType")
+    property_rows = _rows_by_key(property_parsing.parsed_df, "RowId")
     property_audit_rows = _audit_by_key(
         property_parsing.results_df,
-        "row_id",
+        "RowId",
         "system_property_parse_results",
     )
 
@@ -471,13 +475,13 @@ assert profile_rows["handled-errors-1"]["RateIndex"] == "NAP"
 assert profile_audit_rows["handled-errors-1"]["RateIndex"].actions_applied == [
     "parse_error_preserved"
 ]
-assert set(property_rows) == {
-    "Condominium",
-    "Four-Unit",
-    "Multifamily - LIHTC",
-    "Mixed Use - Warehouse",
-    "Mixed Use - Multifamily - Over 20",
-    "Storage",
+assert {row_id: row["PropertyType"] for row_id, row in property_rows.items()} == {
+    "condo": "Condominium",
+    "four": "Four-Unit",
+    "lihtc": "Multifamily - LIHTC",
+    "mixed": "Mixed Use - Warehouse",
+    "compound": "Mixed Use - Multifamily - Over 20",
+    "unknown": "Storage",
 }
 assert property_audit_rows["unknown"]["PropertyType"].actions_applied == ["parse_error_preserved"]
 

@@ -191,6 +191,8 @@ columns:                                   # [required] Non-empty ordered list.
       zero_is_valid: true
 
   # Binary parser. Audit values are always rendered as canonical base64.
+  # Base64 defaults require the same standard-alphabet and padding grammar as source tokens;
+  # missing/excess padding and whitespace are rejected. An empty default represents empty bytes.
   - source_column_name: binary_value
     target_column_name: BinaryValue
     expected_data_type: binary
@@ -234,6 +236,7 @@ columns:                                   # [required] Non-empty ordered list.
       boolean_case_sensitive: false         # [optional; default: false]
 
   # Date parser. Formats cascade in list order; the first successful parse wins.
+  # Parsed and audited calendar dates do not shift under legacy time-parser/formatting policies.
   - source_column_name: date_value
     target_column_name: DateValue
     expected_data_type: date
@@ -259,6 +262,8 @@ columns:                                   # [required] Non-empty ordered list.
         - "MM/dd/yyyy h:mm a"
         - "MM/dd/yyyy h:mm:ss a"
   # Timestamp parser. Formats cascade in list order; the first successful parse wins.
+  # The target is always timestamp-with-local-time-zone, regardless of spark.sql.timestampType.
+  # Local inputs use the session timezone; explicit offsets retain their instant.
   - source_column_name: timestamp_value
     target_column_name: TimestampValue
     expected_data_type: timestamp

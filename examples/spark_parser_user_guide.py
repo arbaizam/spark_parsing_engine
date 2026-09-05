@@ -18,6 +18,8 @@ import sys
 from decimal import Decimal
 from pathlib import Path
 
+from IPython.display import Markdown
+from IPython.display import display as display_markdown
 from pyspark.sql import functions as F
 from pyspark.sql import types as T
 
@@ -220,7 +222,7 @@ columns:
 review = parser.review_yaml(CONFIG_YAML)
 assert review.is_valid, review.errors
 assert not review.warnings, review.warnings
-displayHTML(review.to_markdown())
+display_markdown(Markdown(review.to_markdown()))
 
 config = parser.compile_text(CONFIG_YAML)
 resolved_mapping = parser.to_mapping(config)

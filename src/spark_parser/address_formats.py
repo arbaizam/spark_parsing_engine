@@ -10,6 +10,7 @@ from __future__ import annotations
 from pyspark.sql import Column
 from pyspark.sql import functions as F
 
+from spark_parser._spark_columns import string_map_lookup
 from spark_parser._text_patterns import (
     UNICODE_EDGE_WHITESPACE_PATTERN,
     UNICODE_LIST_DELIMITER_PATTERN,
@@ -263,12 +264,9 @@ _US_STATE_TOKENS = {
 
 def _map_lookup(mapping: dict[str, str], key: Column) -> Column:
     """Build a native Spark map lookup from a small code-owned Python dictionary."""
-    pairs: list[Column] = []
-    for source, target in mapping.items():
-        pairs.extend((F.lit(source), F.lit(target)))
     # ``element_at`` returns null when a token is not present. Later coalesce/when clauses use that
     # null to continue through the formatting precedence rules.
-    return F.element_at(F.create_map(*pairs), key)
+    return string_map_lookup(mapping.items(), key)
 
 
 def _clean_token(token: Column) -> Column:
@@ -287,12 +285,12 @@ def _smart_token(
     suffix_allowed: Column | None = None,
     previous_token: Column | None = None,
 ) -> Column:
-    """Format one token according to explicit, ordered address/name rules.
+    """Format one cleaned token according to explicit, ordered address/name rules.
 
     Rule order matters: named exceptions win first, then address vocabulary, then Mc casing,
     ordinals, unit identifiers, and finally general apostrophe/hyphen-aware title casing.
     """
-    cleaned = _clean_token(token)
+    cleaned = token
     exception = _map_lookup(_NAME_EXCEPTIONS, cleaned)
     mapped = F.lit(None).cast("string")
     if suffix_allowed is not None:
@@ -309,7 +307,7 @@ def _smart_token(
     mc_cased = F.concat(
         F.lit("Mc"),
         F.upper(F.substring(cleaned, 3, 1)),
-        F.substring(cleaned, 4, 1000),
+        F.substring(cleaned, 4, 2_147_483_647),
     )
     title_cased = F.concat_ws(
         "-",
@@ -323,7 +321,7 @@ def _smart_token(
             ),
         ),
     )
-    previous_cleaned = _clean_token(previous_token) if previous_token is not None else F.lit("")
+    previous_cleaned = previous_token if previous_token is not None else F.lit("")
     alphanumeric = cleaned.rlike(r"^(?=.*\d)(?=.*[a-z])[a-z0-9-]+$")
     unit_value = previous_cleaned.isin(*_UNIT_DESIGNATORS)
     hash_unit_value = cleaned.rlike(r"^#(?=.*\d)(?=.*[a-z])[a-z0-9-]+$")
@@ -333,7 +331,10 @@ def _smart_token(
         .when(mapped.isNotNull(), mapped)
         .when(cleaned.rlike(r"^mc[a-z].*"), mc_cased)
         .when(cleaned.rlike(r"^(?:\d+(?:st|nd|rd|th))$"), cleaned)
-        .when(hash_unit_value, F.concat(F.lit("#"), F.upper(F.substring(cleaned, 2, 1000))))
+        .when(
+            hash_unit_value,
+            F.concat(F.lit("#"), F.upper(F.substring(cleaned, 2, 2_147_483_647))),
+        )
         .when(unit_value & alphanumeric, F.upper(cleaned))
         .otherwise(title_cased)
     )
@@ -345,10 +346,15 @@ def format_address_us_v1(value: Column) -> Column:
     The input is expected to have already passed common whitespace normalization. Nulls remain
     null, and tokens made empty by comma/period cleanup are removed before joining the final value.
     """
-    tokens = F.split(value, UNICODE_WHITESPACE_PATTERN)
+    # Remove punctuation-only tokens before interpreting neighbors, so ``Apt , 4b`` retains the
+    # same unit context as ``Apt 4b``.
+    tokens = F.filter(
+        F.transform(F.split(value, UNICODE_WHITESPACE_PATTERN), _clean_token),
+        lambda token: token != "",
+    )
     # ``array_position(reverse(...))`` identifies the final suffix candidate without collecting
     # the token array. Spark array positions are one-based, while transform indices are zero-based.
-    suffix_flags = F.transform(tokens, lambda token: _clean_token(token).isin(*_SUFFIXES))
+    suffix_flags = F.transform(tokens, lambda token: token.isin(*_SUFFIXES))
     last_suffix_index = F.size(tokens) - F.array_position(F.reverse(suffix_flags), True)
     # Prepending an empty token lets every transformed token read its predecessor safely.
     padded_tokens = F.concat(F.array(F.lit("")), tokens)
@@ -360,12 +366,12 @@ def format_address_us_v1(value: Column) -> Column:
             previous_token=F.element_at(padded_tokens, index + F.lit(1)),
         ),
     )
-    formatted = F.concat_ws(" ", F.filter(formatted_tokens, lambda token: token != ""))
+    formatted = F.concat_ws(" ", formatted_tokens)
     return F.when(value.isNotNull(), formatted).otherwise(F.lit(None).cast("string"))
 
 
 def format_county(value: Column) -> Column:
-    """Return a smart-cased county name ending in exactly one ``County``.
+    """Remove one existing trailing ``County``, smart-case the name, and append ``County``.
 
     A value containing only the suffix has no meaningful county name and therefore returns null;
     the caller's configured parse-error policy decides whether that null fails, remains null, or
@@ -385,7 +391,7 @@ def format_county(value: Column) -> Column:
         F.filter(
             F.transform(
                 F.split(core, UNICODE_WHITESPACE_PATTERN),
-                lambda token: _smart_token(token),
+                lambda token: _smart_token(_clean_token(token)),
             ),
             lambda token: token != "",
         ),
@@ -407,11 +413,10 @@ def format_state_us(value: Column) -> Column:
 
     ``value`` is expected to have passed common whitespace normalization. Matching is
     case-insensitive for full names, USPS codes, common conventional abbreviations, and harmless
-    periods/commas. Comma-separated property values are parsed independently and rejoined with
+    periods. Comma-separated property values are parsed independently and rejoined with
     canonical ``, `` spacing. Unknown non-null values return null so the ordinary string parser
     error policy can fail, preserve the raw token, return null, or assign a configured default.
     """
-    scalar = _format_state_us_scalar(value)
     # Preserve the only supported state/DC spelling whose own punctuation contains the list
     # delimiter before splitting a multi-property field.
     list_source = F.regexp_replace(
@@ -429,10 +434,9 @@ def format_state_us(value: Column) -> Column:
     )
     parts = F.split(list_source, UNICODE_LIST_DELIMITER_PATTERN, -1)
     parsed_parts = F.transform(parts, lambda part: _format_state_us_scalar(_trim_whitespace(part)))
-    valid_list = (F.size(parts) > 1) & ~F.exists(parsed_parts, lambda part: part.isNull())
+    valid_parts = ~F.exists(parsed_parts, lambda part: part.isNull())
     return (
-        F.when(scalar.isNotNull(), scalar)
-        .when(valid_list, F.concat_ws(", ", parsed_parts))
+        F.when(valid_parts, F.concat_ws(", ", parsed_parts))
         .otherwise(F.lit(None).cast("string"))
     )
 

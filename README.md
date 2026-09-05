@@ -99,7 +99,8 @@ option.
 For a source-linked step-through of compilation, schema binding, lazy expression stages, policy
 order, and audit output, download the
 [Spark Parser execution explorer](docs/spark_parser_execution_explorer.html) and open it in a
-browser. It is pinned to code snapshot `7e5b110` and uses scenarios asserted by the test suite.
+browser. It is an archived view of code snapshot `7e5b110`, with scenarios verified at that snapshot;
+this README describes current behavior and subsequent corrections.
 
 ## Complex source-data boundary
 
@@ -311,11 +312,19 @@ target. A raw invalid string cannot inhabit a numeric, date, Boolean, timestamp,
 Numeric text is validated before conversion so malformed or non-finite tokens, and nonzero
 floating-point tokens that underflow to zero, follow the configured error policy under both ANSI
 and permissive Spark modes. Use `decimal(p,s)` when exact base-10 representation matters. Binary
-audit output is canonical base64 regardless of source encoding.
+audit output is canonical base64 regardless of source encoding. Binary defaults must already match
+the selected encoding. Base64 defaults use the same standard-alphabet and padding grammar as source
+tokens; missing or excess padding and whitespace are rejected. An empty binary default represents
+empty bytes.
 
 Datetime formats are Spark patterns, not Python `strptime` patterns. Formats cascade in list order.
 The built-in defaults cover ISO and the known US month-first 12-hour export; `timestamp_ntz`
 rejects offset-bearing inputs rather than silently discarding timezone meaning.
+The `timestamp` target always uses Spark's timestamp-with-local-time-zone type, independently of
+`spark.sql.timestampType`; local values use the session timezone and explicit offsets retain their
+instant. Built-in formats keep invalid calendar dates within the configured error policy under
+`CORRECTED`, `EXCEPTION`, and `LEGACY` time-parser policies. Custom formats require
+`spark.sql.legacy.timeParserPolicy=CORRECTED` when binding the DataFrame.
 
 ### String formats
 
@@ -415,8 +424,9 @@ Mixed-use values follow a structural rule instead of being collapsed into anothe
 The complete phrase `mixed use` or `mixed-use` is moved to the front as `Mixed Use`, and every
 remaining hyphen component is retained behind it with canonical ` - ` separators. Known tokens
 such as `Multifamily` and `LIHTC` use their catalog spelling; any unmatched component is trimmed,
-lowercased, and given an uppercase first letter. Parentheses wrapping an entire component are
-cosmetic and removed, while parentheses inside a longer component remain. For example:
+lowercased, and given an uppercase first letter. Balanced parentheses wrapping an entire component
+are cosmetic and removed, including nested wrappers; internal or separate parenthesized groups
+remain. Formatting an already normalized value keeps the same result. For example:
 
 - `Warehouse-Mixed use` becomes `Mixed Use - Warehouse`;
 - `Residential-Mixed Use` becomes `Mixed Use - Residential`; and
@@ -436,7 +446,8 @@ such as `1-4 family`, combined values such as `RE/Equipment`, and the distinct c
 whitespace, removes commas and periods from tokens, canonicalizes common USPS suffixes,
 directionals, and secondary-unit designators, and smart-cases `Mc`, apostrophe, and hyphen names.
 Alphanumeric values after a unit designator, including hash-prefixed values, are uppercased
-(`Apt #4b` → `Apt #4B`). Only the last suffix-like token is treated as a street suffix, so
+(`Apt #4b` → `Apt #4B`). Punctuation-only tokens are removed before checking that context, so
+`Apt , 4b` becomes `Apt 4B`. Only the last suffix-like token is treated as a street suffix, so
 `123 Center Street` becomes `123 Center St`, not `123 Ctr St`. The output uses punctuation-free
 suffixes such as `St`, not `St.`. This is display cleanup, not geocoding, postal validation, or a
 deliverability check.
@@ -450,8 +461,9 @@ infer that a parish, borough, municipality, or census area is a county.
 `state_us` recognizes the 50 states, Washington DC, and USPS territories `AS`, `GU`, `MP`, `PR`,
 and `VI` by full name or two-letter code. It also accepts an explicit set of conventional state
 abbreviations such as `Ill.`, `Calif.`, and `Wash.`. Matching is case-insensitive after whitespace
-normalization, and periods and commas are ignored during scalar lookup. Output is always the
-uppercase two-letter code; arbitrary abbreviation-like values are not inferred.
+normalization, and periods are ignored during scalar lookup. Commas separate values, with the
+explicit `Washington, D.C.` exception described below. Output is always the uppercase two-letter
+code; arbitrary abbreviation-like values are not inferred.
 
 ZIP values remain strings so leading zeroes survive:
 
@@ -465,8 +477,9 @@ ZIP values remain strings so leading zeroes survive:
 State and ZIP profiles also accept comma-separated property values. Components are normalized
 independently, kept in source order, and rejoined with canonical `, ` spacing; for example,
 `Illinois, tx` becomes `IL, TX` and `1234, 67890` becomes `01234, 67890`. `Washington, D.C.` is
-recognized as one DC value rather than split. If any component is empty or invalid, the entire
-field follows `on_parse_error`; partial lists are never returned. ZIP padding records
+recognized as one DC value rather than split. Leading, trailing, or repeated list commas create
+empty components. If any component is empty or invalid, the entire field follows `on_parse_error`;
+partial lists are never returned. ZIP padding records
 `zip_padded`, while inserting or changing ZIP+4 formatting records `zip_plus4_formatted`.
 
 ## Compile-time and DataFrame validation
@@ -565,7 +578,9 @@ unneeded diagnostic fields before writing other outputs.
 Each audit struct has `source_column_name`, `target_column_name`, `parser_type`,
 `expected_data_type`, `original_value`, `parsed_value`, `changed`, `effective`, `actions_applied`,
 `options`, and `error`. `parsed_value` is text, except binary values are represented as canonical
-base64. `changed` is true when a material null, default, error, missing-source, zero, or ZIP action
+base64. Date audit values retain the parsed ISO calendar day even under legacy SQL formatting
+settings around the Gregorian cutover. `changed` is true when a material null, default, error,
+missing-source, zero, or ZIP action
 occurs, or when a string parser's final text differs from its source. The audit schema intentionally
 has no nested child-path fields.
 

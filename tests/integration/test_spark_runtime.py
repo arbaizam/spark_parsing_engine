@@ -10,10 +10,8 @@ from unittest.mock import Mock
 import pytest
 
 from spark_parser import (
-    DataFrameParsing,
     SchemaValidationError,
     SchemaWarning,
-    SparkDataFrameParser,
     YamlParserConfigCompiler,
 )
 from spark_parser import parser as public_parser
@@ -34,6 +32,7 @@ from pyspark.sql import SparkSession  # noqa: E402
 from pyspark.sql import functions as F  # noqa: E402
 from pyspark.sql.utils import is_remote  # noqa: E402
 
+from spark_parser import DataFrameParsing, SparkDataFrameParser  # noqa: E402
 from spark_parser.spark_runtime import _is_invalid_datetime_pattern_error  # noqa: E402
 
 pytestmark = pytest.mark.spark

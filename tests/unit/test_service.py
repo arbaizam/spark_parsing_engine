@@ -245,6 +245,13 @@ def test_invalid_config_review_returns_errors_instead_of_raising() -> None:
     assert report.to_mapping()["errors"] == list(report.errors)
     assert "Validation status:** FAIL" in report.to_markdown()
 
+    unsupported_source = parser.review_yaml(123)  # type: ignore[arg-type]
+    assert unsupported_source.is_valid is False
+    assert unsupported_source.source is None
+    assert unsupported_source.errors == (
+        "YAML source must be text, a pathlib.Path, or a mapping.",
+    )
+
 
 def test_config_validation_collects_independent_errors_in_deterministic_order() -> None:
     invalid_yaml = """

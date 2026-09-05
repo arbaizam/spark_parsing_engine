@@ -2,6 +2,22 @@
 
 ## 0.5.0
 
+- Keep configured `timestamp` targets as timestamp-with-local-time-zone even when
+  `spark.sql.timestampType=TIMESTAMP_NTZ`, preserving explicit source offsets. Route invalid
+  historical calendar dates in built-in formats through the configured error policy under
+  `CORRECTED`, `EXCEPTION`, and `LEGACY` time-parser settings.
+- Render date audit values as ISO calendar dates without legacy formatting shifts around the
+  Gregorian cutover, preserving the actual parsed day in diagnostic evidence.
+- Reject empty state-list components instead of accepting leading, trailing, or repeated commas;
+  retain the supported `Washington, D.C.` spelling as one value. Remove punctuation-only address
+  tokens before applying unit context, so `Apt , 4b` becomes `Apt 4B`.
+- Remove balanced enclosing parentheses from mixed-use components, including padded and nested
+  wrappers, while retaining internal and separate groups and keeping repeated formatting stable.
+- Validate Base64 defaults with the same token grammar as source decoding, rejecting missing or
+  excess padding consistently across supported Python versions.
+- Simplify invalid configuration-review construction, display the guide's report as Markdown,
+  and assert system property-profile outputs by fixture identity. Check full test collection and
+  installed-wheel authoring APIs in environments without PySpark.
 - Narrow the package contract to top-level bronze strings and scalar Spark targets. Configured
   `array`, `struct`, and `map` parsing is intentionally removed; decode or flatten complex input
   upstream, parse its scalar leaves, and reconstruct complex output downstream when needed.

@@ -7,6 +7,7 @@ import re
 from pyspark.sql import Column
 from pyspark.sql import functions as F
 
+from spark_parser._spark_columns import string_map_lookup
 from spark_parser._text_patterns import (
     UNICODE_EDGE_WHITESPACE_PATTERN,
     UNICODE_WHITESPACE_PATTERN,
@@ -163,7 +164,8 @@ _MULTIFAMILY_LIHTC_FRAGMENT_PATTERN = (
     rf"(?!{_TOKEN_CHARACTER_CLASS})"
 )
 _FIVE_OR_MORE_UNITS_PATTERN = r"^(?:[5-9]|[1-9][0-9]+)[ -]?units?$"
-_WRAPPED_MIXED_FRAGMENT_PATTERN = r"^\((.*)\)$"
+_LEADING_MIXED_WRAPPERS_PATTERN = r"^(?:\( *)+"
+_TRAILING_MIXED_WRAPPERS_PATTERN = r"(?: *\))+$"
 _FIRST_LETTER_PATTERN = r"\p{L}"
 _FIRST_LETTER_CAPTURE_PATTERN = r"(?s)^([^\p{L}]*)(\p{L})(.*)$"
 _MIXED_FRAGMENT_EXCEPTIONS = (
@@ -231,11 +233,52 @@ def _comparison_key(value: Column) -> Column:
 
 
 def _clean_mixed_fragment(value: Column) -> Column:
-    """Remove only delimiters adjacent to the extracted Mixed Use phrase."""
-    cleaned = F.regexp_replace(value, UNICODE_WHITESPACE_PATTERN, " ")
-    cleaned = F.regexp_replace(cleaned, UNICODE_EDGE_WHITESPACE_PATTERN, "")
-    cleaned = F.regexp_replace(cleaned, _MIXED_FRAGMENT_EDGE_DELIMITERS, "")
-    return F.regexp_replace(cleaned, UNICODE_EDGE_WHITESPACE_PATTERN, "")
+    """Trim delimiters from a fragment whose whitespace was already normalized."""
+    return F.regexp_replace(value, _MIXED_FRAGMENT_EDGE_DELIMITERS, "")
+
+
+def _unwrap_mixed_component(value: Column) -> Column:
+    """Remove balanced enclosing parentheses while retaining separate or unmatched groups."""
+    leading = F.regexp_extract(value, _LEADING_MIXED_WRAPPERS_PATTERN, 0)
+    trailing = F.regexp_extract(value, _TRAILING_MIXED_WRAPPERS_PATTERN, 0)
+    opening_count = F.length(F.regexp_replace(leading, " ", ""))
+    closing_count = F.length(F.regexp_replace(trailing, " ", ""))
+    interior = F.regexp_replace(
+        value,
+        _LEADING_MIXED_WRAPPERS_PATTERN + "|" + _TRAILING_MIXED_WRAPPERS_PATTERN,
+        "",
+    )
+
+    def scan(state: Column, character: Column) -> Column:
+        depth = state["depth"] + (
+            F.when(character == "(", 1).when(character == ")", -1).otherwise(0)
+        )
+        return F.struct(
+            depth.alias("depth"),
+            F.least(state["minimum"], depth).alias("minimum"),
+        )
+
+    def unwrap(state: Column) -> Column:
+        # A wrapper must enclose the entire component. The minimum interior nesting depth
+        # distinguishes ``((Office))`` from ``(Office) & (Retail)`` and handles nested groups.
+        balanced = (state["depth"] == closing_count) & (state["minimum"] >= 0)
+        layers = F.when(
+            balanced, F.least(opening_count, closing_count, state["minimum"])
+        ).otherwise(0)
+        wrapper_pattern = F.concat(
+            F.lit(r"^(?:\( *){"), layers, F.lit(r"}|(?: *\)){"), layers, F.lit(r"}$")
+        )
+        return F.trim(F.regexp_replace(value, wrapper_pattern, ""))
+
+    return F.when(
+        (opening_count > 0) & (closing_count > 0),
+        F.aggregate(
+            F.regexp_extract_all(interior, F.lit(r"(?s)."), 0),
+            F.struct(opening_count.alias("depth"), opening_count.alias("minimum")),
+            scan,
+            unwrap,
+        ),
+    ).otherwise(value)
 
 
 def _format_mixed_fragment(value: Column) -> Column:
@@ -251,14 +294,11 @@ def _format_mixed_fragment(value: Column) -> Column:
         _MULTIFAMILY_LIHTC_FRAGMENT_PATTERN,
         "multifamily-lihtc",
     )
-    parts = F.filter(
-        F.split(normalized, r" *-+ *", -1),
-        lambda part: F.length(part) > F.lit(0),
-    )
+    parts = F.split(normalized, r" *-+ *", -1)
 
     def format_component(part: Column) -> Column:
         """Remove cosmetic wrapping parentheses and uppercase the first actual letter."""
-        unwrapped = F.regexp_replace(part, _WRAPPED_MIXED_FRAGMENT_PATTERN, "$1")
+        unwrapped = _unwrap_mixed_component(part)
         return F.when(
             unwrapped.rlike(_FIRST_LETTER_PATTERN),
             F.concat(
@@ -272,7 +312,10 @@ def _format_mixed_fragment(value: Column) -> Column:
 
     formatted = F.concat_ws(
         " - ",
-        F.transform(parts, format_component),
+        F.filter(
+            F.transform(parts, format_component),
+            lambda part: F.length(part) > F.lit(0),
+        ),
     )
     for source, target in _MIXED_FRAGMENT_EXCEPTIONS:
         formatted = F.regexp_replace(formatted, _complete_token_pattern(source), target)
@@ -313,11 +356,8 @@ def _mixed_use_candidate(value: Column) -> tuple[Column, Column]:
 
 def format_property_type_v1(value: Column) -> Column:
     """Return a canonical property type, a structured Mixed Use value, or null if unknown."""
-    pairs: list[Column] = []
-    for alias, canonical in _PROPERTY_TYPE_CATALOG:
-        pairs.extend((F.lit(alias), F.lit(canonical)))
     key = _comparison_key(value)
-    catalog_candidate = F.element_at(F.create_map(*pairs), key)
+    catalog_candidate = string_map_lookup(_PROPERTY_TYPE_CATALOG, key)
     ordinary_candidate = F.coalesce(
         catalog_candidate,
         F.when(key.rlike(_FIVE_OR_MORE_UNITS_PATTERN), F.lit("Multifamily")),

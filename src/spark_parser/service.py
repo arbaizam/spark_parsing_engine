@@ -442,25 +442,13 @@ class SparkParserService:
         Only expected input/compilation failures are converted into an invalid report. Programming
         errors outside that boundary should still surface normally rather than being hidden.
         """
-        source_label: str | None = None
         try:
             config, source_label = self._compile_source(source)
-        except CompilationError as exc:
+        except (CompilationError, TypeError, ValueError, OSError) as exc:
             return ConfigReviewReport(
                 is_valid=False,
-                source=source_label or self._source_label(source),
-                errors=exc.errors,
-                warnings=(),
-                summary={},
-                validation_checks=(),
-                column_reviews=(),
-                resolved_config=None,
-            )
-        except (TypeError, ValueError, OSError) as exc:
-            return ConfigReviewReport(
-                is_valid=False,
-                source=source_label or self._source_label(source),
-                errors=(str(exc),),
+                source=self._source_label(source),
+                errors=exc.errors if isinstance(exc, CompilationError) else (str(exc),),
                 warnings=(),
                 summary={},
                 validation_checks=(),

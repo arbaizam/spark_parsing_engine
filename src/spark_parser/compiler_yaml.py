@@ -7,8 +7,6 @@ without defensive revalidation. Compilation never requires a Spark session.
 
 from __future__ import annotations
 
-import base64
-import binascii
 import math
 import re
 import reprlib
@@ -24,6 +22,7 @@ from typing import Any, TypeVar
 
 import yaml
 
+from spark_parser._binary_patterns import BASE64_TOKEN_PATTERN
 from spark_parser.data_types import SparkDataType, canonical_type_name, parse_spark_data_type
 from spark_parser.defaults import (
     DEFAULT_AUDIT,
@@ -157,6 +156,25 @@ class _ParseErrorValidation:
     mode: ParseErrorMode
     value: Any
     value_valid: bool
+
+
+@dataclass(frozen=True)
+class _BooleanVocabulary:
+    """One local vocabulary and the authoring state needed by dependent checks."""
+
+    values: tuple[str, ...]
+    valid: bool
+    supplied: bool
+
+
+@dataclass(frozen=True)
+class _BooleanValidation:
+    """Resolved Boolean options, including inherited vocabulary and comparison policy."""
+
+    true_values: tuple[str, ...] = DEFAULT_BOOLEAN_TRUE_VALUES
+    false_values: tuple[str, ...] = DEFAULT_BOOLEAN_FALSE_VALUES
+    case_sensitive: bool = DEFAULT_BOOLEAN_CASE_SENSITIVE
+    mode: BooleanValuesMode = DEFAULT_BOOLEAN_VALUES_MODE
 
 
 # Spark integer types have fixed signed ranges. Python integers do not overflow, which means these
@@ -743,12 +761,7 @@ class YamlParserConfigCompiler:
             else ()
         )
         formats = () if formats_result is _MISSING else formats_result
-        (
-            true_values,
-            false_values,
-            boolean_case_sensitive,
-            boolean_values_mode,
-        ) = self._compile_boolean_values(
+        boolean_options = self._compile_boolean_values(
             payload,
             parser_type,
             target_column_name,
@@ -820,10 +833,10 @@ class YamlParserConfigCompiler:
             zero_is_valid=zero_is_valid,
             string_format=string_format,
             formats=formats,
-            true_values=true_values,
-            false_values=false_values,
-            boolean_case_sensitive=boolean_case_sensitive,
-            boolean_values_mode=boolean_values_mode,
+            true_values=boolean_options.true_values,
+            false_values=boolean_options.false_values,
+            boolean_case_sensitive=boolean_options.case_sensitive,
+            boolean_values_mode=boolean_options.mode,
             binary_encoding=binary_encoding,
         )
 
@@ -1055,11 +1068,7 @@ class YamlParserConfigCompiler:
             ("default_on_null", null_default),
             ("default_on_error", parse_error),
         ):
-            if (
-                default.value_valid
-                and default.value is not None
-                and Decimal(str(default.value)) == 0
-            ):
+            if default.value_valid and default.value is not None and default.value == 0:
                 collector.add(
                     f"{path}.{label}",
                     f"Column {target_column_name!r} rejects zero but uses zero as {label}.",
@@ -1075,7 +1084,8 @@ class YamlParserConfigCompiler:
         """Validate one binary default so sibling defaults can be checked independently."""
         try:
             if encoding is BinaryEncoding.BASE64:
-                base64.b64decode(value, validate=True)
+                if re.fullmatch(BASE64_TOKEN_PATTERN, value) is None:
+                    raise ValueError("not padded standard Base64 text")
             elif encoding is BinaryEncoding.HEX:
                 # Spark's ``unhex`` accepts empty and odd-length hexadecimal strings (padding the
                 # leading nibble) but rejects whitespace. ``bytes.fromhex`` has the inverse edge
@@ -1084,7 +1094,7 @@ class YamlParserConfigCompiler:
                     raise ValueError("not Spark hexadecimal text")
             else:
                 value.encode("utf-8")
-        except (ValueError, UnicodeError, binascii.Error) as exc:
+        except ValueError as exc:
             raise CompilationError(f"{label} is not valid {encoding.value} binary text.") from exc
 
     @staticmethod
@@ -1105,15 +1115,12 @@ class YamlParserConfigCompiler:
             "default_on_error",
             "audit",
         }
+        if parser_type in NUMERIC_PARSER_TYPES:
+            return common | {"zero_is_valid"}
+        if parser_type in {ParserType.DATE, ParserType.TIMESTAMP, ParserType.TIMESTAMP_NTZ}:
+            return common | {"formats"}
         specific = {
             ParserType.STRING: {"format"},
-            ParserType.BYTE: {"zero_is_valid"},
-            ParserType.SHORT: {"zero_is_valid"},
-            ParserType.INTEGER: {"zero_is_valid"},
-            ParserType.LONG: {"zero_is_valid"},
-            ParserType.FLOAT: {"zero_is_valid"},
-            ParserType.DECIMAL: {"zero_is_valid"},
-            ParserType.DOUBLE: {"zero_is_valid"},
             ParserType.BINARY: {"encoding"},
             ParserType.BOOLEAN: {
                 "true_values",
@@ -1121,9 +1128,6 @@ class YamlParserConfigCompiler:
                 "boolean_case_sensitive",
                 "boolean_values_mode",
             },
-            ParserType.DATE: {"formats"},
-            ParserType.TIMESTAMP: {"formats"},
-            ParserType.TIMESTAMP_NTZ: {"formats"},
         }
         return common | specific[parser_type]
 
@@ -1172,6 +1176,26 @@ class YamlParserConfigCompiler:
                 )
         return formats
 
+    def _compile_boolean_vocabulary(
+        self,
+        payload: Mapping[str, Any],
+        key: str,
+        parser_path: str,
+        collector: _IssueCollector,
+    ) -> _BooleanVocabulary:
+        """Validate one optional local list without losing whether it was authored."""
+        if key not in payload:
+            return _BooleanVocabulary((), valid=True, supplied=False)
+        result = collector.capture(
+            f"{parser_path}.{key}",
+            lambda: self._string_sequence(payload[key], key, allow_empty_values=False),
+        )
+        return _BooleanVocabulary(
+            () if result is _MISSING else result,
+            valid=result is not _MISSING,
+            supplied=True,
+        )
+
     def _compile_boolean_values(
         self,
         payload: Mapping[str, Any],
@@ -1180,15 +1204,10 @@ class YamlParserConfigCompiler:
         globals_validation: _GlobalsValidation,
         parser_path: str,
         collector: _IssueCollector,
-    ) -> tuple[tuple[str, ...], tuple[str, ...], bool, BooleanValuesMode]:
+    ) -> _BooleanValidation:
         """Resolve Boolean tokens while suppressing checks with invalid prerequisites."""
         if parser_type is not ParserType.BOOLEAN:
-            return (
-                DEFAULT_BOOLEAN_TRUE_VALUES,
-                DEFAULT_BOOLEAN_FALSE_VALUES,
-                DEFAULT_BOOLEAN_CASE_SENSITIVE,
-                DEFAULT_BOOLEAN_VALUES_MODE,
-            )
+            return _BooleanValidation()
         globals_config = globals_validation.config
         mode_result = collector.capture(
             f"{parser_path}.boolean_values_mode",
@@ -1200,42 +1219,20 @@ class YamlParserConfigCompiler:
         )
         mode_valid = mode_result is not _MISSING
         mode = mode_result if mode_valid else DEFAULT_BOOLEAN_VALUES_MODE
-        supplied_true = "true_values" in payload
-        supplied_false = "false_values" in payload
-        if "boolean_values_mode" in payload and not (supplied_true or supplied_false):
+        if "boolean_values_mode" in payload and not (
+            "true_values" in payload or "false_values" in payload
+        ):
             collector.add(
                 f"{parser_path}.boolean_values_mode",
                 f"boolean_values_mode for {target_column_name!r} requires true_values "
                 "or false_values.",
             )
-        column_true_result = (
-            collector.capture(
-                f"{parser_path}.true_values",
-                lambda: self._string_sequence(
-                    payload["true_values"],
-                    "true_values",
-                    allow_empty_values=False,
-                ),
-            )
-            if supplied_true
-            else ()
+        column_true = self._compile_boolean_vocabulary(
+            payload, "true_values", parser_path, collector
         )
-        column_false_result = (
-            collector.capture(
-                f"{parser_path}.false_values",
-                lambda: self._string_sequence(
-                    payload["false_values"],
-                    "false_values",
-                    allow_empty_values=False,
-                ),
-            )
-            if supplied_false
-            else ()
+        column_false = self._compile_boolean_vocabulary(
+            payload, "false_values", parser_path, collector
         )
-        column_true_valid = column_true_result is not _MISSING
-        column_false_valid = column_false_result is not _MISSING
-        column_true = column_true_result if column_true_valid else ()
-        column_false = column_false_result if column_false_valid else ()
         case_sensitive_result = collector.capture(
             f"{parser_path}.boolean_case_sensitive",
             lambda: self._bool(
@@ -1257,12 +1254,17 @@ class YamlParserConfigCompiler:
         )
 
         supplied_overlap_valid = True
-        if supplied_true and supplied_false and column_true_valid and column_false_valid:
+        if (
+            column_true.supplied
+            and column_false.supplied
+            and column_true.valid
+            and column_false.valid
+        ):
             supplied_overlap_result = collector.capture(
                 parser_path,
                 lambda: self._validate_boolean_overlap(
-                    column_true,
-                    column_false,
+                    column_true.values,
+                    column_false.values,
                     case_sensitive if case_sensitive_valid else True,
                     f"target column {target_column_name!r}",
                 ),
@@ -1270,26 +1272,30 @@ class YamlParserConfigCompiler:
             supplied_overlap_valid = supplied_overlap_result is not _MISSING
         if mode is BooleanValuesMode.EXTEND:
             # Ordered de-duplication keeps serialization and report precedence deterministic.
-            true_values = self._deduplicate((*globals_config.true_values, *column_true))
-            false_values = self._deduplicate((*globals_config.false_values, *column_false))
+            true_values = self._deduplicate((*globals_config.true_values, *column_true.values))
+            false_values = self._deduplicate((*globals_config.false_values, *column_false.values))
             true_values_valid = (
                 mode_valid
                 and globals_validation.true_values_valid
-                and (not supplied_true or column_true_valid)
+                and (not column_true.supplied or column_true.valid)
             )
             false_values_valid = (
                 mode_valid
                 and globals_validation.false_values_valid
-                and (not supplied_false or column_false_valid)
+                and (not column_false.supplied or column_false.valid)
             )
         else:
-            true_values = column_true if supplied_true else globals_config.true_values
-            false_values = column_false if supplied_false else globals_config.false_values
+            true_values = column_true.values if column_true.supplied else globals_config.true_values
+            false_values = (
+                column_false.values if column_false.supplied else globals_config.false_values
+            )
             true_values_valid = mode_valid and (
-                column_true_valid if supplied_true else globals_validation.true_values_valid
+                column_true.valid if column_true.supplied else globals_validation.true_values_valid
             )
             false_values_valid = mode_valid and (
-                column_false_valid if supplied_false else globals_validation.false_values_valid
+                column_false.valid
+                if column_false.supplied
+                else globals_validation.false_values_valid
             )
         vocabularies_nonempty = not (
             (true_values_valid and not true_values) or (false_values_valid and not false_values)
@@ -1310,7 +1316,10 @@ class YamlParserConfigCompiler:
             )
             and (
                 mode is BooleanValuesMode.EXTEND
-                or ("boolean_values_mode" not in payload and not (supplied_true or supplied_false))
+                or (
+                    "boolean_values_mode" not in payload
+                    and not (column_true.supplied or column_false.supplied)
+                )
             )
         )
         if should_recheck_inherited_case:
@@ -1336,7 +1345,7 @@ class YamlParserConfigCompiler:
         if (
             mode_valid
             and mode is BooleanValuesMode.REPLACE
-            and (supplied_true or supplied_false)
+            and (column_true.supplied or column_false.supplied)
             and true_values_valid
             and false_values_valid
             and vocabularies_nonempty
@@ -1351,17 +1360,13 @@ class YamlParserConfigCompiler:
                     f"target column {target_column_name!r}",
                 ),
             )
+        comparison_is_case_sensitive = case_sensitive if case_sensitive_valid else True
         if mode_valid and mode is BooleanValuesMode.EXTEND:
             self._validate_extended_boolean_additions(
                 column_true=column_true,
                 column_false=column_false,
-                column_true_valid=column_true_valid,
-                column_false_valid=column_false_valid,
-                supplied_true=supplied_true,
-                supplied_false=supplied_false,
                 globals_validation=globals_validation,
-                case_sensitive=case_sensitive,
-                case_sensitive_valid=case_sensitive_valid,
+                case_sensitive=comparison_is_case_sensitive,
                 target_column_name=target_column_name,
                 parser_path=parser_path,
                 collector=collector,
@@ -1370,37 +1375,26 @@ class YamlParserConfigCompiler:
             self._validate_indeterminate_boolean_mode_overlap(
                 column_true=column_true,
                 column_false=column_false,
-                column_true_valid=column_true_valid,
-                column_false_valid=column_false_valid,
-                supplied_true=supplied_true,
-                supplied_false=supplied_false,
                 globals_validation=globals_validation,
-                case_sensitive=case_sensitive,
-                case_sensitive_valid=case_sensitive_valid,
+                case_sensitive=comparison_is_case_sensitive,
                 target_column_name=target_column_name,
                 parser_path=parser_path,
                 collector=collector,
             )
-        return true_values, false_values, case_sensitive, mode
+        return _BooleanValidation(true_values, false_values, case_sensitive, mode)
 
     def _validate_extended_boolean_additions(
         self,
         *,
-        column_true: tuple[str, ...],
-        column_false: tuple[str, ...],
-        column_true_valid: bool,
-        column_false_valid: bool,
-        supplied_true: bool,
-        supplied_false: bool,
+        column_true: _BooleanVocabulary,
+        column_false: _BooleanVocabulary,
         globals_validation: _GlobalsValidation,
         case_sensitive: bool,
-        case_sensitive_valid: bool,
         target_column_name: str,
         parser_path: str,
         collector: _IssueCollector,
     ) -> None:
         """Report cross-overlap introduced by EXTEND even when a global sibling is invalid."""
-        comparison_is_case_sensitive = case_sensitive if case_sensitive_valid else True
         inherited_true = (
             globals_validation.config.true_values if globals_validation.true_values_valid else ()
         )
@@ -1408,40 +1402,45 @@ class YamlParserConfigCompiler:
             globals_validation.config.false_values if globals_validation.false_values_valid else ()
         )
         new_column_true = self._boolean_additions(
-            column_true,
+            column_true.values,
             inherited_true,
-            comparison_is_case_sensitive,
+            case_sensitive,
         )
         new_column_false = self._boolean_additions(
-            column_false,
+            column_false.values,
             inherited_false,
-            comparison_is_case_sensitive,
+            case_sensitive,
         )
         overlap: set[str] = set()
-        if supplied_true and column_true_valid and globals_validation.false_values_valid:
+        if column_true.supplied and column_true.valid and globals_validation.false_values_valid:
             overlap.update(
                 self._boolean_overlap_values(
                     new_column_true,
                     globals_validation.config.false_values,
-                    comparison_is_case_sensitive,
+                    case_sensitive,
                 )
             )
-        if supplied_false and column_false_valid and globals_validation.true_values_valid:
+        if column_false.supplied and column_false.valid and globals_validation.true_values_valid:
             overlap.update(
                 self._boolean_overlap_values(
                     globals_validation.config.true_values,
                     new_column_false,
-                    comparison_is_case_sensitive,
+                    case_sensitive,
                 )
             )
-        if supplied_true and supplied_false and column_true_valid and column_false_valid:
+        if (
+            column_true.supplied
+            and column_false.supplied
+            and column_true.valid
+            and column_false.valid
+        ):
             # A direct local overlap was already reported above; keep this diagnostic specific to
             # additional inherited/local interactions so the same finding is not emitted twice.
             overlap.difference_update(
                 self._boolean_overlap_values(
-                    column_true,
-                    column_false,
-                    comparison_is_case_sensitive,
+                    column_true.values,
+                    column_false.values,
+                    case_sensitive,
                 )
             )
         if overlap:
@@ -1472,15 +1471,10 @@ class YamlParserConfigCompiler:
     def _validate_indeterminate_boolean_mode_overlap(
         self,
         *,
-        column_true: tuple[str, ...],
-        column_false: tuple[str, ...],
-        column_true_valid: bool,
-        column_false_valid: bool,
-        supplied_true: bool,
-        supplied_false: bool,
+        column_true: _BooleanVocabulary,
+        column_false: _BooleanVocabulary,
         globals_validation: _GlobalsValidation,
         case_sensitive: bool,
-        case_sensitive_valid: bool,
         target_column_name: str,
         parser_path: str,
         collector: _IssueCollector,
@@ -1491,15 +1485,19 @@ class YamlParserConfigCompiler:
         false sides overlap, extension can only retain that overlap, so the issue does not depend
         on which valid mode the author intended.
         """
-        if not (supplied_true or supplied_false):
+        if not (column_true.supplied or column_false.supplied):
             return
-        true_values = column_true if supplied_true else globals_validation.config.true_values
-        false_values = column_false if supplied_false else globals_validation.config.false_values
+        true_values = (
+            column_true.values if column_true.supplied else globals_validation.config.true_values
+        )
+        false_values = (
+            column_false.values if column_false.supplied else globals_validation.config.false_values
+        )
         true_values_valid = (
-            column_true_valid if supplied_true else globals_validation.true_values_valid
+            column_true.valid if column_true.supplied else globals_validation.true_values_valid
         )
         false_values_valid = (
-            column_false_valid if supplied_false else globals_validation.false_values_valid
+            column_false.valid if column_false.supplied else globals_validation.false_values_valid
         )
         if not true_values_valid or not false_values_valid or not true_values or not false_values:
             return
@@ -1508,7 +1506,7 @@ class YamlParserConfigCompiler:
             lambda: self._validate_boolean_overlap(
                 true_values,
                 false_values,
-                case_sensitive if case_sensitive_valid else True,
+                case_sensitive,
                 f"target column {target_column_name!r}",
             ),
         )

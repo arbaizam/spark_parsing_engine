@@ -7,6 +7,7 @@ import re
 from pyspark.sql import Column
 from pyspark.sql import functions as F
 
+from spark_parser._spark_columns import string_map_lookup
 from spark_parser._text_patterns import (
     UNICODE_EDGE_WHITESPACE_PATTERN,
     UNICODE_WHITESPACE_PATTERN,
@@ -176,7 +177,4 @@ def _comparison_key(value: Column) -> Column:
 
 def format_interest_rate_index_v1(value: Column) -> Column:
     """Return a canonical approved interest-rate label, or null for an unknown value."""
-    pairs: list[Column] = []
-    for alias, canonical in _INTEREST_RATE_INDEX_CATALOG:
-        pairs.extend((F.lit(alias), F.lit(canonical)))
-    return F.element_at(F.create_map(*pairs), _comparison_key(value))
+    return string_map_lookup(_INTEREST_RATE_INDEX_CATALOG, _comparison_key(value))
